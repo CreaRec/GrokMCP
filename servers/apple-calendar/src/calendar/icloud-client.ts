@@ -1,4 +1,4 @@
-import { createDAVClient, type DAVObject } from "tsdav";
+import { createDAVClient, type DAVCalendar, type DAVObject } from "tsdav";
 import {
   buildVEventIcs,
   defaultEventEnd,
@@ -9,6 +9,60 @@ import {
   type ParsedCalendarEvent,
 } from "./ics.js";
 import { mergeEventDescription } from "./event-description.js";
+
+export interface ReminderList {
+  name: string;
+  href: string;
+  components: string[];
+}
+
+export interface ListReminderListsResult {
+  lists: ReminderList[];
+}
+
+export function parseComponentTypes(calendar: DAVCalendar): string[] {
+  const components: string[] = [];
+  const supportedComponents = calendar.components;
+  if (supportedComponents && Array.isArray(supportedComponents)) {
+    for (const comp of supportedComponents) {
+      if (typeof comp === "string") {
+        components.push(comp.toUpperCase());
+      }
+    }
+  }
+  return components;
+}
+
+export function supportsVTODO(components: string[]): boolean {
+  return components.includes("VTODO");
+}
+
+export function filterReminderLists(
+  calendars: DAVCalendar[],
+  includeCalendars: boolean = false,
+): ReminderList[] {
+  const lists: ReminderList[] = [];
+
+  for (const calendar of calendars) {
+    const components = parseComponentTypes(calendar);
+    const hasVTODO = supportsVTODO(components);
+    const hasVEVENT = components.includes("VEVENT");
+
+    if (hasVTODO || (includeCalendars && hasVEVENT)) {
+      const name =
+        typeof calendar.displayName === "string"
+          ? calendar.displayName
+          : "Untitled";
+      lists.push({
+        name,
+        href: calendar.url,
+        components,
+      });
+    }
+  }
+
+  return lists;
+}
 
 export type CalendarClientResult<T> =
   | { ok: true; data: T }
@@ -481,6 +535,22 @@ export class TsdavICloudCalendarClient implements ICloudCalendarClient {
         return { ok: true, data: null };
       }
       return { ok: true, data: { event } };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  async fetchReminderLists(
+    includeCalendars: boolean = false,
+  ): Promise<CalendarClientResult<ListReminderListsResult>> {
+    try {
+      const client = await this.getClient();
+      const calendars = await client.fetchCalendars();
+      const lists = filterReminderLists(calendars, includeCalendars);
+      return { ok: true, data: { lists } };
     } catch (err) {
       return {
         ok: false,
