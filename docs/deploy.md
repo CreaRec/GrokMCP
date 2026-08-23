@@ -69,10 +69,9 @@ GRAFANA_URL=http://grafana:3000
 # Service account token (create in Grafana: Configuration → Service accounts)
 # Viewer role is sufficient for read-only queries
 GRAFANA_SERVICE_ACCOUNT_TOKEN=glsa_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-
-# Optional: require callers to pass this Bearer token
-# MCP_GRAFANA_SERVER_TOKEN=your-caller-auth-token
 ```
+
+**Optional caller authentication:** `MCP_GRAFANA_SERVER_TOKEN` can require callers to pass a Bearer token. If you want this, add `MCP_GRAFANA_SERVER_TOKEN=your-caller-auth-token` to `.env`. Do **not** add it to `docker-compose.yml`—environment entries with empty values (e.g., `${MCP_GRAFANA_SERVER_TOKEN:-}`) cause mcp-grafana to reject all requests. Omit it from compose entirely and only set it in `.env` when needed.
 
 To create the service account token:
 
@@ -138,6 +137,8 @@ Or behind an nginx reverse proxy:
 The `grafana-mcp` container listens on port 8793 (mapped from internal 8000) with endpoint path `/mcp`. Configure nginx to forward:
 
 - `https://crearec.app/mcp/grafana` → `http://127.0.0.1:8793/mcp`
+
+**Why `--allowed-hosts "*"`:** mcp-grafana 1.1.0 includes DNS-rebinding protection that defaults `--allowed-hosts` to the loopback of `--address` (e.g., `localhost:8000` / `127.0.0.1:8000`). This blocks requests arriving with `Host: crearec.app` (public hostname) or `Host: 127.0.0.1:8793` (mapped port). Since nginx on the same host is a trusted reverse proxy, we allow all hosts with `*`. The apple-calendar service uses the same pattern.
 
 Create `/etc/nginx/snippets/grok-mcp-grafana.conf` and include it from `/etc/nginx/sites-available/default` (same pattern as the calendar snippet):
 
