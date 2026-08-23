@@ -34,6 +34,12 @@ iCloud CalDAV integration for listing, creating, updating, and deleting calendar
 - `calendar_update_event` — Update existing events
 - `calendar_delete_event` — Delete events
 
+### Grafana MCP
+
+Official [Grafana MCP server](https://grafana.com/docs/grafana/latest/developer-resources/mcp/) for querying dashboards, Prometheus metrics, Loki logs, and more.
+
+Uses the upstream Docker image `grafana/mcp-grafana` (no custom code in this repo). See **[docs/deploy.md](./docs/deploy.md)** for setup.
+
 ## Adding a New Server
 
 1. Create a new directory under `servers/`:
