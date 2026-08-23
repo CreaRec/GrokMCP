@@ -7,7 +7,8 @@ on:
   workflow_dispatch:
 
 env:
-  IMAGE: ghcr.io/crearec/grok-mcp-apple-calendar
+  APPLE_CALENDAR_IMAGE: ghcr.io/crearec/grok-mcp-apple-calendar
+  SYNOLOGY_IMAGE: ghcr.io/crearec/grok-mcp-synology
   DEPLOY_DIR: /home/crearec/grok-mcp
 
 jobs:
@@ -18,6 +19,7 @@ jobs:
       pull-requests: read
     outputs:
       apple-calendar: ${{ steps.filter.outputs.apple-calendar }}
+      synology: ${{ steps.filter.outputs.synology }}
       compose: ${{ steps.filter.outputs.compose }}
       ci: ${{ steps.filter.outputs.ci }}
     steps:
@@ -29,12 +31,14 @@ jobs:
           filters: |
             apple-calendar:
               - 'servers/apple-calendar/**'
+            synology:
+              - 'servers/synology/**'
             compose:
               - 'docker-compose.yml'
             ci:
               - '.github/workflows/ci-cd.yml'
 
-  test:
+  test-apple-calendar:
     runs-on: ubuntu-latest
     needs: changes
     permissions:
@@ -70,15 +74,61 @@ jobs:
         with:
           context: servers/apple-calendar
           push: false
-          tags: ${{ env.IMAGE }}:ci
+          tags: ${{ env.APPLE_CALENDAR_IMAGE }}:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
           secrets: |
             NODE_AUTH_TOKEN=${{ secrets.GITHUB_TOKEN }}
 
-  publish:
+  test-synology:
     runs-on: ubuntu-latest
-    needs: [test, changes]
+    needs: changes
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: servers/synology/package-lock.json
+          registry-url: https://npm.pkg.github.com
+          scope: "@crearec"
+
+      - name: Install dependencies
+        working-directory: servers/synology
+        run: npm ci
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate Prisma client
+        working-directory: servers/synology
+        run: npx prisma generate
+
+      - name: Run tests
+        working-directory: servers/synology
+        run: npm test
+
+      - uses: docker/setup-buildx-action@v4
+        if: needs.changes.outputs.synology == 'true'
+
+      - name: Build synology image (no push)
+        if: needs.changes.outputs.synology == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: servers/synology
+          push: false
+          tags: ${{ env.SYNOLOGY_IMAGE }}:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          secrets: |
+            NODE_AUTH_TOKEN=${{ secrets.GITHUB_TOKEN }}
+
+  publish-apple-calendar:
+    runs-on: ubuntu-latest
+    needs: [test-apple-calendar, changes]
     if: >-
       github.event_name == 'push'
       && github.ref == 'refs/heads/main'
@@ -105,7 +155,7 @@ jobs:
         run: |
           SHORT_SHA="$(echo "${GITHUB_SHA}" | cut -c1-7)"
           echo "image_tag=sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-          echo "tags=${IMAGE}:main,${IMAGE}:sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "tags=${{ env.APPLE_CALENDAR_IMAGE }}:main,${{ env.APPLE_CALENDAR_IMAGE }}:sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         uses: docker/build-push-action@v7
@@ -118,21 +168,66 @@ jobs:
           secrets: |
             NODE_AUTH_TOKEN=${{ secrets.GITHUB_TOKEN }}
 
+  publish-synology:
+    runs-on: ubuntu-latest
+    needs: [test-synology, changes]
+    if: >-
+      github.event_name == 'push'
+      && github.ref == 'refs/heads/main'
+      && needs.changes.outputs.synology == 'true'
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags
+        id: meta
+        run: |
+          SHORT_SHA="$(echo "${GITHUB_SHA}" | cut -c1-7)"
+          echo "image_tag=sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "tags=${{ env.SYNOLOGY_IMAGE }}:main,${{ env.SYNOLOGY_IMAGE }}:sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: servers/synology
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          secrets: |
+            NODE_AUTH_TOKEN=${{ secrets.GITHUB_TOKEN }}
+
   deploy:
     runs-on: ubuntu-latest
-    needs: [test, changes, publish]
+    needs: [test-apple-calendar, test-synology, changes, publish-apple-calendar, publish-synology]
     if: >-
       always()
       && !cancelled()
       && github.ref == 'refs/heads/main'
-      && needs.test.result == 'success'
-      && (needs.publish.result == 'success' || needs.publish.result == 'skipped')
+      && needs.test-apple-calendar.result == 'success'
+      && needs.test-synology.result == 'success'
+      && (needs.publish-apple-calendar.result == 'success' || needs.publish-apple-calendar.result == 'skipped')
+      && (needs.publish-synology.result == 'success' || needs.publish-synology.result == 'skipped')
       && (
         github.event_name == 'workflow_dispatch'
         || (
           github.event_name == 'push'
           && (
             needs.changes.outputs.apple-calendar == 'true'
+            || needs.changes.outputs.synology == 'true'
             || needs.changes.outputs.compose == 'true'
             || needs.changes.outputs.ci == 'true'
           )
@@ -163,8 +258,10 @@ jobs:
         env:
           SSH_USER: ${{ secrets.DEPLOY_USER }}
           SERVER_HOST: ${{ secrets.DEPLOY_HOST }}
-          IMAGE_TAG_NEW: ${{ needs.publish.outputs.image_tag }}
+          APPLE_CALENDAR_IMAGE_TAG_NEW: ${{ needs.publish-apple-calendar.outputs.image_tag }}
+          SYNOLOGY_IMAGE_TAG_NEW: ${{ needs.publish-synology.outputs.image_tag }}
           APPLE_CALENDAR_CHANGED: ${{ needs.changes.outputs.apple-calendar }}
+          SYNOLOGY_CHANGED: ${{ needs.changes.outputs.synology }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
         run: |
@@ -189,9 +286,12 @@ jobs:
             exit 1
           fi
 
-          # Export tag only for image published in this run; leave others from .env.
-          if [ '${APPLE_CALENDAR_CHANGED}' = 'true' ] && [ -n '${IMAGE_TAG_NEW}' ]; then
-            export IMAGE_TAG='${IMAGE_TAG_NEW}'
+          # Export tag only for images published in this run; leave others from .env.
+          if [ '${APPLE_CALENDAR_CHANGED}' = 'true' ] && [ -n '${APPLE_CALENDAR_IMAGE_TAG_NEW}' ]; then
+            export IMAGE_TAG='${APPLE_CALENDAR_IMAGE_TAG_NEW}'
+          fi
+          if [ '${SYNOLOGY_CHANGED}' = 'true' ] && [ -n '${SYNOLOGY_IMAGE_TAG_NEW}' ]; then
+            export SYNOLOGY_IMAGE_TAG='${SYNOLOGY_IMAGE_TAG_NEW}'
           fi
 
           docker compose pull
@@ -200,6 +300,9 @@ jobs:
           if [ '${APPLE_CALENDAR_CHANGED}' = 'true' ]; then
             docker compose logs --tail=30 apple-calendar || true
           fi
+          if [ '${SYNOLOGY_CHANGED}' = 'true' ]; then
+            docker compose logs --tail=30 synology-mcp || true
+          fi
 
           # Logout so credentials don't persist on disk
           docker logout ghcr.io || true
@@ -207,13 +310,13 @@ jobs:
 
   ghcr_cleanup:
     runs-on: ubuntu-latest
-    needs: [publish]
+    needs: [publish-apple-calendar, publish-synology]
     if: >-
       always()
       && !cancelled()
       && github.event_name == 'push'
       && github.ref == 'refs/heads/main'
-      && needs.publish.result == 'success'
+      && (needs.publish-apple-calendar.result == 'success' || needs.publish-synology.result == 'success')
     concurrency:
       group: ghcr-cleanup
       cancel-in-progress: false
@@ -222,9 +325,21 @@ jobs:
       packages: write
     steps:
       - name: Prune grok-mcp-apple-calendar (keep 10 sha-*)
+        if: needs.publish-apple-calendar.result == 'success'
         uses: dataaxiom/ghcr-cleanup-action@v1
         with:
           packages: grok-mcp-apple-calendar
+          delete-tags: sha-*
+          keep-n-tagged: "10"
+          exclude-tags: main
+          delete-untagged: true
+          delete-orphaned-images: true
+
+      - name: Prune grok-mcp-synology (keep 10 sha-*)
+        if: needs.publish-synology.result == 'success'
+        uses: dataaxiom/ghcr-cleanup-action@v1
+        with:
+          packages: grok-mcp-synology
           delete-tags: sha-*
           keep-n-tagged: "10"
           exclude-tags: main

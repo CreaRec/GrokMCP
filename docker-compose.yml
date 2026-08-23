@@ -64,8 +64,42 @@ services:
     networks:
       - default
 
+  synology-mcp:
+    image: ${SYNOLOGY_IMAGE:-ghcr.io/crearec/grok-mcp-synology}:${SYNOLOGY_IMAGE_TAG:-main}
+    container_name: grok-mcp-synology
+    restart: unless-stopped
+    ports:
+      - "8794:8794"
+    env_file:
+      - .env
+    environment:
+      - PORT=8794
+      - HOST=0.0.0.0
+      - DATABASE_URL=postgresql://${SYNOLOGY_DB_USER:-synology}:${SYNOLOGY_DB_PASSWORD}@synology-db:5432/${SYNOLOGY_DB_NAME:-synology}
+      - TRANSFORMERS_CACHE=/app/.cache/transformers
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://alloy:4318}
+      - OTEL_SERVICE_NAME=${SYNOLOGY_OTEL_SERVICE_NAME:-synology}
+      - OTEL_SERVICE_NAMESPACE=${OTEL_SERVICE_NAMESPACE:-mcp}
+      - DEPLOY_ENV=${DEPLOY_ENV:-production}
+      - OTEL_SERVICE_VERSION=${SYNOLOGY_OTEL_SERVICE_VERSION:-}
+    volumes:
+      - synology-mcp-cache:/app/.cache
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8794/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    depends_on:
+      synology-db:
+        condition: service_healthy
+    networks:
+      - default
+      - lgtm
+
 volumes:
   synology-db-data:
+  synology-mcp-cache:
 
 networks:
   lgtm:
