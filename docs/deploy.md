@@ -118,7 +118,7 @@ Add the MCP servers with URLs:
 }
 ```
 
-Or behind a reverse proxy (Caddy/nginx):
+Or behind an nginx reverse proxy:
 
 ```json
 {
@@ -135,18 +135,23 @@ Or behind a reverse proxy (Caddy/nginx):
 
 #### Reverse proxy note (Grafana MCP)
 
-The `grafana-mcp` container listens on port 8793 (mapped from internal 8000) with endpoint path `/mcp`. Configure your reverse proxy to forward:
+The `grafana-mcp` container listens on port 8793 (mapped from internal 8000) with endpoint path `/mcp`. Configure nginx to forward:
 
 - `https://crearec.app/mcp/grafana` → `http://127.0.0.1:8793/mcp`
 
-Example Caddy snippet:
+Create `/etc/nginx/snippets/grok-mcp-grafana.conf` and include it from `/etc/nginx/sites-available/default` (same pattern as the calendar snippet):
 
-```caddyfile
-crearec.app {
-    handle_path /mcp/grafana* {
-        rewrite * /mcp{uri}
-        reverse_proxy 127.0.0.1:8793
-    }
+```nginx
+# /etc/nginx/snippets/grok-mcp-grafana.conf
+# Grafana MCP (streamable-http transport)
+
+location = /mcp/grafana {
+    proxy_pass http://127.0.0.1:8793/mcp;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
 }
 ```
 
