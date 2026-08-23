@@ -1,8 +1,8 @@
 {
-  "name": "@crearec/search-index",
+  "name": "@crearec/synology",
   "version": "0.0.1",
   "private": true,
-  "description": "Prisma schema and migrations for Synology private-index search database",
+  "description": "Prisma schema and migrations for Synology MCP database",
   "scripts": {
     "db:migrate:dev": "prisma migrate dev",
     "db:migrate:deploy": "prisma migrate deploy",

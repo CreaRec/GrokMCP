@@ -1,4 +1,4 @@
--- Synology private-index search database
+-- Synology MCP database
 --
 -- POLICY: descriptions may include names/addresses; must NEVER include
 -- passport numbers, SSN, bank account numbers, or driver-license numbers.

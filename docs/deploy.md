@@ -6,7 +6,7 @@ Production runs as a Docker Compose stack. Images come from GitHub Container Reg
 |-------|---------|
 | `ghcr.io/crearec/grok-mcp-apple-calendar` | `apple-calendar` |
 | `grafana/mcp-grafana` (Docker Hub) | `grafana-mcp` |
-| `pgvector/pgvector:0.8.6-pg16` (Docker Hub) | `search-db` |
+| `pgvector/pgvector:0.8.6-pg16` (Docker Hub) | `synology-db` |
 
 Deploy directory: `/home/crearec/grok-mcp`
 
@@ -81,45 +81,45 @@ To create the service account token:
 3. Click **Add service account token**, copy the `glsa_...` token
 4. Paste the token as `GRAFANA_SERVICE_ACCOUNT_TOKEN` in `/home/crearec/grok-mcp/.env`
 
-#### Search DB (Synology Index)
+#### Synology DB
 
-The `search-db` service is a PostgreSQL + pgvector database for a future Synology private-index MCP. It stores labels, share URLs, and embeddings for semantic search—**never** file bytes or share passwords.
+The `synology-db` service is a PostgreSQL + pgvector database for the Synology MCP. It stores labels, share URLs, and embeddings for semantic search—**never** file bytes or share passwords.
 
 Add these variables to `.env`:
 
 ```sh
-# PostgreSQL credentials (required for search-db to start)
-POSTGRES_USER=synology
-POSTGRES_PASSWORD=your_strong_random_password
-POSTGRES_DB=synology_index
+# PostgreSQL credentials (required for synology-db to start)
+SYNOLOGY_DB_USER=synology
+SYNOLOGY_DB_PASSWORD=your_strong_random_password
+SYNOLOGY_DB_NAME=synology
 
 # Prisma DATABASE_URL (for running migrations)
-DATABASE_URL=postgresql://synology:your_strong_random_password@127.0.0.1:5434/synology_index
+DATABASE_URL=postgresql://synology:your_strong_random_password@127.0.0.1:5434/synology
 ```
 
-**Important:** The `search-db` container will fail to start if `POSTGRES_PASSWORD` is empty or missing. Set these variables in `.env` before starting the stack.
+**Important:** The `synology-db` container will fail to start if `SYNOLOGY_DB_PASSWORD` is empty or missing. Set these variables in `.env` before starting the stack.
 
-The database binds only to `127.0.0.1:5434` (not exposed externally). The future MCP service will connect via the Docker network.
+The database binds only to `127.0.0.1:5434` (not exposed externally). The Synology MCP service will connect via the Docker network.
 
 **Data policy:** Descriptions may include names/addresses; must **never** include passport numbers, SSN, bank account numbers, or driver's license numbers.
 
-#### Initialize the search-db schema (after first start)
+#### Initialize the Synology DB schema (after first start)
 
-After `search-db` is running, apply Prisma migrations to create the tables:
+After `synology-db` is running, apply Prisma migrations to create the tables:
 
 ```sh
 cd /home/crearec/grok-mcp
 git clone https://github.com/CreaRec/GrokMCP.git --depth 1 /tmp/grok-mcp-schema
-cd /tmp/grok-mcp-schema/servers/search-index
+cd /tmp/grok-mcp-schema/servers/synology
 npm install
-DATABASE_URL="postgresql://synology:YOUR_PASSWORD@127.0.0.1:5434/synology_index" npx prisma migrate deploy
+DATABASE_URL="postgresql://synology:YOUR_PASSWORD@127.0.0.1:5434/synology" npx prisma migrate deploy
 rm -rf /tmp/grok-mcp-schema
 ```
 
 Or if you have the repo already checked out:
 
 ```sh
-cd /path/to/GrokMCP/servers/search-index
+cd /path/to/GrokMCP/servers/synology
 npm install
 npx prisma migrate deploy  # uses DATABASE_URL from .env or environment
 ```
