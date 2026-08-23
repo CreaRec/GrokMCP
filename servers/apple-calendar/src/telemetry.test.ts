@@ -5,7 +5,7 @@ const otel = vi.hoisted(() => {
   const toolDuration = { record: vi.fn() };
   const errorsTotal = { add: vi.fn() };
   const upGauge = { set: vi.fn() };
-  const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+  const logger = { emit: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
 
   const mcp = {
     recordToolCall: vi.fn(),
@@ -42,6 +42,7 @@ describe("telemetry", () => {
     otel.mcp.recordToolCall.mockClear();
     otel.mcp.recordError.mockClear();
     otel.mcp.setUp.mockClear();
+    otel.logger.emit.mockClear();
     otel.logger.info.mockClear();
     otel.logger.warn.mockClear();
     otel.initTelemetry.mockClear();
@@ -136,6 +137,7 @@ describe("withToolTelemetry", () => {
     vi.stubEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318");
     otel.mcp.recordToolCall.mockClear();
     otel.mcp.recordError.mockClear();
+    otel.logger.emit.mockClear();
     otel.logger.info.mockClear();
     otel.logger.warn.mockClear();
   });
@@ -220,17 +222,21 @@ describe("withToolTelemetry", () => {
       content: [{ type: "text", text: JSON.stringify({ ok: true, data: {} }) }],
     }));
 
-    expect(otel.logger.info).toHaveBeenCalledWith(
-      expect.stringContaining("calendar_list"),
+    expect(otel.logger.emit).toHaveBeenCalledWith(
       expect.objectContaining({
-        tool: "calendar_list",
-        result: "success",
+        severityNumber: 9,
+        severityText: "INFO",
+        body: expect.stringContaining("calendar_list"),
+        attributes: expect.objectContaining({
+          tool: "calendar_list",
+          result: "success",
+        }),
       }),
     );
     await shutdownTelemetry();
   });
 
-  it("logs errors with warn level", async () => {
+  it("logs errors with ERROR severity", async () => {
     const { startTelemetry, withToolTelemetry, shutdownTelemetry } = await import("./telemetry.js");
     startTelemetry();
 
@@ -238,12 +244,16 @@ describe("withToolTelemetry", () => {
       content: [{ type: "text", text: JSON.stringify({ ok: false, error: "auth failed" }) }],
     }));
 
-    expect(otel.logger.warn).toHaveBeenCalledWith(
-      expect.stringContaining("calendar_update_event"),
+    expect(otel.logger.emit).toHaveBeenCalledWith(
       expect.objectContaining({
-        tool: "calendar_update_event",
-        result: "error",
-        error_type: "auth",
+        severityNumber: 17,
+        severityText: "ERROR",
+        body: expect.stringContaining("calendar_update_event"),
+        attributes: expect.objectContaining({
+          tool: "calendar_update_event",
+          result: "error",
+          error_type: "auth",
+        }),
       }),
     );
     await shutdownTelemetry();
