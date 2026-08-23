@@ -106,6 +106,8 @@ jobs:
       - name: Generate Prisma client
         working-directory: servers/synology
         run: npx prisma generate
+        env:
+          DATABASE_URL: "postgresql://dummy:dummy@localhost:5432/dummy"
 
       - name: Run tests
         working-directory: servers/synology
