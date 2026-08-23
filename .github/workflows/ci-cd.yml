@@ -48,10 +48,14 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: servers/apple-calendar/package-lock.json
+          registry-url: https://npm.pkg.github.com
+          scope: "@crearec"
 
       - name: Install dependencies
         working-directory: servers/apple-calendar
         run: npm ci
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run tests
         working-directory: servers/apple-calendar
@@ -69,6 +73,8 @@ jobs:
           tags: ${{ env.IMAGE }}:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          secrets: |
+            NODE_AUTH_TOKEN=${{ secrets.GITHUB_TOKEN }}
 
   publish:
     runs-on: ubuntu-latest
@@ -109,6 +115,8 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          secrets: |
+            NODE_AUTH_TOKEN=${{ secrets.GITHUB_TOKEN }}
 
   deploy:
     runs-on: ubuntu-latest
