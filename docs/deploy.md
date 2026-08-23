@@ -5,6 +5,7 @@ Production runs as a Docker Compose stack. Images come from GitHub Container Reg
 | Image | Service |
 |-------|---------|
 | `ghcr.io/crearec/grok-mcp-apple-calendar` | `apple-calendar` |
+| `grafana/mcp-grafana` (Docker Hub) | `grafana-mcp` |
 
 Deploy directory: `/home/crearec/grok-mcp`
 
@@ -55,6 +56,31 @@ USER_TIMEZONE=America/Chicago
 
 `PORT` and `HOST` have defaults in the container and are not required in `.env`.
 
+#### Grafana MCP
+
+The `grafana-mcp` service uses the official [Grafana MCP image](https://grafana.com/docs/grafana/latest/developer-resources/mcp/) from Docker Hub. It connects to your existing CreaGrafana instance on the `lgtm` Docker network.
+
+Add these variables to `.env`:
+
+```sh
+# Grafana URL as seen from this container (on the lgtm network)
+GRAFANA_URL=http://grafana:3000
+
+# Service account token (create in Grafana: Configuration → Service accounts)
+# Viewer role is sufficient for read-only queries
+GRAFANA_SERVICE_ACCOUNT_TOKEN=glsa_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# Optional: require callers to pass this Bearer token
+# MCP_GRAFANA_SERVER_TOKEN=your-caller-auth-token
+```
+
+To create the service account token:
+
+1. In Grafana, go to **Administration → Users and access → Service accounts**
+2. Click **Add service account**, name it (e.g., `mcp-reader`), set role to **Viewer**
+3. Click **Add service account token**, copy the `glsa_...` token
+4. Paste the token as `GRAFANA_SERVICE_ACCOUNT_TOKEN` in `/home/crearec/grok-mcp/.env`
+
 ### 3. First start
 
 Either merge to `main` and let Actions deploy, or:
@@ -77,27 +103,50 @@ curl -sS http://127.0.0.1:8792/health
 
 ### 4. Connect Grok Bot / Cursor
 
-Add the MCP server with a URL:
+Add the MCP servers with URLs:
 
 ```json
 {
   "mcpServers": {
     "apple-calendar": {
       "url": "http://<DEPLOY_HOST>:8792/mcp"
+    },
+    "grafana": {
+      "url": "http://<DEPLOY_HOST>:8793/mcp"
     }
   }
 }
 ```
 
-Or if nginx is in front:
+Or behind a reverse proxy (Caddy/nginx):
 
 ```json
 {
   "mcpServers": {
     "apple-calendar": {
-      "url": "https://your-domain.com/apple-calendar/mcp"
+      "url": "https://crearec.app/mcp/calendar"
+    },
+    "grafana": {
+      "url": "https://crearec.app/mcp/grafana"
     }
   }
+}
+```
+
+#### Reverse proxy note (Grafana MCP)
+
+The `grafana-mcp` container listens on port 8793 (mapped from internal 8000) with endpoint path `/mcp`. Configure your reverse proxy to forward:
+
+- `https://crearec.app/mcp/grafana` → `http://127.0.0.1:8793/mcp`
+
+Example Caddy snippet:
+
+```caddyfile
+crearec.app {
+    handle_path /mcp/grafana* {
+        rewrite * /mcp{uri}
+        reverse_proxy 127.0.0.1:8793
+    }
 }
 ```
 
