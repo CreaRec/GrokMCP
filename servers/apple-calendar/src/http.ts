@@ -185,6 +185,28 @@ function createServer(config: ReturnType<typeof getConfig>) {
   );
 
   server.registerTool(
+    "list_reminder_lists",
+    {
+      description:
+        "List iCloud Reminders CalDAV collection URLs. Returns reminder lists that support VTODO components. Use these URLs to access reminders via CalDAV.",
+      inputSchema: {
+        include_calendars: z.boolean().optional().describe(
+          "If true, include calendar collections that support VEVENT in addition to VTODO reminder lists",
+        ),
+      },
+    },
+    async ({ include_calendars }) => {
+      const result = await client.fetchReminderLists(include_calendars ?? false);
+      if (!result.ok) {
+        return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: result.error }) }] };
+      }
+      return {
+        content: [{ type: "text", text: JSON.stringify({ ok: true, data: result.data }) }],
+      };
+    },
+  );
+
+  server.registerTool(
     "calendar_list",
     {
       description:
