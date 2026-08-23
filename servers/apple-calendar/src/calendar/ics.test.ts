@@ -12,6 +12,7 @@ import {
   parseIcsDateOnly,
   replaceValarmsInIcs,
   resolveAlarmMinutes,
+  validateRRule,
 } from "./ics.js";
 
 describe("escapeIcsText", () => {
@@ -411,5 +412,460 @@ describe("parseAllVEvents / all-day / recurrence", () => {
       "END:VCALENDAR",
     ].join("\r\n");
     expect(parseFirstVEvent(ics)?.cancelled).toBe(true);
+  });
+});
+
+describe("validateRRule", () => {
+  it("validates basic FREQ rules", () => {
+    expect(validateRRule("FREQ=DAILY")).toEqual({
+      valid: true,
+      normalized: "FREQ=DAILY",
+    });
+    expect(validateRRule("FREQ=WEEKLY")).toEqual({
+      valid: true,
+      normalized: "FREQ=WEEKLY",
+    });
+    expect(validateRRule("FREQ=MONTHLY")).toEqual({
+      valid: true,
+      normalized: "FREQ=MONTHLY",
+    });
+    expect(validateRRule("FREQ=YEARLY")).toEqual({
+      valid: true,
+      normalized: "FREQ=YEARLY",
+    });
+  });
+
+  it("validates FREQ with INTERVAL", () => {
+    expect(validateRRule("FREQ=WEEKLY;INTERVAL=2")).toEqual({
+      valid: true,
+      normalized: "FREQ=WEEKLY;INTERVAL=2",
+    });
+  });
+
+  it("validates FREQ with COUNT", () => {
+    expect(validateRRule("FREQ=DAILY;COUNT=10")).toEqual({
+      valid: true,
+      normalized: "FREQ=DAILY;COUNT=10",
+    });
+  });
+
+  it("validates FREQ with UNTIL (date only)", () => {
+    expect(validateRRule("FREQ=DAILY;UNTIL=20260901")).toEqual({
+      valid: true,
+      normalized: "FREQ=DAILY;UNTIL=20260901",
+    });
+  });
+
+  it("validates FREQ with UNTIL (datetime UTC)", () => {
+    expect(validateRRule("FREQ=DAILY;UNTIL=20260901T000000Z")).toEqual({
+      valid: true,
+      normalized: "FREQ=DAILY;UNTIL=20260901T000000Z",
+    });
+  });
+
+  it("validates FREQ with BYDAY", () => {
+    expect(validateRRule("FREQ=WEEKLY;BYDAY=MO,WE,FR")).toEqual({
+      valid: true,
+      normalized: "FREQ=WEEKLY;BYDAY=MO,WE,FR",
+    });
+  });
+
+  it("validates BYDAY with ordinals for MONTHLY", () => {
+    expect(validateRRule("FREQ=MONTHLY;BYDAY=1MO")).toEqual({
+      valid: true,
+      normalized: "FREQ=MONTHLY;BYDAY=1MO",
+    });
+    expect(validateRRule("FREQ=MONTHLY;BYDAY=-1FR")).toEqual({
+      valid: true,
+      normalized: "FREQ=MONTHLY;BYDAY=-1FR",
+    });
+  });
+
+  it("validates BYMONTH", () => {
+    expect(validateRRule("FREQ=YEARLY;BYMONTH=1,6,12")).toEqual({
+      valid: true,
+      normalized: "FREQ=YEARLY;BYMONTH=1,6,12",
+    });
+  });
+
+  it("validates BYMONTHDAY", () => {
+    expect(validateRRule("FREQ=MONTHLY;BYMONTHDAY=15")).toEqual({
+      valid: true,
+      normalized: "FREQ=MONTHLY;BYMONTHDAY=15",
+    });
+    expect(validateRRule("FREQ=MONTHLY;BYMONTHDAY=-1")).toEqual({
+      valid: true,
+      normalized: "FREQ=MONTHLY;BYMONTHDAY=-1",
+    });
+  });
+
+  it("validates BYSETPOS", () => {
+    expect(validateRRule("FREQ=MONTHLY;BYDAY=MO;BYSETPOS=1")).toEqual({
+      valid: true,
+      normalized: "FREQ=MONTHLY;BYDAY=MO;BYSETPOS=1",
+    });
+  });
+
+  it("validates WKST", () => {
+    expect(validateRRule("FREQ=WEEKLY;WKST=SU")).toEqual({
+      valid: true,
+      normalized: "FREQ=WEEKLY;WKST=SU",
+    });
+  });
+
+  it("validates complex rule", () => {
+    expect(
+      validateRRule("FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE;COUNT=8"),
+    ).toEqual({
+      valid: true,
+      normalized: "FREQ=WEEKLY;INTERVAL=2;COUNT=8;BYDAY=MO,WE",
+    });
+  });
+
+  it("rejects empty RRULE", () => {
+    expect(validateRRule("")).toEqual({
+      valid: false,
+      error: "RRULE is empty",
+    });
+    expect(validateRRule("   ")).toEqual({
+      valid: false,
+      error: "RRULE is empty",
+    });
+  });
+
+  it("rejects missing FREQ", () => {
+    expect(validateRRule("INTERVAL=2")).toEqual({
+      valid: false,
+      error: "RRULE must have FREQ",
+    });
+  });
+
+  it("rejects invalid FREQ", () => {
+    expect(validateRRule("FREQ=BIWEEKLY")).toEqual({
+      valid: false,
+      error: "Invalid FREQ value: BIWEEKLY",
+    });
+  });
+
+  it("rejects both COUNT and UNTIL", () => {
+    expect(validateRRule("FREQ=DAILY;COUNT=10;UNTIL=20260901")).toEqual({
+      valid: false,
+      error: "RRULE cannot have both COUNT and UNTIL",
+    });
+  });
+
+  it("rejects invalid COUNT", () => {
+    expect(validateRRule("FREQ=DAILY;COUNT=0")).toEqual({
+      valid: false,
+      error: "Invalid COUNT value: 0",
+    });
+    expect(validateRRule("FREQ=DAILY;COUNT=-5")).toEqual({
+      valid: false,
+      error: "Invalid COUNT value: -5",
+    });
+    expect(validateRRule("FREQ=DAILY;COUNT=abc")).toEqual({
+      valid: false,
+      error: "Invalid COUNT value: abc",
+    });
+  });
+
+  it("rejects invalid INTERVAL", () => {
+    expect(validateRRule("FREQ=DAILY;INTERVAL=0")).toEqual({
+      valid: false,
+      error: "Invalid INTERVAL value: 0",
+    });
+  });
+
+  it("rejects invalid BYDAY", () => {
+    expect(validateRRule("FREQ=WEEKLY;BYDAY=XX")).toEqual({
+      valid: false,
+      error: "Invalid BYDAY value: XX",
+    });
+  });
+
+  it("rejects invalid BYMONTH", () => {
+    expect(validateRRule("FREQ=YEARLY;BYMONTH=13")).toEqual({
+      valid: false,
+      error: "Invalid BYMONTH value: 13",
+    });
+    expect(validateRRule("FREQ=YEARLY;BYMONTH=0")).toEqual({
+      valid: false,
+      error: "Invalid BYMONTH value: 0",
+    });
+  });
+
+  it("rejects invalid UNTIL format", () => {
+    expect(validateRRule("FREQ=DAILY;UNTIL=2026-09-01")).toEqual({
+      valid: false,
+      error: "Invalid UNTIL value: 2026-09-01",
+    });
+  });
+
+  it("rejects duplicate keys", () => {
+    expect(validateRRule("FREQ=DAILY;FREQ=WEEKLY")).toEqual({
+      valid: false,
+      error: "Duplicate RRULE key: FREQ",
+    });
+  });
+
+  it("rejects malformed parts", () => {
+    expect(validateRRule("FREQ=DAILY;GARBAGE")).toEqual({
+      valid: false,
+      error: 'Invalid RRULE part (no "="): GARBAGE',
+    });
+  });
+});
+
+describe("buildVEventIcs with RRULE", () => {
+  it("emits RRULE when recurrenceRule is set", () => {
+    const start = new Date("2024-06-01T20:00:00.000Z");
+    const end = defaultEventEnd(start);
+    const ics = buildVEventIcs({
+      uid: "recurring-1",
+      title: "Weekly Standup",
+      start,
+      end,
+      timeZone: "America/Chicago",
+      recurrenceRule: "FREQ=WEEKLY;BYDAY=MO,WE,FR;COUNT=12",
+    });
+    expect(ics).toContain("RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR;COUNT=12");
+  });
+
+  it("omits RRULE when recurrenceRule is undefined", () => {
+    const start = new Date("2024-06-01T20:00:00.000Z");
+    const end = defaultEventEnd(start);
+    const ics = buildVEventIcs({
+      uid: "single-1",
+      title: "One-time Event",
+      start,
+      end,
+      timeZone: "America/Chicago",
+    });
+    expect(ics).not.toContain("RRULE:");
+  });
+
+  it("omits RRULE when recurrenceRule is null", () => {
+    const start = new Date("2024-06-01T20:00:00.000Z");
+    const end = defaultEventEnd(start);
+    const ics = buildVEventIcs({
+      uid: "cleared-1",
+      title: "Was Recurring",
+      start,
+      end,
+      timeZone: "America/Chicago",
+      recurrenceRule: null,
+    });
+    expect(ics).not.toContain("RRULE:");
+  });
+
+  it("omits RRULE when recurrenceRule is empty string", () => {
+    const start = new Date("2024-06-01T20:00:00.000Z");
+    const end = defaultEventEnd(start);
+    const ics = buildVEventIcs({
+      uid: "cleared-2",
+      title: "Was Recurring",
+      start,
+      end,
+      timeZone: "America/Chicago",
+      recurrenceRule: "",
+    });
+    expect(ics).not.toContain("RRULE:");
+  });
+});
+
+describe("RRULE round-trip (build → parse)", () => {
+  it("round-trips RRULE through build and parse", () => {
+    const start = new Date("2024-06-01T20:00:00.000Z");
+    const end = defaultEventEnd(start);
+    const rrule = "FREQ=WEEKLY;BYDAY=MO,WE;COUNT=8";
+    const ics = buildVEventIcs({
+      uid: "round-trip-1",
+      title: "Recurring",
+      start,
+      end,
+      timeZone: "America/Chicago",
+      recurrenceRule: rrule,
+    });
+    const parsed = parseFirstVEvent(ics);
+    expect(parsed?.recurrenceRule).toBe(rrule);
+    expect(parsed?.recurrenceId).toBe("");
+  });
+
+  it("round-trips DAILY with UNTIL", () => {
+    const start = new Date("2024-06-01T20:00:00.000Z");
+    const end = defaultEventEnd(start);
+    const rrule = "FREQ=DAILY;UNTIL=20260901T000000Z";
+    const ics = buildVEventIcs({
+      uid: "round-trip-2",
+      title: "Daily Until",
+      start,
+      end,
+      timeZone: "America/Chicago",
+      recurrenceRule: rrule,
+    });
+    const parsed = parseFirstVEvent(ics);
+    expect(parsed?.recurrenceRule).toBe(rrule);
+  });
+
+  it("round-trips MONTHLY with BYMONTHDAY", () => {
+    const start = new Date("2024-06-15T20:00:00.000Z");
+    const end = defaultEventEnd(start);
+    const rrule = "FREQ=MONTHLY;BYMONTHDAY=15";
+    const ics = buildVEventIcs({
+      uid: "round-trip-3",
+      title: "Monthly 15th",
+      start,
+      end,
+      timeZone: "America/Chicago",
+      recurrenceRule: rrule,
+    });
+    const parsed = parseFirstVEvent(ics);
+    expect(parsed?.recurrenceRule).toBe(rrule);
+  });
+
+  it("round-trips YEARLY with BYMONTH", () => {
+    const start = new Date("2024-01-01T20:00:00.000Z");
+    const end = defaultEventEnd(start);
+    const rrule = "FREQ=YEARLY;BYMONTH=1";
+    const ics = buildVEventIcs({
+      uid: "round-trip-4",
+      title: "New Year",
+      start,
+      end,
+      timeZone: "America/Chicago",
+      recurrenceRule: rrule,
+    });
+    const parsed = parseFirstVEvent(ics);
+    expect(parsed?.recurrenceRule).toBe(rrule);
+  });
+});
+
+describe("replaceValarmsInIcs preserves RRULE", () => {
+  it("preserves RRULE when replacing alarms", () => {
+    const start = new Date("2024-06-01T20:00:00.000Z");
+    const end = defaultEventEnd(start);
+    const rrule = "FREQ=WEEKLY;BYDAY=MO;COUNT=4";
+    const ics = buildVEventIcs({
+      uid: "alarm-rrule-1",
+      title: "Weekly with Alarms",
+      start,
+      end,
+      timeZone: "America/Chicago",
+      recurrenceRule: rrule,
+      alarmMinutesBefore: [60, 15],
+    });
+
+    expect(ics).toContain(`RRULE:${rrule}`);
+    expect(ics).toContain("TRIGGER:-PT1H");
+    expect(ics).toContain("TRIGGER:-PT15M");
+
+    const updated = replaceValarmsInIcs(ics, [30]);
+    expect(updated).toContain(`RRULE:${rrule}`);
+    expect(updated).toContain("TRIGGER:-PT30M");
+    expect(updated).not.toContain("TRIGGER:-PT1H");
+    expect(updated).not.toContain("TRIGGER:-PT15M");
+  });
+
+  it("preserves RRULE when removing all alarms", () => {
+    const start = new Date("2024-06-01T20:00:00.000Z");
+    const end = defaultEventEnd(start);
+    const rrule = "FREQ=DAILY;COUNT=5";
+    const ics = buildVEventIcs({
+      uid: "alarm-rrule-2",
+      title: "Daily with Alarms",
+      start,
+      end,
+      timeZone: "America/Chicago",
+      recurrenceRule: rrule,
+    });
+
+    const updated = replaceValarmsInIcs(ics, []);
+    expect(updated).toContain(`RRULE:${rrule}`);
+    expect(updated).not.toContain("BEGIN:VALARM");
+  });
+
+  it("preserves RRULE with complex rules", () => {
+    const start = new Date("2024-06-01T20:00:00.000Z");
+    const end = defaultEventEnd(start);
+    const rrule = "FREQ=MONTHLY;BYDAY=1MO;COUNT=6";
+    const ics = buildVEventIcs({
+      uid: "alarm-rrule-3",
+      title: "First Monday",
+      start,
+      end,
+      timeZone: "America/Chicago",
+      recurrenceRule: rrule,
+    });
+
+    const updated = replaceValarmsInIcs(ics, [5, 10, 1440]);
+    expect(updated).toContain(`RRULE:${rrule}`);
+    expect(updated).toContain("TRIGGER:-PT5M");
+    expect(updated).toContain("TRIGGER:-PT10M");
+    expect(updated).toContain("TRIGGER:-PT24H");
+  });
+});
+
+describe("update title without losing RRULE (simulation)", () => {
+  it("simulates updating title while preserving RRULE", () => {
+    const start = new Date("2024-06-01T20:00:00.000Z");
+    const end = defaultEventEnd(start);
+    const rrule = "FREQ=WEEKLY;BYDAY=TU,TH;COUNT=10";
+
+    const original = buildVEventIcs({
+      uid: "update-sim-1",
+      title: "Original Title",
+      start,
+      end,
+      timeZone: "America/Chicago",
+      recurrenceRule: rrule,
+    });
+    expect(original).toContain("SUMMARY:Original Title");
+    expect(original).toContain(`RRULE:${rrule}`);
+
+    const parsed = parseFirstVEvent(original);
+    expect(parsed?.recurrenceRule).toBe(rrule);
+
+    const updated = buildVEventIcs({
+      uid: "update-sim-1",
+      title: "Updated Title",
+      start: parsed!.start!,
+      end: parsed!.end!,
+      timeZone: "America/Chicago",
+      recurrenceRule: parsed!.recurrenceRule ?? undefined,
+    });
+
+    expect(updated).toContain("SUMMARY:Updated Title");
+    expect(updated).toContain(`RRULE:${rrule}`);
+    expect(parseFirstVEvent(updated)?.recurrenceRule).toBe(rrule);
+  });
+
+  it("simulates clearing RRULE", () => {
+    const start = new Date("2024-06-01T20:00:00.000Z");
+    const end = defaultEventEnd(start);
+    const rrule = "FREQ=DAILY;COUNT=5";
+
+    const original = buildVEventIcs({
+      uid: "clear-rrule-1",
+      title: "Was Recurring",
+      start,
+      end,
+      timeZone: "America/Chicago",
+      recurrenceRule: rrule,
+    });
+    expect(original).toContain(`RRULE:${rrule}`);
+
+    const parsed = parseFirstVEvent(original);
+
+    const cleared = buildVEventIcs({
+      uid: "clear-rrule-1",
+      title: "Now Single",
+      start: parsed!.start!,
+      end: parsed!.end!,
+      timeZone: "America/Chicago",
+      recurrenceRule: null,
+    });
+
+    expect(cleared).not.toContain("RRULE:");
+    expect(parseFirstVEvent(cleared)?.recurrenceRule).toBeNull();
   });
 });
