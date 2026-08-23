@@ -622,3 +622,244 @@ export function parseAllVEvents(ics: string): ParsedCalendarEvent[] {
 export function parseFirstVEvent(ics: string): ParsedCalendarEvent | null {
   return parseAllVEvents(ics)[0] ?? null;
 }
+
+// --------------------------------------------------------------------------
+// VTODO (Reminders) support
+// --------------------------------------------------------------------------
+
+/** VTODO status values per RFC 5545. */
+export type VTODOStatus = "NEEDS-ACTION" | "COMPLETED" | "IN-PROCESS" | "CANCELLED";
+
+export interface ParsedReminder {
+  uid: string;
+  title: string;
+  notes: string | null;
+  /** Due date/time (null if not set). */
+  due: Date | null;
+  /** True if due is a DATE (all-day) rather than DATE-TIME. */
+  dueIsDate: boolean;
+  /** VTODO status. */
+  status: VTODOStatus;
+  /** When completed (null if not completed). */
+  completedAt: Date | null;
+  /** True if recurring (has RRULE). */
+  isRecurring: boolean;
+  /** RFC 5545 RRULE body (null if not recurring). */
+  recurrenceRule: string | null;
+  /** DTSTAMP or LAST-MODIFIED from source. */
+  sourceUpdatedAt: Date | null;
+  /** TZID from DUE, or null for UTC / floating / date-only. */
+  timeZone: string | null;
+}
+
+export interface BuildVTODOInput {
+  uid: string;
+  title: string;
+  notes?: string;
+  /** Due date/time. Omit for no due date. */
+  due?: Date;
+  /** If true, due is written as VALUE=DATE (all-day). */
+  dueIsDate?: boolean;
+  /** Timezone for DUE (if not UTC). */
+  timeZone: string;
+  /** VTODO status. Defaults to NEEDS-ACTION. */
+  status?: VTODOStatus;
+  /** When completed. Set when status is COMPLETED. */
+  completedAt?: Date;
+}
+
+/** Format a Date as YYYYMMDD for VALUE=DATE. */
+function formatIcsDateOnly(date: Date, timeZone: string): string {
+  const p = zonedParts(date, timeZone);
+  return `${p.year}${pad2(p.month)}${pad2(p.day)}`;
+}
+
+/** Build a single-reminder VCALENDAR with VTODO component. */
+export function buildVTODOIcs(input: BuildVTODOInput): string {
+  const stamp = formatIcsUtcStamp(new Date());
+  const summary = escapeIcsText(input.title);
+  const description =
+    input.notes !== undefined && input.notes.length > 0
+      ? escapeIcsText(input.notes)
+      : null;
+  const status = input.status ?? "NEEDS-ACTION";
+
+  const lines = [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//GrokMCP//EN",
+    "CALSCALE:GREGORIAN",
+    "BEGIN:VTODO",
+    `UID:${input.uid}`,
+    `DTSTAMP:${stamp}`,
+    `SUMMARY:${summary}`,
+    `STATUS:${status}`,
+  ];
+
+  if (input.due) {
+    if (input.dueIsDate) {
+      const dateStr = formatIcsDateOnly(input.due, input.timeZone);
+      lines.push(`DUE;VALUE=DATE:${dateStr}`);
+    } else {
+      const dueLocal = formatIcsLocalDateTime(input.due, input.timeZone);
+      lines.push(`DUE;TZID=${input.timeZone}:${dueLocal}`);
+    }
+  }
+
+  if (description) {
+    lines.push(`DESCRIPTION:${description}`);
+  }
+
+  if (status === "COMPLETED" && input.completedAt) {
+    lines.push(`COMPLETED:${formatIcsUtcStamp(input.completedAt)}`);
+  }
+
+  lines.push("END:VTODO", "END:VCALENDAR");
+
+  return lines.map(foldLine).join("\r\n") + "\r\n";
+}
+
+/** Parse a VTODO block into ParsedReminder. */
+function parseVTODOBlock(block: string): ParsedReminder | null {
+  const uid = propValue(block, "UID");
+  if (!uid) return null;
+
+  const summary = propValue(block, "SUMMARY");
+  const description = propValue(block, "DESCRIPTION");
+  const statusRaw = propValue(block, "STATUS");
+  const rrule = propValue(block, "RRULE");
+
+  let status: VTODOStatus = "NEEDS-ACTION";
+  if (statusRaw) {
+    const upper = statusRaw.toUpperCase();
+    if (
+      upper === "NEEDS-ACTION" ||
+      upper === "COMPLETED" ||
+      upper === "IN-PROCESS" ||
+      upper === "CANCELLED"
+    ) {
+      status = upper as VTODOStatus;
+    }
+  }
+
+  const dueField = propField(block, "DUE");
+  let due: Date | null = null;
+  let dueIsDate = false;
+  let dueTimeZone: string | null = null;
+
+  if (dueField) {
+    const tz = tzidFromParams(dueField.params);
+    dueTimeZone = tz;
+    const valueDate =
+      /;VALUE=DATE(?:;|$)/i.test(dueField.params) ||
+      (!dueField.value.includes("T") && /^\d{8}$/.test(dueField.value));
+    if (valueDate) {
+      due = parseIcsDateOnly(dueField.value, tz);
+      dueIsDate = true;
+    } else {
+      due = parseIcsDateTime(dueField.value, tz);
+    }
+  }
+
+  let completedAt: Date | null = null;
+  const completedField = propField(block, "COMPLETED");
+  if (completedField) {
+    completedAt = parseIcsDateTime(completedField.value, tzidFromParams(completedField.params));
+  }
+
+  return {
+    uid,
+    title: summary ? unescapeIcsText(summary) : "",
+    notes: description ? unescapeIcsText(description) : null,
+    due,
+    dueIsDate,
+    status,
+    completedAt,
+    isRecurring: Boolean(rrule?.trim()),
+    recurrenceRule: rrule?.trim() || null,
+    sourceUpdatedAt: parseSourceUpdatedAt(block),
+    timeZone: dueTimeZone,
+  };
+}
+
+/** Extract all VTODO components from an iCalendar payload. */
+export function parseAllVTODOs(ics: string): ParsedReminder[] {
+  const unfolded = unfoldIcs(ics.replace(/\r\n/g, "\n"));
+  const reminders: ParsedReminder[] = [];
+  const re = /BEGIN:VTODO([\s\S]*?)END:VTODO/gi;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(unfolded)) !== null) {
+    const parsed = parseVTODOBlock(match[1] ?? "");
+    if (parsed) reminders.push(parsed);
+  }
+  return reminders;
+}
+
+/** Extract the first VTODO from an iCalendar payload. */
+export function parseFirstVTODO(ics: string): ParsedReminder | null {
+  return parseAllVTODOs(ics)[0] ?? null;
+}
+
+/**
+ * Update an existing VTODO ICS with new values.
+ * Preserves fields not specified in the patch.
+ */
+export function patchVTODOIcs(
+  existingIcs: string,
+  patch: {
+    title?: string;
+    notes?: string | null;
+    due?: Date | null;
+    dueIsDate?: boolean;
+    timeZone: string;
+    status?: VTODOStatus;
+    completedAt?: Date;
+  },
+): string {
+  const existing = parseFirstVTODO(existingIcs);
+  if (!existing) {
+    throw new Error("Could not parse existing VTODO");
+  }
+
+  const input: BuildVTODOInput = {
+    uid: existing.uid,
+    title: patch.title ?? existing.title,
+    notes:
+      patch.notes !== undefined
+        ? patch.notes ?? undefined
+        : existing.notes ?? undefined,
+    timeZone: patch.timeZone,
+    status: patch.status ?? existing.status,
+  };
+
+  if (patch.due !== undefined) {
+    if (patch.due === null) {
+      // Explicitly clear due date
+    } else {
+      input.due = patch.due;
+      input.dueIsDate = patch.dueIsDate ?? false;
+    }
+  } else if (existing.due) {
+    input.due = existing.due;
+    input.dueIsDate = existing.dueIsDate;
+  }
+
+  if (patch.completedAt) {
+    input.completedAt = patch.completedAt;
+  } else if (existing.completedAt) {
+    input.completedAt = existing.completedAt;
+  }
+
+  return buildVTODOIcs(input);
+}
+
+/**
+ * Mark a VTODO as completed by updating STATUS and adding COMPLETED timestamp.
+ */
+export function markVTODOCompleted(existingIcs: string, timeZone: string): string {
+  return patchVTODOIcs(existingIcs, {
+    status: "COMPLETED",
+    completedAt: new Date(),
+    timeZone,
+  });
+}
