@@ -28,7 +28,7 @@ The `search-db` service must be running (see root `docker-compose.yml`).
 Set `DATABASE_URL` in your environment or `.env`:
 
 ```sh
-DATABASE_URL=postgresql://synology:YOUR_PASSWORD@127.0.0.1:5433/synology_index
+DATABASE_URL=postgresql://synology:YOUR_PASSWORD@127.0.0.1:5434/synology_index
 ```
 
 ### Run migrations

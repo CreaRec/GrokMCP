@@ -94,12 +94,12 @@ POSTGRES_PASSWORD=your_strong_random_password
 POSTGRES_DB=synology_index
 
 # Prisma DATABASE_URL (for running migrations)
-DATABASE_URL=postgresql://synology:your_strong_random_password@127.0.0.1:5433/synology_index
+DATABASE_URL=postgresql://synology:your_strong_random_password@127.0.0.1:5434/synology_index
 ```
 
 **Important:** The `search-db` container will fail to start if `POSTGRES_PASSWORD` is empty or missing. Set these variables in `.env` before starting the stack.
 
-The database binds only to `127.0.0.1:5433` (not exposed externally). The future MCP service will connect via the Docker network.
+The database binds only to `127.0.0.1:5434` (not exposed externally). The future MCP service will connect via the Docker network.
 
 **Data policy:** Descriptions may include names/addresses; must **never** include passport numbers, SSN, bank account numbers, or driver's license numbers.
 
@@ -112,7 +112,7 @@ cd /home/crearec/grok-mcp
 git clone https://github.com/CreaRec/GrokMCP.git --depth 1 /tmp/grok-mcp-schema
 cd /tmp/grok-mcp-schema/servers/search-index
 npm install
-DATABASE_URL="postgresql://synology:YOUR_PASSWORD@127.0.0.1:5433/synology_index" npx prisma migrate deploy
+DATABASE_URL="postgresql://synology:YOUR_PASSWORD@127.0.0.1:5434/synology_index" npx prisma migrate deploy
 rm -rf /tmp/grok-mcp-schema
 ```
 
