@@ -16,6 +16,7 @@ import {
 import {
   DEFAULT_ALARM_MINUTES_BEFORE,
   DEFAULT_EVENT_DURATION_MS,
+  validateRRule,
 } from "./calendar/ics.js";
 import { assembleEventDescription } from "./calendar/event-description.js";
 import {
@@ -182,7 +183,7 @@ const toolDefinitions = [
   {
     name: "calendar_list",
     description:
-      "List Apple Calendar events in a time range. Default: now to +2 days. Use YYYY-MM-DD for a whole local day (from and to may be the same date). Each event includes start_iso/end_iso (machine) and start_local/end_local (human-readable).",
+      "List Apple Calendar events in a time range. Default: now to +2 days. Use YYYY-MM-DD for a whole local day (from and to may be the same date). Each event includes start_iso/end_iso (machine) and start_local/end_local (human-readable). Recurring events include recurrence_rule (RFC 5545 RRULE body for masters) and recurrence_id (non-empty for exceptions/instances).",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -208,7 +209,7 @@ const toolDefinitions = [
   {
     name: "calendar_create_event",
     description:
-      "Create an Apple Calendar event. start/end are user-local wall times: prefer naive ISO (2026-08-26T16:00:00) or numeric offset; Z = UTC. Default duration 30 minutes; default alarms at 1h and 15m before start.",
+      "Create an Apple Calendar event, optionally recurring. start/end are user-local wall times: prefer naive ISO (2026-08-26T16:00:00) or numeric offset; Z = UTC. Default duration 30 minutes; default alarms at 1h and 15m before start. For recurring events, use rrule (RFC 5545 RRULE body) or the structured recurrence fields.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -229,6 +230,37 @@ const toolDefinitions = [
           items: { type: "integer" },
           description:
             "Minutes before start for Apple Calendar alerts. Omit for default [60, 15]. Pass [] for no alerts.",
+        },
+        rrule: {
+          type: "string",
+          description:
+            "RFC 5545 RRULE body without 'RRULE:' prefix. E.g. 'FREQ=WEEKLY;BYDAY=MO,WE;COUNT=8' or 'FREQ=DAILY;UNTIL=20260901T000000Z'. Mutually exclusive with structured recurrence fields.",
+        },
+        recurrence_freq: {
+          type: "string",
+          enum: ["DAILY", "WEEKLY", "MONTHLY", "YEARLY"],
+          description: "Recurrence frequency. Use with other recurrence_* fields instead of rrule.",
+        },
+        recurrence_interval: {
+          type: "integer",
+          minimum: 1,
+          description: "Repeat every N freq periods. Default: 1.",
+        },
+        recurrence_count: {
+          type: "integer",
+          minimum: 1,
+          description: "Number of occurrences. Mutually exclusive with recurrence_until.",
+        },
+        recurrence_until: {
+          type: "string",
+          description:
+            "End date in YYYYMMDD or YYYYMMDDTHHMMSSZ format. Mutually exclusive with recurrence_count.",
+        },
+        recurrence_byday: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Days of week for WEEKLY/MONTHLY/YEARLY: SU, MO, TU, WE, TH, FR, SA. For MONTHLY/YEARLY can include ordinal like '1MO' (first Monday) or '-1FR' (last Friday).",
         },
         location_name: {
           type: "string",
@@ -251,7 +283,7 @@ const toolDefinitions = [
   {
     name: "calendar_update_event",
     description:
-      "Update an Apple Calendar event by uid or href. Only pass fields you want to change — omitted fields (including duration) are preserved. Omit alarm_minutes_before to keep existing alerts; pass [] to clear, null to restore default 1h+15m.",
+      "Update an Apple Calendar event by uid or href. Only pass fields you want to change — omitted fields (including duration and recurrence rule) are preserved. Omit alarm_minutes_before to keep existing alerts; pass [] to clear, null to restore default 1h+15m. For recurring events: updates the entire series (master). Updating a single occurrence is not supported — if the target has a recurrence_id (is an instance), this returns an error.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -273,6 +305,15 @@ const toolDefinitions = [
           description:
             "Minutes before start for alerts. Omit to preserve existing. [] clears. null restores default [60, 15].",
         },
+        rrule: {
+          type: "string",
+          description:
+            "RFC 5545 RRULE body to set/replace recurrence. Omit to preserve existing RRULE. Pass empty string or null to clear (make non-recurring). E.g. 'FREQ=WEEKLY;BYDAY=MO,WE;COUNT=8'.",
+        },
+        clear_recurrence: {
+          type: "boolean",
+          description: "Set to true to remove recurrence and make the event non-recurring. Equivalent to rrule=''.",
+        },
         location_name: { type: "string" },
         location_address: { type: "string" },
         location_maps_url: { type: "string" },
@@ -283,7 +324,8 @@ const toolDefinitions = [
   },
   {
     name: "calendar_delete_event",
-    description: "Delete an Apple Calendar event by uid or href.",
+    description:
+      "Delete an Apple Calendar event by uid or href. For recurring events: deletes the entire series (the .ics object). Deleting a single occurrence is not supported — if the target has a recurrence_id (is an instance) and you want to delete just that instance, this returns an error with instructions.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -373,6 +415,9 @@ async function main() {
               notes: e.notes,
               location: e.location,
               geo: e.geo,
+              recurrence_rule: e.recurrenceRule,
+              recurrence_id: e.recurrenceId || null,
+              is_recurring_master: Boolean(e.recurrenceRule && !e.recurrenceId),
               ...publicOptionalDateTimes(start, end, timeZone),
             };
           });
@@ -396,6 +441,12 @@ async function main() {
               .array(z.number().int().nonnegative().max(10080))
               .nullable()
               .optional(),
+            rrule: z.string().optional(),
+            recurrence_freq: z.enum(["DAILY", "WEEKLY", "MONTHLY", "YEARLY"]).optional(),
+            recurrence_interval: z.number().int().min(1).optional(),
+            recurrence_count: z.number().int().min(1).optional(),
+            recurrence_until: z.string().optional(),
+            recurrence_byday: z.array(z.string()).optional(),
             location_name: z.string().min(1).nullable().optional(),
             location_address: z.string().min(1).nullable().optional(),
             location_maps_url: z.string().url().nullable().optional(),
@@ -410,6 +461,102 @@ async function main() {
               ],
             };
           }
+
+          const hasRrule = parsed.data.rrule !== undefined;
+          const hasStructuredRecurrence =
+            parsed.data.recurrence_freq !== undefined ||
+            parsed.data.recurrence_interval !== undefined ||
+            parsed.data.recurrence_count !== undefined ||
+            parsed.data.recurrence_until !== undefined ||
+            parsed.data.recurrence_byday !== undefined;
+
+          if (hasRrule && hasStructuredRecurrence) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    ok: false,
+                    error:
+                      "Cannot use both 'rrule' and structured recurrence fields (recurrence_freq, etc.). Use one or the other.",
+                  }),
+                },
+              ],
+            };
+          }
+
+          let recurrenceRule: string | undefined;
+
+          if (hasRrule) {
+            const validation = validateRRule(parsed.data.rrule!);
+            if (!validation.valid) {
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify({ ok: false, error: `Invalid RRULE: ${validation.error}` }),
+                  },
+                ],
+              };
+            }
+            recurrenceRule = validation.normalized;
+          } else if (hasStructuredRecurrence) {
+            if (!parsed.data.recurrence_freq) {
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify({
+                      ok: false,
+                      error: "recurrence_freq is required when using structured recurrence fields",
+                    }),
+                  },
+                ],
+              };
+            }
+            if (parsed.data.recurrence_count !== undefined && parsed.data.recurrence_until !== undefined) {
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify({
+                      ok: false,
+                      error: "Cannot use both recurrence_count and recurrence_until",
+                    }),
+                  },
+                ],
+              };
+            }
+
+            const parts: string[] = [`FREQ=${parsed.data.recurrence_freq}`];
+            if (parsed.data.recurrence_interval !== undefined) {
+              parts.push(`INTERVAL=${parsed.data.recurrence_interval}`);
+            }
+            if (parsed.data.recurrence_count !== undefined) {
+              parts.push(`COUNT=${parsed.data.recurrence_count}`);
+            }
+            if (parsed.data.recurrence_until !== undefined) {
+              parts.push(`UNTIL=${parsed.data.recurrence_until}`);
+            }
+            if (parsed.data.recurrence_byday !== undefined && parsed.data.recurrence_byday.length > 0) {
+              parts.push(`BYDAY=${parsed.data.recurrence_byday.join(",").toUpperCase()}`);
+            }
+
+            const builtRrule = parts.join(";");
+            const validation = validateRRule(builtRrule);
+            if (!validation.valid) {
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify({ ok: false, error: `Invalid recurrence: ${validation.error}` }),
+                  },
+                ],
+              };
+            }
+            recurrenceRule = validation.normalized;
+          }
+
           const timeZone = tz();
           const start = parseToolDateTime(parsed.data.start, timeZone);
           if (!start) {
@@ -467,6 +614,7 @@ async function main() {
               mapsUrl: loc.locationMapsUrl,
             }),
             alarmMinutesBefore: resolvedAlarms,
+            recurrenceRule,
           };
 
           const created = await client.createEvent(input);
@@ -510,6 +658,8 @@ async function main() {
                 .array(z.number().int().nonnegative().max(10080))
                 .nullable()
                 .optional(),
+              rrule: z.string().nullable().optional(),
+              clear_recurrence: z.boolean().optional(),
               location_name: z.string().min(1).nullable().optional(),
               location_address: z.string().min(1).nullable().optional(),
               location_maps_url: z.string().url().nullable().optional(),
@@ -560,12 +710,48 @@ async function main() {
             };
           }
 
+          if (existingEvent?.recurrenceId) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    ok: false,
+                    error:
+                      "Cannot update a single recurrence instance. The target event has a recurrence_id, meaning it is an exception to a recurring series. To update the entire series, use the master event's UID (without recurrence_id). Updating individual instances is not supported.",
+                  }),
+                },
+              ],
+            };
+          }
+
           const timeZone = tz();
 
           const patch: CalendarEventPatch = {
             uid: eventUid ?? "",
             timeZone,
           };
+
+          if (parsed.data.clear_recurrence === true) {
+            patch.recurrenceRule = null;
+          } else if (parsed.data.rrule !== undefined) {
+            if (parsed.data.rrule === null || parsed.data.rrule === "") {
+              patch.recurrenceRule = null;
+            } else {
+              const validation = validateRRule(parsed.data.rrule);
+              if (!validation.valid) {
+                return {
+                  content: [
+                    {
+                      type: "text",
+                      text: JSON.stringify({ ok: false, error: `Invalid RRULE: ${validation.error}` }),
+                    },
+                  ],
+                };
+              }
+              patch.recurrenceRule = validation.normalized;
+            }
+          }
 
           if (parsed.data.title !== undefined) {
             patch.title = parsed.data.title;
@@ -684,6 +870,7 @@ async function main() {
 
           let href = parsed.data.href;
           let eventUid = parsed.data.uid;
+          let existingEvent: CalendarRemoteEvent | null = null;
 
           if (!href && eventUid) {
             const found = await client.findEventByUid(eventUid);
@@ -701,12 +888,28 @@ async function main() {
             }
             href = found.data.event.href;
             eventUid = found.data.event.uid;
+            existingEvent = found.data.event;
           }
 
           if (!href) {
             return {
               content: [
                 { type: "text", text: JSON.stringify({ ok: false, error: "Provide uid or href" }) },
+              ],
+            };
+          }
+
+          if (existingEvent?.recurrenceId) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    ok: false,
+                    error:
+                      "Cannot delete a single recurrence instance. The target event has a recurrence_id, meaning it is an exception to a recurring series. Deleting the master event will delete the entire series. To delete individual instances, use a calendar app directly or cancel the instance. Instance-only deletion via CalDAV is not supported.",
+                  }),
+                },
               ],
             };
           }

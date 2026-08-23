@@ -18,6 +18,12 @@ export interface BuildVEventInput {
   timeZone: string;
   /** Minutes before start. Omitted → defaults; `[]` → no VALARMs. */
   alarmMinutesBefore?: number[];
+  /**
+   * RFC 5545 RRULE body without the "RRULE:" prefix.
+   * Example: "FREQ=WEEKLY;BYDAY=MO,WE;COUNT=8" or "FREQ=DAILY;UNTIL=20260901T000000Z"
+   * Omitted → no RRULE. Empty string or null → explicitly clear RRULE.
+   */
+  recurrenceRule?: string | null;
 }
 
 /** Escape text per RFC 5545 TEXT. */
@@ -63,6 +69,184 @@ function foldLine(line: string): string {
     remaining = remaining.slice(74);
   }
   return chunks.join("\r\n");
+}
+
+/** Valid RRULE FREQ values per RFC 5545. */
+const VALID_FREQ = [
+  "SECONDLY",
+  "MINUTELY",
+  "HOURLY",
+  "DAILY",
+  "WEEKLY",
+  "MONTHLY",
+  "YEARLY",
+] as const;
+
+/** Valid RRULE BYDAY day abbreviations. */
+const VALID_BYDAY = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"] as const;
+
+export interface RRuleValidationResult {
+  valid: boolean;
+  error?: string;
+  normalized?: string;
+}
+
+/**
+ * Validate an RFC 5545 RRULE body (without "RRULE:" prefix).
+ * Returns { valid: true, normalized } on success, { valid: false, error } on failure.
+ */
+export function validateRRule(rrule: string): RRuleValidationResult {
+  const trimmed = rrule.trim();
+  if (!trimmed) {
+    return { valid: false, error: "RRULE is empty" };
+  }
+
+  const parts = trimmed.split(";").filter((p) => p.length > 0);
+  if (parts.length === 0) {
+    return { valid: false, error: "RRULE has no parts" };
+  }
+
+  const kvMap = new Map<string, string>();
+  for (const part of parts) {
+    const eqIdx = part.indexOf("=");
+    if (eqIdx === -1) {
+      return { valid: false, error: `Invalid RRULE part (no "="): ${part}` };
+    }
+    const key = part.slice(0, eqIdx).toUpperCase();
+    const value = part.slice(eqIdx + 1);
+    if (!key || !value) {
+      return { valid: false, error: `Invalid RRULE part: ${part}` };
+    }
+    if (kvMap.has(key)) {
+      return { valid: false, error: `Duplicate RRULE key: ${key}` };
+    }
+    kvMap.set(key, value);
+  }
+
+  const freq = kvMap.get("FREQ");
+  if (!freq) {
+    return { valid: false, error: "RRULE must have FREQ" };
+  }
+  if (!VALID_FREQ.includes(freq as (typeof VALID_FREQ)[number])) {
+    return { valid: false, error: `Invalid FREQ value: ${freq}` };
+  }
+
+  const count = kvMap.get("COUNT");
+  const until = kvMap.get("UNTIL");
+  if (count !== undefined && until !== undefined) {
+    return {
+      valid: false,
+      error: "RRULE cannot have both COUNT and UNTIL",
+    };
+  }
+
+  if (count !== undefined) {
+    const n = parseInt(count, 10);
+    if (!Number.isFinite(n) || n < 1 || String(n) !== count) {
+      return { valid: false, error: `Invalid COUNT value: ${count}` };
+    }
+  }
+
+  if (until !== undefined) {
+    if (!/^\d{8}(T\d{6}Z?)?$/.test(until)) {
+      return { valid: false, error: `Invalid UNTIL value: ${until}` };
+    }
+  }
+
+  const interval = kvMap.get("INTERVAL");
+  if (interval !== undefined) {
+    const n = parseInt(interval, 10);
+    if (!Number.isFinite(n) || n < 1 || String(n) !== interval) {
+      return { valid: false, error: `Invalid INTERVAL value: ${interval}` };
+    }
+  }
+
+  const byday = kvMap.get("BYDAY");
+  if (byday !== undefined) {
+    const days = byday.split(",");
+    for (const day of days) {
+      const dayMatch = /^(-?\d+)?(SU|MO|TU|WE|TH|FR|SA)$/i.exec(day);
+      if (!dayMatch) {
+        return { valid: false, error: `Invalid BYDAY value: ${day}` };
+      }
+      const prefix = dayMatch[1];
+      if (prefix !== undefined) {
+        const n = parseInt(prefix, 10);
+        if (!Number.isFinite(n) || n === 0 || n < -53 || n > 53) {
+          return { valid: false, error: `Invalid BYDAY ordinal: ${day}` };
+        }
+      }
+      const dayAbbr = (dayMatch[2] ?? "").toUpperCase();
+      if (!VALID_BYDAY.includes(dayAbbr as (typeof VALID_BYDAY)[number])) {
+        return { valid: false, error: `Invalid BYDAY day: ${day}` };
+      }
+    }
+  }
+
+  const bymonth = kvMap.get("BYMONTH");
+  if (bymonth !== undefined) {
+    const months = bymonth.split(",");
+    for (const m of months) {
+      const n = parseInt(m, 10);
+      if (!Number.isFinite(n) || n < 1 || n > 12 || String(n) !== m) {
+        return { valid: false, error: `Invalid BYMONTH value: ${m}` };
+      }
+    }
+  }
+
+  const bymonthday = kvMap.get("BYMONTHDAY");
+  if (bymonthday !== undefined) {
+    const days = bymonthday.split(",");
+    for (const d of days) {
+      const n = parseInt(d, 10);
+      if (
+        !Number.isFinite(n) ||
+        n === 0 ||
+        n < -31 ||
+        n > 31 ||
+        String(n) !== d
+      ) {
+        return { valid: false, error: `Invalid BYMONTHDAY value: ${d}` };
+      }
+    }
+  }
+
+  const bysetpos = kvMap.get("BYSETPOS");
+  if (bysetpos !== undefined) {
+    const positions = bysetpos.split(",");
+    for (const p of positions) {
+      const n = parseInt(p, 10);
+      if (
+        !Number.isFinite(n) ||
+        n === 0 ||
+        n < -366 ||
+        n > 366 ||
+        String(n) !== p
+      ) {
+        return { valid: false, error: `Invalid BYSETPOS value: ${p}` };
+      }
+    }
+  }
+
+  const wkst = kvMap.get("WKST");
+  if (wkst !== undefined) {
+    if (!VALID_BYDAY.includes(wkst.toUpperCase() as (typeof VALID_BYDAY)[number])) {
+      return { valid: false, error: `Invalid WKST value: ${wkst}` };
+    }
+  }
+
+  const normalizedParts: string[] = [];
+  normalizedParts.push(`FREQ=${freq}`);
+  if (interval !== undefined) normalizedParts.push(`INTERVAL=${interval}`);
+  if (count !== undefined) normalizedParts.push(`COUNT=${count}`);
+  if (until !== undefined) normalizedParts.push(`UNTIL=${until}`);
+  if (byday !== undefined) normalizedParts.push(`BYDAY=${byday.toUpperCase()}`);
+  if (bymonth !== undefined) normalizedParts.push(`BYMONTH=${bymonth}`);
+  if (bymonthday !== undefined) normalizedParts.push(`BYMONTHDAY=${bymonthday}`);
+  if (bysetpos !== undefined) normalizedParts.push(`BYSETPOS=${bysetpos}`);
+  if (wkst !== undefined) normalizedParts.push(`WKST=${wkst.toUpperCase()}`);
+
+  return { valid: true, normalized: normalizedParts.join(";") };
 }
 
 export function defaultEventEnd(start: Date, end?: Date): Date {
@@ -209,6 +393,9 @@ export function buildVEventIcs(input: BuildVEventInput): string {
     `DTEND;TZID=${input.timeZone}:${endLocal}`,
     `SUMMARY:${summary}`,
   ];
+  if (input.recurrenceRule && input.recurrenceRule.trim()) {
+    lines.push(`RRULE:${input.recurrenceRule.trim()}`);
+  }
   if (description) {
     lines.push(`DESCRIPTION:${description}`);
   }

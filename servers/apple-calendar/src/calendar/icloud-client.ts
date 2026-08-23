@@ -29,6 +29,12 @@ export interface CalendarEventInput {
    * Pass `[]` for no alarms.
    */
   alarmMinutesBefore?: number[];
+  /**
+   * RFC 5545 RRULE body without the "RRULE:" prefix.
+   * Example: "FREQ=WEEKLY;BYDAY=MO,WE;COUNT=8"
+   * Omitted → no recurrence. Empty string or null → explicitly no recurrence.
+   */
+  recurrenceRule?: string | null;
 }
 
 /**
@@ -50,6 +56,13 @@ export interface CalendarEventPatch {
   location?: string;
   geo?: { lat: number; lon: number };
   alarmMinutesBefore?: number[];
+  /**
+   * RFC 5545 RRULE body without the "RRULE:" prefix.
+   * Omitted → preserve existing RRULE from CalDAV.
+   * Non-empty string → set/replace RRULE.
+   * Empty string or null → clear RRULE (make non-recurring).
+   */
+  recurrenceRule?: string | null;
 }
 
 export interface CalendarEventListItem {
@@ -115,6 +128,7 @@ function toIcsInput(
     location?: string;
     geo?: { lat: number; lon: number };
     timeZone: string;
+    recurrenceRule?: string | null;
   },
   end: Date,
   alarmMinutesBefore: number[],
@@ -129,6 +143,7 @@ function toIcsInput(
     geo: input.geo,
     timeZone: input.timeZone,
     alarmMinutesBefore,
+    recurrenceRule: input.recurrenceRule,
   };
 }
 
@@ -141,7 +156,8 @@ function isAlarmsOnlyPatch(patch: CalendarEventPatch): boolean {
     patch.description === undefined &&
     patch.mapsUrl === undefined &&
     patch.location === undefined &&
-    patch.geo === undefined
+    patch.geo === undefined &&
+    patch.recurrenceRule === undefined
   );
 }
 
@@ -394,6 +410,13 @@ export class TsdavICloudCalendarClient implements ICloudCalendarClient {
         existing?.parsed.alarmMinutesBefore ?? null,
       );
 
+      let recurrenceRule: string | null | undefined;
+      if (patch.recurrenceRule !== undefined) {
+        recurrenceRule = patch.recurrenceRule;
+      } else {
+        recurrenceRule = existing?.parsed.recurrenceRule ?? undefined;
+      }
+
       const iCalString = buildVEventIcs(
         toIcsInput(
           {
@@ -404,6 +427,7 @@ export class TsdavICloudCalendarClient implements ICloudCalendarClient {
             location: location || undefined,
             geo: geo || undefined,
             timeZone: patch.timeZone,
+            recurrenceRule,
           },
           end,
           alarms,
