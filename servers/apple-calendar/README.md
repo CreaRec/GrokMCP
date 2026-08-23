@@ -47,18 +47,41 @@ npm install
 
 ## Running the Server
 
-### Development (with tsx)
+This server supports two transport modes:
+
+### stdio mode (local / subprocess)
+
+For local development or when the MCP client spawns the server as a subprocess:
 
 ```bash
+# Development (with tsx)
 npm run dev
-```
 
-### Production (compiled)
-
-```bash
+# Production (compiled)
 npm run build
 npm start
 ```
+
+### HTTP mode (remote / Docker)
+
+For production deployment where clients connect over the network:
+
+```bash
+# Development (with tsx)
+npm run dev:http
+
+# Production (compiled)
+npm run build
+npm run start:http
+```
+
+HTTP mode exposes:
+- `POST /mcp` — MCP Streamable HTTP endpoint
+- `GET /health` — Health check (returns `{"status":"ok"}`)
+
+Environment variables for HTTP mode:
+- `PORT` — Listen port (default: `8792`)
+- `HOST` — Bind address (default: `0.0.0.0`)
 
 ## Connecting to Grok Bot / Cursor
 
@@ -99,6 +122,22 @@ Or with compiled output:
   }
 }
 ```
+
+### HTTP mode (remote server)
+
+When running in HTTP mode (production Docker deployment), connect via URL:
+
+```json
+{
+  "mcpServers": {
+    "apple-calendar": {
+      "url": "http://<host>:8792/mcp"
+    }
+  }
+}
+```
+
+See [docs/deploy.md](../../docs/deploy.md) for production deployment instructions.
 
 ## Tool Reference
 

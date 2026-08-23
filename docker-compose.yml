@@ -1,0 +1,18 @@
+services:
+  apple-calendar:
+    image: ${IMAGE:-ghcr.io/crearec/grok-mcp-apple-calendar}:${IMAGE_TAG:-main}
+    container_name: grok-mcp-apple-calendar
+    restart: unless-stopped
+    ports:
+      - "8792:8792"
+    env_file:
+      - .env
+    environment:
+      - PORT=8792
+      - HOST=0.0.0.0
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8792/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
