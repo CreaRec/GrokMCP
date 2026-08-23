@@ -6,6 +6,7 @@ Production runs as a Docker Compose stack. Images come from GitHub Container Reg
 |-------|---------|
 | `ghcr.io/crearec/grok-mcp-apple-calendar` | `apple-calendar` |
 | `grafana/mcp-grafana` (Docker Hub) | `grafana-mcp` |
+| `pgvector/pgvector:0.8.6-pg16` (Docker Hub) | `synology-db` |
 
 Deploy directory: `/home/crearec/grok-mcp`
 
@@ -79,6 +80,49 @@ To create the service account token:
 2. Click **Add service account**, name it (e.g., `mcp-reader`), set role to **Viewer**
 3. Click **Add service account token**, copy the `glsa_...` token
 4. Paste the token as `GRAFANA_SERVICE_ACCOUNT_TOKEN` in `/home/crearec/grok-mcp/.env`
+
+#### Synology DB
+
+The `synology-db` service is a PostgreSQL + pgvector database for the Synology MCP. It stores labels, share URLs, and embeddings for semantic search—**never** file bytes or share passwords.
+
+Add these variables to `.env`:
+
+```sh
+# PostgreSQL credentials (required for synology-db to start)
+SYNOLOGY_DB_USER=synology
+SYNOLOGY_DB_PASSWORD=your_strong_random_password
+SYNOLOGY_DB_NAME=synology
+
+# Prisma DATABASE_URL (for running migrations)
+DATABASE_URL=postgresql://synology:your_strong_random_password@127.0.0.1:5434/synology
+```
+
+**Important:** The `synology-db` container will fail to start if `SYNOLOGY_DB_PASSWORD` is empty or missing. Set these variables in `.env` before starting the stack.
+
+The database binds only to `127.0.0.1:5434` (not exposed externally). The Synology MCP service will connect via the Docker network.
+
+**Data policy:** Descriptions may include names/addresses; must **never** include passport numbers, SSN, bank account numbers, or driver's license numbers.
+
+#### Initialize the Synology DB schema (after first start)
+
+After `synology-db` is running, apply Prisma migrations to create the tables:
+
+```sh
+cd /home/crearec/grok-mcp
+git clone https://github.com/CreaRec/GrokMCP.git --depth 1 /tmp/grok-mcp-schema
+cd /tmp/grok-mcp-schema/servers/synology
+npm install
+DATABASE_URL="postgresql://synology:YOUR_PASSWORD@127.0.0.1:5434/synology" npx prisma migrate deploy
+rm -rf /tmp/grok-mcp-schema
+```
+
+Or if you have the repo already checked out:
+
+```sh
+cd /path/to/GrokMCP/servers/synology
+npm install
+npx prisma migrate deploy  # uses DATABASE_URL from .env or environment
+```
 
 ### 3. First start
 
