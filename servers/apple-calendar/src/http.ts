@@ -8,7 +8,6 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import {
   TsdavICloudCalendarClient,
-  TsdavICloudRemindersClient,
   type CalendarEventInput,
   type CalendarEventPatch,
   type CalendarRemoteEvent,
@@ -33,7 +32,6 @@ function getConfig() {
   const username = process.env.ICLOUD_CALDAV_USERNAME;
   const password = process.env.ICLOUD_CALDAV_PASSWORD;
   const calendarUrl = process.env.ICLOUD_CALDAV_CALENDAR_URL;
-  const remindersUrl = process.env.ICLOUD_CALDAV_REMINDERS_URL;
   const timeZone = process.env.USER_TIMEZONE ?? "America/Chicago";
 
   if (!username || !password || !calendarUrl) {
@@ -42,7 +40,7 @@ function getConfig() {
     );
   }
 
-  return { username, password, calendarUrl, remindersUrl, timeZone };
+  return { username, password, calendarUrl, timeZone };
 }
 
 function parseIso(iso: string): Date | null {
@@ -179,32 +177,12 @@ function createServer(config: ReturnType<typeof getConfig>) {
     config.password,
     config.calendarUrl,
   );
-  const remindersClient = config.remindersUrl
-    ? new TsdavICloudRemindersClient(
-        config.username,
-        config.password,
-        config.remindersUrl,
-      )
-    : null;
   const tz = () => config.timeZone;
-
-  function requireRemindersClient(): TsdavICloudRemindersClient {
-    if (!remindersClient) {
-      throw new Error(
-        "Reminders not configured. Set ICLOUD_CALDAV_REMINDERS_URL env var to enable reminder tools.",
-      );
-    }
-    return remindersClient;
-  }
 
   const server = new McpServer(
     { name: "apple-calendar", version: "0.1.0" },
     { capabilities: { tools: {} } },
   );
-
-  // NOTE: list_reminder_lists is kept in the codebase (see fetchReminderLists in icloud-client.ts)
-  // but not exposed as an MCP tool because the reminders collection URL is pinned via
-  // ICLOUD_CALDAV_REMINDERS_URL env var. Discovery may be re-enabled in the future if needed.
 
   server.registerTool(
     "calendar_list",
@@ -651,302 +629,6 @@ function createServer(config: ReturnType<typeof getConfig>) {
         content: [{
           type: "text",
           text: JSON.stringify({ ok: true, data: { deleted: true, uid: eventUid, href } }),
-        }],
-      };
-    },
-  );
-
-  // ----- Reminder Tools -----
-
-  server.registerTool(
-    "reminder_list",
-    {
-      description:
-        "List reminders from the configured iCloud Reminders collection. Returns incomplete reminders by default. Requires ICLOUD_CALDAV_REMINDERS_URL env var.",
-      inputSchema: {
-        include_completed: z.boolean().optional().describe("If true, include completed reminders. Default: false."),
-        limit: z.number().int().min(1).max(200).optional().describe("Max reminders to return. Default: 50."),
-      },
-    },
-    async ({ include_completed, limit }) => {
-      const rClient = requireRemindersClient();
-      const result = await rClient.listReminders({
-        includeCompleted: include_completed,
-        limit,
-      });
-      if (!result.ok) {
-        return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: result.error }) }] };
-      }
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            ok: true,
-            data: { reminders: result.data.reminders, count: result.data.reminders.length },
-          }),
-        }],
-      };
-    },
-  );
-
-  server.registerTool(
-    "reminder_create",
-    {
-      description:
-        "Create a new reminder in the configured iCloud Reminders collection. Due date is optional and follows the same timezone rules as calendar events (naive ISO is USER_TIMEZONE wall time, Z is UTC). Requires ICLOUD_CALDAV_REMINDERS_URL env var.",
-      inputSchema: {
-        title: z.string().min(1).describe("Reminder title (required)"),
-        notes: z.string().optional().describe("Optional notes"),
-        due: z.string().optional().describe(
-          "Optional due date/time. Naive YYYY-MM-DDTHH:MM is USER_TIMEZONE wall time. Z/offset is an absolute instant. YYYY-MM-DD sets a date-only due (no time).",
-        ),
-      },
-    },
-    async ({ title, notes, due: dueStr }) => {
-      const rClient = requireRemindersClient();
-      const timeZone = tz();
-      let due: Date | undefined;
-      let dueIsDate = false;
-
-      if (dueStr) {
-        const dueTrimmed = dueStr.trim();
-        if (DATE_ONLY_RE.test(dueTrimmed)) {
-          due = dayStartUtc(dueTrimmed, timeZone);
-          dueIsDate = true;
-        } else {
-          due = parseToolDateTime(dueTrimmed, timeZone) ?? undefined;
-          if (!due) {
-            return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: "Invalid due date" }) }] };
-          }
-        }
-      }
-
-      const uid = randomUUID();
-      const result = await rClient.createReminder({
-        uid,
-        title,
-        notes,
-        due,
-        dueIsDate,
-        timeZone,
-      });
-
-      if (!result.ok) {
-        return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: result.error }) }] };
-      }
-
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            ok: true,
-            data: {
-              uid: result.data.uid,
-              href: result.data.href,
-              title,
-              notes: notes ?? null,
-              due_iso: due?.toISOString() ?? null,
-              due_local: due ? formatLocal(due, timeZone) : null,
-            },
-          }),
-        }],
-      };
-    },
-  );
-
-  server.registerTool(
-    "reminder_complete",
-    {
-      description:
-        "Mark a reminder as completed. Sets STATUS=COMPLETED and adds COMPLETED timestamp. Recurring reminders (with RRULE) are not supported and will be refused. Requires ICLOUD_CALDAV_REMINDERS_URL env var.",
-      inputSchema: {
-        uid: z.string().min(1).optional().describe("Reminder UID (will lookup href via CalDAV if needed)"),
-        href: z.string().min(1).optional().describe("Reminder href (CalDAV URL) - preferred if known"),
-      },
-    },
-    async (args) => {
-      const rClient = requireRemindersClient();
-      if (!args.uid && !args.href) {
-        return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: "Provide uid or href" }) }] };
-      }
-
-      let href = args.href;
-      let reminderUid = args.uid;
-
-      if (!href && reminderUid) {
-        const found = await rClient.findReminderByUid(reminderUid);
-        if (!found.ok) {
-          return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: found.error }) }] };
-        }
-        if (!found.data) {
-          return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: "Reminder not found by UID" }) }] };
-        }
-        href = found.data.reminder.href;
-        reminderUid = found.data.reminder.uid;
-      }
-
-      if (!href) {
-        return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: "Provide uid or href" }) }] };
-      }
-
-      const timeZone = tz();
-      const result = await rClient.completeReminder(href, timeZone);
-      if (!result.ok) {
-        return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: result.error }) }] };
-      }
-
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            ok: true,
-            data: {
-              uid: result.data.uid,
-              href: result.data.href,
-              completed: true,
-              completed_at_iso: result.data.completedAt.toISOString(),
-              completed_at_local: formatLocal(result.data.completedAt, timeZone),
-            },
-          }),
-        }],
-      };
-    },
-  );
-
-  server.registerTool(
-    "reminder_update",
-    {
-      description:
-        "Update a reminder's title, notes, or due date. Only pass fields you want to change — omitted fields are preserved. To clear the due date, pass due as null or empty string. Recurring reminders (with RRULE) are not supported and will be refused. Requires ICLOUD_CALDAV_REMINDERS_URL env var.",
-      inputSchema: {
-        uid: z.string().min(1).optional().describe("Reminder UID (will lookup href via CalDAV if needed)"),
-        href: z.string().min(1).optional().describe("Reminder href (CalDAV URL) - preferred if known"),
-        title: z.string().min(1).optional().describe("New title"),
-        notes: z.string().nullable().optional().describe("New notes"),
-        due: z.string().nullable().optional().describe(
-          "New due date (same format as reminder_create). Pass empty string or null to clear due date.",
-        ),
-      },
-    },
-    async (args) => {
-      const rClient = requireRemindersClient();
-      if (!args.uid && !args.href) {
-        return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: "Provide uid or href" }) }] };
-      }
-
-      let href = args.href;
-      let reminderUid = args.uid;
-
-      if (!href && reminderUid) {
-        const found = await rClient.findReminderByUid(reminderUid);
-        if (!found.ok) {
-          return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: found.error }) }] };
-        }
-        if (!found.data) {
-          return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: "Reminder not found by UID" }) }] };
-        }
-        href = found.data.reminder.href;
-        reminderUid = found.data.reminder.uid;
-      }
-
-      if (!href) {
-        return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: "Provide uid or href" }) }] };
-      }
-
-      const timeZone = tz();
-      let due: Date | null | undefined;
-      let dueIsDate: boolean | undefined;
-
-      if (args.due !== undefined) {
-        if (args.due === null || args.due === "") {
-          due = null;
-        } else {
-          const dueTrimmed = args.due.trim();
-          if (DATE_ONLY_RE.test(dueTrimmed)) {
-            due = dayStartUtc(dueTrimmed, timeZone);
-            dueIsDate = true;
-          } else {
-            due = parseToolDateTime(dueTrimmed, timeZone);
-            if (!due) {
-              return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: "Invalid due date" }) }] };
-            }
-            dueIsDate = false;
-          }
-        }
-      }
-
-      const result = await rClient.updateReminder(href, {
-        title: args.title,
-        notes: args.notes,
-        due,
-        dueIsDate,
-        timeZone,
-      });
-
-      if (!result.ok) {
-        return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: result.error }) }] };
-      }
-
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            ok: true,
-            data: {
-              uid: result.data.uid,
-              href: result.data.href,
-              updated: true,
-            },
-          }),
-        }],
-      };
-    },
-  );
-
-  server.registerTool(
-    "reminder_delete",
-    {
-      description:
-        "Delete a reminder by uid or href. Recurring reminders (with RRULE) are not supported and will be refused. Requires ICLOUD_CALDAV_REMINDERS_URL env var.",
-      inputSchema: {
-        uid: z.string().min(1).optional().describe("Reminder UID (will lookup href via CalDAV if needed)"),
-        href: z.string().min(1).optional().describe("Reminder href (CalDAV URL) - preferred if known"),
-      },
-    },
-    async (args) => {
-      const rClient = requireRemindersClient();
-      if (!args.uid && !args.href) {
-        return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: "Provide uid or href" }) }] };
-      }
-
-      let href = args.href;
-      let reminderUid = args.uid;
-
-      if (!href && reminderUid) {
-        const found = await rClient.findReminderByUid(reminderUid);
-        if (!found.ok) {
-          return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: found.error }) }] };
-        }
-        if (!found.data) {
-          return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: "Reminder not found by UID" }) }] };
-        }
-        href = found.data.reminder.href;
-        reminderUid = found.data.reminder.uid;
-      }
-
-      if (!href) {
-        return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: "Provide uid or href" }) }] };
-      }
-
-      const result = await rClient.deleteReminder(href);
-      if (!result.ok) {
-        return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: result.error }) }] };
-      }
-
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({ ok: true, data: { deleted: true, uid: reminderUid, href } }),
         }],
       };
     },

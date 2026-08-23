@@ -9,7 +9,6 @@ import {
 import { z } from "zod";
 import {
   TsdavICloudCalendarClient,
-  TsdavICloudRemindersClient,
   type CalendarEventInput,
   type CalendarEventPatch,
   type CalendarRemoteEvent,
@@ -34,7 +33,6 @@ function getConfig() {
   const username = process.env.ICLOUD_CALDAV_USERNAME;
   const password = process.env.ICLOUD_CALDAV_PASSWORD;
   const calendarUrl = process.env.ICLOUD_CALDAV_CALENDAR_URL;
-  const remindersUrl = process.env.ICLOUD_CALDAV_REMINDERS_URL;
   const timeZone = process.env.USER_TIMEZONE ?? "America/Chicago";
 
   if (!username || !password || !calendarUrl) {
@@ -43,7 +41,7 @@ function getConfig() {
     );
   }
 
-  return { username, password, calendarUrl, remindersUrl, timeZone };
+  return { username, password, calendarUrl, timeZone };
 }
 
 function parseIso(iso: string): Date | null {
@@ -182,9 +180,6 @@ function alarmMinutesFromToolParam(
 }
 
 const toolDefinitions = [
-  // NOTE: list_reminder_lists is kept in the codebase (see fetchReminderLists in icloud-client.ts)
-  // but not exposed as an MCP tool because the reminders collection URL is pinned via
-  // ICLOUD_CALDAV_REMINDERS_URL env var. Discovery may be re-enabled in the future if needed.
   {
     name: "calendar_list",
     description:
@@ -345,118 +340,6 @@ const toolDefinitions = [
       },
     },
   },
-  // Reminder tools (require ICLOUD_CALDAV_REMINDERS_URL)
-  {
-    name: "reminder_list",
-    description:
-      "List reminders from the configured iCloud Reminders collection. Returns incomplete reminders by default. Requires ICLOUD_CALDAV_REMINDERS_URL env var.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        include_completed: {
-          type: "boolean",
-          description: "If true, include completed reminders. Default: false.",
-        },
-        limit: {
-          type: "integer",
-          minimum: 1,
-          maximum: 200,
-          description: "Max reminders to return. Default: 50.",
-        },
-      },
-    },
-  },
-  {
-    name: "reminder_create",
-    description:
-      "Create a new reminder in the configured iCloud Reminders collection. Due date is optional and follows the same timezone rules as calendar events (naive ISO is USER_TIMEZONE wall time, Z is UTC). Requires ICLOUD_CALDAV_REMINDERS_URL env var.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        title: {
-          type: "string",
-          description: "Reminder title (required)",
-        },
-        notes: {
-          type: "string",
-          description: "Optional notes",
-        },
-        due: {
-          type: "string",
-          description:
-            "Optional due date/time. Naive YYYY-MM-DDTHH:MM is USER_TIMEZONE wall time. Z/offset is an absolute instant. YYYY-MM-DD sets a date-only due (no time).",
-        },
-      },
-      required: ["title"],
-    },
-  },
-  {
-    name: "reminder_complete",
-    description:
-      "Mark a reminder as completed. Sets STATUS=COMPLETED and adds COMPLETED timestamp. Recurring reminders (with RRULE) are not supported and will be refused. Requires ICLOUD_CALDAV_REMINDERS_URL env var.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        uid: {
-          type: "string",
-          description: "Reminder UID (will lookup href via CalDAV if needed)",
-        },
-        href: {
-          type: "string",
-          description: "Reminder href (CalDAV URL) - preferred if known",
-        },
-      },
-    },
-  },
-  {
-    name: "reminder_update",
-    description:
-      "Update a reminder's title, notes, or due date. Only pass fields you want to change — omitted fields are preserved. To clear the due date, pass due as null or empty string. Recurring reminders (with RRULE) are not supported and will be refused. Requires ICLOUD_CALDAV_REMINDERS_URL env var.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        uid: {
-          type: "string",
-          description: "Reminder UID (will lookup href via CalDAV if needed)",
-        },
-        href: {
-          type: "string",
-          description: "Reminder href (CalDAV URL) - preferred if known",
-        },
-        title: {
-          type: "string",
-          description: "New title",
-        },
-        notes: {
-          type: "string",
-          description: "New notes",
-        },
-        due: {
-          type: "string",
-          description:
-            "New due date (same format as reminder_create). Pass empty string or null to clear due date.",
-        },
-      },
-    },
-  },
-  {
-    name: "reminder_delete",
-    description:
-      "Delete a reminder by uid or href. Recurring reminders (with RRULE) are not supported and will be refused. Requires ICLOUD_CALDAV_REMINDERS_URL env var.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        uid: {
-          type: "string",
-          description: "Reminder UID (will lookup href via CalDAV if needed)",
-        },
-        href: {
-          type: "string",
-          description: "Reminder href (CalDAV URL) - preferred if known",
-        },
-      },
-    },
-  },
 ];
 
 async function main() {
@@ -466,24 +349,7 @@ async function main() {
     config.password,
     config.calendarUrl,
   );
-  const remindersClient = config.remindersUrl
-    ? new TsdavICloudRemindersClient(
-        config.username,
-        config.password,
-        config.remindersUrl,
-      )
-    : null;
   const tz = () => config.timeZone;
-
-  /** Helper to check if reminders are configured. */
-  function requireRemindersClient(): TsdavICloudRemindersClient {
-    if (!remindersClient) {
-      throw new Error(
-        "Reminders not configured. Set ICLOUD_CALDAV_REMINDERS_URL env var to enable reminder tools.",
-      );
-    }
-    return remindersClient;
-  }
 
   const server = new Server(
     {
@@ -506,10 +372,6 @@ async function main() {
 
     try {
       switch (name) {
-        // NOTE: list_reminder_lists handler removed from MCP tool dispatch.
-        // The fetchReminderLists implementation is kept in icloud-client.ts for potential
-        // future use, but the reminders collection URL is now pinned via ICLOUD_CALDAV_REMINDERS_URL.
-
         case "calendar_list": {
           const schema = z.object({
             from: z.string().optional(),
@@ -1068,375 +930,6 @@ async function main() {
                   data: {
                     deleted: true,
                     uid: eventUid,
-                    href,
-                  },
-                }),
-              },
-            ],
-          };
-        }
-
-        // ----- Reminder Tools -----
-
-        case "reminder_list": {
-          const rClient = requireRemindersClient();
-          const schema = z.object({
-            include_completed: z.boolean().optional(),
-            limit: z.number().int().min(1).max(200).optional(),
-          });
-          const parsed = schema.safeParse(args ?? {});
-          if (!parsed.success) {
-            return {
-              content: [
-                { type: "text", text: JSON.stringify({ ok: false, error: parsed.error.message }) },
-              ],
-            };
-          }
-          const result = await rClient.listReminders({
-            includeCompleted: parsed.data.include_completed,
-            limit: parsed.data.limit,
-          });
-          if (!result.ok) {
-            return {
-              content: [{ type: "text", text: JSON.stringify({ ok: false, error: result.error }) }],
-            };
-          }
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({
-                  ok: true,
-                  data: { reminders: result.data.reminders, count: result.data.reminders.length },
-                }),
-              },
-            ],
-          };
-        }
-
-        case "reminder_create": {
-          const rClient = requireRemindersClient();
-          const schema = z.object({
-            title: z.string().min(1),
-            notes: z.string().optional(),
-            due: z.string().optional(),
-          });
-          const parsed = schema.safeParse(args);
-          if (!parsed.success) {
-            return {
-              content: [
-                { type: "text", text: JSON.stringify({ ok: false, error: parsed.error.message }) },
-              ],
-            };
-          }
-
-          const timeZone = tz();
-          let due: Date | undefined;
-          let dueIsDate = false;
-
-          if (parsed.data.due) {
-            const dueTrimmed = parsed.data.due.trim();
-            if (DATE_ONLY_RE.test(dueTrimmed)) {
-              due = dayStartUtc(dueTrimmed, timeZone);
-              dueIsDate = true;
-            } else {
-              due = parseToolDateTime(dueTrimmed, timeZone) ?? undefined;
-              if (!due) {
-                return {
-                  content: [
-                    { type: "text", text: JSON.stringify({ ok: false, error: "Invalid due date" }) },
-                  ],
-                };
-              }
-            }
-          }
-
-          const uid = randomUUID();
-          const result = await rClient.createReminder({
-            uid,
-            title: parsed.data.title,
-            notes: parsed.data.notes,
-            due,
-            dueIsDate,
-            timeZone,
-          });
-
-          if (!result.ok) {
-            return {
-              content: [{ type: "text", text: JSON.stringify({ ok: false, error: result.error }) }],
-            };
-          }
-
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({
-                  ok: true,
-                  data: {
-                    uid: result.data.uid,
-                    href: result.data.href,
-                    title: parsed.data.title,
-                    notes: parsed.data.notes ?? null,
-                    due_iso: due?.toISOString() ?? null,
-                    due_local: due ? formatLocal(due, timeZone) : null,
-                  },
-                }),
-              },
-            ],
-          };
-        }
-
-        case "reminder_complete": {
-          const rClient = requireRemindersClient();
-          const schema = z
-            .object({
-              uid: z.string().min(1).optional(),
-              href: z.string().min(1).optional(),
-            })
-            .refine((v) => Boolean(v.uid || v.href), {
-              message: "Provide uid or href",
-            });
-
-          const parsed = schema.safeParse(args);
-          if (!parsed.success) {
-            return {
-              content: [
-                { type: "text", text: JSON.stringify({ ok: false, error: parsed.error.message }) },
-              ],
-            };
-          }
-
-          let href = parsed.data.href;
-          let reminderUid = parsed.data.uid;
-
-          if (!href && reminderUid) {
-            const found = await rClient.findReminderByUid(reminderUid);
-            if (!found.ok) {
-              return {
-                content: [{ type: "text", text: JSON.stringify({ ok: false, error: found.error }) }],
-              };
-            }
-            if (!found.data) {
-              return {
-                content: [
-                  { type: "text", text: JSON.stringify({ ok: false, error: "Reminder not found by UID" }) },
-                ],
-              };
-            }
-            href = found.data.reminder.href;
-            reminderUid = found.data.reminder.uid;
-          }
-
-          if (!href) {
-            return {
-              content: [
-                { type: "text", text: JSON.stringify({ ok: false, error: "Provide uid or href" }) },
-              ],
-            };
-          }
-
-          const timeZone = tz();
-          const result = await rClient.completeReminder(href, timeZone);
-          if (!result.ok) {
-            return {
-              content: [{ type: "text", text: JSON.stringify({ ok: false, error: result.error }) }],
-            };
-          }
-
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({
-                  ok: true,
-                  data: {
-                    uid: result.data.uid,
-                    href: result.data.href,
-                    completed: true,
-                    completed_at_iso: result.data.completedAt.toISOString(),
-                    completed_at_local: formatLocal(result.data.completedAt, timeZone),
-                  },
-                }),
-              },
-            ],
-          };
-        }
-
-        case "reminder_update": {
-          const rClient = requireRemindersClient();
-          const schema = z
-            .object({
-              uid: z.string().min(1).optional(),
-              href: z.string().min(1).optional(),
-              title: z.string().min(1).optional(),
-              notes: z.string().nullable().optional(),
-              due: z.string().nullable().optional(),
-            })
-            .refine((v) => Boolean(v.uid || v.href), {
-              message: "Provide uid or href",
-            });
-
-          const parsed = schema.safeParse(args);
-          if (!parsed.success) {
-            return {
-              content: [
-                { type: "text", text: JSON.stringify({ ok: false, error: parsed.error.message }) },
-              ],
-            };
-          }
-
-          let href = parsed.data.href;
-          let reminderUid = parsed.data.uid;
-
-          if (!href && reminderUid) {
-            const found = await rClient.findReminderByUid(reminderUid);
-            if (!found.ok) {
-              return {
-                content: [{ type: "text", text: JSON.stringify({ ok: false, error: found.error }) }],
-              };
-            }
-            if (!found.data) {
-              return {
-                content: [
-                  { type: "text", text: JSON.stringify({ ok: false, error: "Reminder not found by UID" }) },
-                ],
-              };
-            }
-            href = found.data.reminder.href;
-            reminderUid = found.data.reminder.uid;
-          }
-
-          if (!href) {
-            return {
-              content: [
-                { type: "text", text: JSON.stringify({ ok: false, error: "Provide uid or href" }) },
-              ],
-            };
-          }
-
-          const timeZone = tz();
-          let due: Date | null | undefined;
-          let dueIsDate: boolean | undefined;
-
-          if (parsed.data.due !== undefined) {
-            if (parsed.data.due === null || parsed.data.due === "") {
-              due = null;
-            } else {
-              const dueTrimmed = parsed.data.due.trim();
-              if (DATE_ONLY_RE.test(dueTrimmed)) {
-                due = dayStartUtc(dueTrimmed, timeZone);
-                dueIsDate = true;
-              } else {
-                due = parseToolDateTime(dueTrimmed, timeZone);
-                if (!due) {
-                  return {
-                    content: [
-                      { type: "text", text: JSON.stringify({ ok: false, error: "Invalid due date" }) },
-                    ],
-                  };
-                }
-                dueIsDate = false;
-              }
-            }
-          }
-
-          const result = await rClient.updateReminder(href, {
-            title: parsed.data.title,
-            notes: parsed.data.notes,
-            due,
-            dueIsDate,
-            timeZone,
-          });
-
-          if (!result.ok) {
-            return {
-              content: [{ type: "text", text: JSON.stringify({ ok: false, error: result.error }) }],
-            };
-          }
-
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({
-                  ok: true,
-                  data: {
-                    uid: result.data.uid,
-                    href: result.data.href,
-                    updated: true,
-                  },
-                }),
-              },
-            ],
-          };
-        }
-
-        case "reminder_delete": {
-          const rClient = requireRemindersClient();
-          const schema = z
-            .object({
-              uid: z.string().min(1).optional(),
-              href: z.string().min(1).optional(),
-            })
-            .refine((v) => Boolean(v.uid || v.href), {
-              message: "Provide uid or href",
-            });
-
-          const parsed = schema.safeParse(args);
-          if (!parsed.success) {
-            return {
-              content: [
-                { type: "text", text: JSON.stringify({ ok: false, error: parsed.error.message }) },
-              ],
-            };
-          }
-
-          let href = parsed.data.href;
-          let reminderUid = parsed.data.uid;
-
-          if (!href && reminderUid) {
-            const found = await rClient.findReminderByUid(reminderUid);
-            if (!found.ok) {
-              return {
-                content: [{ type: "text", text: JSON.stringify({ ok: false, error: found.error }) }],
-              };
-            }
-            if (!found.data) {
-              return {
-                content: [
-                  { type: "text", text: JSON.stringify({ ok: false, error: "Reminder not found by UID" }) },
-                ],
-              };
-            }
-            href = found.data.reminder.href;
-            reminderUid = found.data.reminder.uid;
-          }
-
-          if (!href) {
-            return {
-              content: [
-                { type: "text", text: JSON.stringify({ ok: false, error: "Provide uid or href" }) },
-              ],
-            };
-          }
-
-          const result = await rClient.deleteReminder(href);
-          if (!result.ok) {
-            return {
-              content: [{ type: "text", text: JSON.stringify({ ok: false, error: result.error }) }],
-            };
-          }
-
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({
-                  ok: true,
-                  data: {
-                    deleted: true,
-                    uid: reminderUid,
                     href,
                   },
                 }),

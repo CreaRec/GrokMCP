@@ -10,11 +10,6 @@ services:
     environment:
       - PORT=8792
       - HOST=0.0.0.0
-      - ICLOUD_CALDAV_USERNAME
-      - ICLOUD_CALDAV_PASSWORD
-      - ICLOUD_CALDAV_CALENDAR_URL
-      - ICLOUD_CALDAV_REMINDERS_URL
-      - USER_TIMEZONE
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8792/health"]
       interval: 30s
