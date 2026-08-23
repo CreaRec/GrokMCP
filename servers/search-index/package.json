@@ -1,0 +1,22 @@
+{
+  "name": "@crearec/search-index",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Prisma schema and migrations for Synology private-index search database",
+  "scripts": {
+    "db:migrate:dev": "prisma migrate dev",
+    "db:migrate:deploy": "prisma migrate deploy",
+    "db:migrate:status": "prisma migrate status",
+    "db:generate": "prisma generate",
+    "db:studio": "prisma studio"
+  },
+  "dependencies": {
+    "@prisma/client": "^7.9.1"
+  },
+  "devDependencies": {
+    "prisma": "^7.9.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

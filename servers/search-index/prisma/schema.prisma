@@ -1,0 +1,57 @@
+// Synology private-index search database schema
+//
+// POLICY: descriptions may include names/addresses; must NEVER include
+// passport numbers, SSN, bank account numbers, or driver-license numbers.
+// Share password is intentionally not stored.
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
+}
+
+/// A file indexed from Synology File Station.
+/// embedding: 1024-dimensional vector for nomic-embed-text-v1.5 or similar local model.
+model File {
+  id             String    @id @default(uuid()) @db.Uuid
+  synoPath       String    @map("syno_path")
+  synoId         String?   @map("syno_id")
+  folderId       String?   @map("folder_id") @db.Uuid
+  kind           String    // doc | photo | other
+  bytes          BigInt?
+  mtime          DateTime? @db.Timestamptz
+  shareUrl       String?   @map("share_url")
+  shareExpiresAt DateTime? @map("share_expires_at") @db.Timestamptz
+  label          String    // short, safe to show the bot
+  description    String?   // full text for embedding, never returned by future MCP
+  embedding      Unsupported("vector(1024)")?
+  embedModel     String?   @map("embed_model")
+  indexedAt      DateTime? @map("indexed_at") @db.Timestamptz
+  redacted       Boolean   @default(false)
+
+  folder Folder? @relation(fields: [folderId], references: [id])
+
+  @@map("files")
+}
+
+/// A folder indexed from Synology File Station.
+/// embedding: 1024-dimensional vector for nomic-embed-text-v1.5 or similar local model.
+model Folder {
+  id          String    @id @default(uuid()) @db.Uuid
+  synoPath    String    @unique @map("syno_path")
+  label       String    // short, safe to show the bot
+  description String?   // full text for embedding, never returned by future MCP
+  embedding   Unsupported("vector(1024)")?
+  embedModel  String?   @map("embed_model")
+  shareUrl    String?   @map("share_url")
+  updatedAt   DateTime? @map("updated_at") @db.Timestamptz
+
+  files File[]
+
+  @@map("folders")
+}

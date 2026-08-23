@@ -6,6 +6,7 @@ Production runs as a Docker Compose stack. Images come from GitHub Container Reg
 |-------|---------|
 | `ghcr.io/crearec/grok-mcp-apple-calendar` | `apple-calendar` |
 | `grafana/mcp-grafana` (Docker Hub) | `grafana-mcp` |
+| `pgvector/pgvector:0.8.6-pg16` (Docker Hub) | `search-db` |
 
 Deploy directory: `/home/crearec/grok-mcp`
 
@@ -79,6 +80,49 @@ To create the service account token:
 2. Click **Add service account**, name it (e.g., `mcp-reader`), set role to **Viewer**
 3. Click **Add service account token**, copy the `glsa_...` token
 4. Paste the token as `GRAFANA_SERVICE_ACCOUNT_TOKEN` in `/home/crearec/grok-mcp/.env`
+
+#### Search DB (Synology Index)
+
+The `search-db` service is a PostgreSQL + pgvector database for a future Synology private-index MCP. It stores labels, share URLs, and embeddings for semantic search—**never** file bytes or share passwords.
+
+Add these variables to `.env`:
+
+```sh
+# PostgreSQL credentials (required for search-db to start)
+POSTGRES_USER=synology
+POSTGRES_PASSWORD=your_strong_random_password
+POSTGRES_DB=synology_index
+
+# Prisma DATABASE_URL (for running migrations)
+DATABASE_URL=postgresql://synology:your_strong_random_password@127.0.0.1:5433/synology_index
+```
+
+**Important:** The `search-db` container will fail to start if `POSTGRES_PASSWORD` is empty or missing. Set these variables in `.env` before starting the stack.
+
+The database binds only to `127.0.0.1:5433` (not exposed externally). The future MCP service will connect via the Docker network.
+
+**Data policy:** Descriptions may include names/addresses; must **never** include passport numbers, SSN, bank account numbers, or driver's license numbers.
+
+#### Initialize the search-db schema (after first start)
+
+After `search-db` is running, apply Prisma migrations to create the tables:
+
+```sh
+cd /home/crearec/grok-mcp
+git clone https://github.com/CreaRec/GrokMCP.git --depth 1 /tmp/grok-mcp-schema
+cd /tmp/grok-mcp-schema/servers/search-index
+npm install
+DATABASE_URL="postgresql://synology:YOUR_PASSWORD@127.0.0.1:5433/synology_index" npx prisma migrate deploy
+rm -rf /tmp/grok-mcp-schema
+```
+
+Or if you have the repo already checked out:
+
+```sh
+cd /path/to/GrokMCP/servers/search-index
+npm install
+npx prisma migrate deploy  # uses DATABASE_URL from .env or environment
+```
 
 ### 3. First start
 
