@@ -53,7 +53,7 @@ export function startTelemetry(): TelemetryHandle | null {
       endpoint,
     });
 
-    tel.mcp.setUp(true);
+    tel.mcp?.setUp(true);
     telemetry = tel;
     return tel;
   } catch (err) {
@@ -69,7 +69,7 @@ export function getTelemetry(): TelemetryHandle | null {
 export async function shutdownTelemetry(): Promise<void> {
   if (!telemetry) return;
   try {
-    telemetry.mcp.setUp(false);
+    telemetry.mcp?.setUp(false);
     await telemetry.shutdown();
   } catch {
     // Ignore shutdown errors
@@ -88,13 +88,13 @@ export function recordToolCall(record: ToolCallRecord): void {
   const tel = telemetry;
   if (!tel) return;
   try {
-    tel.mcp.recordToolCall({
+    tel.mcp?.recordToolCall({
       tool: record.tool,
       result: record.result,
       durationSeconds: record.durationSeconds,
     });
     if (record.result === "error" && record.errorType) {
-      tel.mcp.recordError({
+      tel.mcp?.recordError({
         tool: record.tool,
         errorType: record.errorType,
       });
@@ -121,11 +121,12 @@ export function logToolCall(opts: {
     if (opts.errorType) {
       attrs.error_type = opts.errorType;
     }
-    if (opts.result === "error") {
-      tel.logger.warn(`Tool ${opts.tool} failed`, attrs);
-    } else {
-      tel.logger.info(`Tool ${opts.tool} completed`, attrs);
-    }
+    tel.logger.emit({
+      severityNumber: opts.result === "error" ? 17 : 9,
+      severityText: opts.result === "error" ? "ERROR" : "INFO",
+      body: opts.result === "error" ? `Tool ${opts.tool} failed` : `Tool ${opts.tool} completed`,
+      attributes: attrs,
+    });
   } catch {
     // Never throw from telemetry
   }
