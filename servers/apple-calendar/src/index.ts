@@ -181,21 +181,6 @@ function alarmMinutesFromToolParam(
 
 const toolDefinitions = [
   {
-    name: "list_reminder_lists",
-    description:
-      "List iCloud Reminders CalDAV collection URLs. Returns reminder lists that support VTODO components. Use these URLs to access reminders via CalDAV.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        include_calendars: {
-          type: "boolean",
-          description:
-            "If true, include calendar collections that support VEVENT in addition to VTODO reminder lists",
-        },
-      },
-    },
-  },
-  {
     name: "calendar_list",
     description:
       "List Apple Calendar events in a time range. Default: now to +2 days. Use YYYY-MM-DD for a whole local day (from and to may be the same date). Each event includes start_iso/end_iso (machine) and start_local/end_local (human-readable). Recurring events include recurrence_rule (RFC 5545 RRULE body for masters) and recurrence_id (non-empty for exceptions/instances).",
@@ -387,31 +372,6 @@ async function main() {
 
     try {
       switch (name) {
-        case "list_reminder_lists": {
-          const schema = z.object({
-            include_calendars: z.boolean().optional(),
-          });
-          const parsed = schema.safeParse(args ?? {});
-          if (!parsed.success) {
-            return {
-              content: [
-                { type: "text", text: JSON.stringify({ ok: false, error: parsed.error.message }) },
-              ],
-            };
-          }
-          const result = await client.fetchReminderLists(parsed.data.include_calendars ?? false);
-          if (!result.ok) {
-            return {
-              content: [{ type: "text", text: JSON.stringify({ ok: false, error: result.error }) }],
-            };
-          }
-          return {
-            content: [
-              { type: "text", text: JSON.stringify({ ok: true, data: result.data }) },
-            ],
-          };
-        }
-
         case "calendar_list": {
           const schema = z.object({
             from: z.string().optional(),
