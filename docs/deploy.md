@@ -103,7 +103,7 @@ Or if nginx is in front:
 
 ## Day-to-day operations
 
-Deploy: merge to `main` (only changed images republish).
+Deploy: merge to `main` (only changed images republish), or trigger manually via **Actions → CI/CD → Run workflow** on `main` to redeploy the existing image without code changes.
 
 On the server (or via Portainer):
 
