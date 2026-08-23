@@ -1,13 +1,21 @@
 # Apple Calendar MCP
 
-A Model Context Protocol (MCP) server for Apple Calendar (iCloud CalDAV). This server provides tools to list, create, update, and delete calendar events via the CalDAV protocol.
+A Model Context Protocol (MCP) server for Apple Calendar and Reminders (iCloud CalDAV). This server provides tools to list, create, update, and delete calendar events and reminders via the CalDAV protocol.
 
 ## Features
 
+### Calendar Tools
 - **calendar_list** — List events in a time range (default: now to +2 days)
 - **calendar_create_event** — Create events with title, times, location, notes, and alarms
 - **calendar_update_event** — Update existing events (partial updates supported)
 - **calendar_delete_event** — Delete events by UID or href
+
+### Reminder Tools (VTODO)
+- **reminder_list** — List reminders (incomplete by default; optionally include completed)
+- **reminder_create** — Create a reminder with title, optional notes and due date
+- **reminder_complete** — Mark a reminder as completed
+- **reminder_update** — Update title, notes, or due date of a reminder
+- **reminder_delete** — Delete a reminder by UID or href
 
 ## Requirements
 
@@ -36,6 +44,8 @@ cp .env.example .env
 ICLOUD_CALDAV_USERNAME=your-icloud-email@icloud.com
 ICLOUD_CALDAV_PASSWORD=xxxx-xxxx-xxxx-xxxx
 ICLOUD_CALDAV_CALENDAR_URL=https://caldav.icloud.com/YOUR_USER_ID/calendars/YOUR_CALENDAR/
+# Optional: enables reminder_* tools
+ICLOUD_CALDAV_REMINDERS_URL=https://caldav.icloud.com/1812363205/calendars/06318bd8-64a5-4477-8ed3-d33aa680e7dd/
 USER_TIMEZONE=America/Chicago
 ```
 
@@ -97,6 +107,7 @@ Add to your MCP configuration:
         "ICLOUD_CALDAV_USERNAME": "your-email@icloud.com",
         "ICLOUD_CALDAV_PASSWORD": "xxxx-xxxx-xxxx-xxxx",
         "ICLOUD_CALDAV_CALENDAR_URL": "https://caldav.icloud.com/123/calendars/home/",
+        "ICLOUD_CALDAV_REMINDERS_URL": "https://caldav.icloud.com/123/calendars/tasks/",
         "USER_TIMEZONE": "America/Chicago"
       }
     }
@@ -116,6 +127,7 @@ Or with compiled output:
         "ICLOUD_CALDAV_USERNAME": "your-email@icloud.com",
         "ICLOUD_CALDAV_PASSWORD": "xxxx-xxxx-xxxx-xxxx",
         "ICLOUD_CALDAV_CALENDAR_URL": "https://caldav.icloud.com/123/calendars/home/",
+        "ICLOUD_CALDAV_REMINDERS_URL": "https://caldav.icloud.com/123/calendars/tasks/",
         "USER_TIMEZONE": "America/Chicago"
       }
     }
@@ -192,10 +204,67 @@ Delete an event.
 | uid | string | Event UID |
 | href | string | Event href (preferred if known) |
 
+### reminder_list
+
+List reminders from the configured reminders collection.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| include_completed | boolean | false | Include completed reminders |
+| limit | integer | 50 | Max reminders to return (1-200) |
+
+### reminder_create
+
+Create a new reminder.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| title | string | Yes | Reminder title |
+| notes | string | No | Optional notes |
+| due | string | No | Due date/time (naive = local, Z = UTC, or YYYY-MM-DD for date-only) |
+
+### reminder_update
+
+Update an existing reminder. Only pass fields you want to change.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| uid | string | Reminder UID (resolves href via CalDAV) |
+| href | string | Reminder href (preferred if known) |
+| title | string | New title |
+| notes | string | New notes |
+| due | string | New due date (pass empty string or null to clear) |
+
+### reminder_complete
+
+Mark a reminder as completed.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| uid | string | Reminder UID |
+| href | string | Reminder href (preferred if known) |
+
+### reminder_delete
+
+Delete a reminder.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| uid | string | Reminder UID |
+| href | string | Reminder href (preferred if known) |
+
 ## Limitations
 
+### Calendar
 - Does not support creating/updating recurring events or all-day events (listing them works)
 - No duplicate-detection flow (creates as requested)
+
+### Reminders
+- Recurring reminders (VTODO with RRULE) are not supported — operations on recurring VTODOs will be refused
+- Requires `ICLOUD_CALDAV_REMINDERS_URL` env var to enable reminder tools
+- Does not access new-style Reminders app lists (CloudKit-based)
+
+### General
 - Requires network access to iCloud CalDAV servers
 
 ## Testing
