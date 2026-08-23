@@ -8,6 +8,11 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import {
+  startTelemetry,
+  shutdownTelemetry,
+  withToolTelemetry,
+} from "./telemetry.js";
+import {
   TsdavICloudCalendarClient,
   type CalendarEventInput,
   type CalendarEventPatch,
@@ -343,6 +348,8 @@ const toolDefinitions = [
 ];
 
 async function main() {
+  startTelemetry();
+
   const config = getConfig();
   const client = new TsdavICloudCalendarClient(
     config.username,
@@ -373,87 +380,90 @@ async function main() {
     try {
       switch (name) {
         case "calendar_list": {
-          const schema = z.object({
-            from: z.string().optional(),
-            to: z.string().optional(),
-            limit: z.number().int().min(1).max(100).optional(),
-          });
-          const parsed = schema.safeParse(args ?? {});
-          if (!parsed.success) {
+          return withToolTelemetry("calendar_list", async () => {
+            const schema = z.object({
+              from: z.string().optional(),
+              to: z.string().optional(),
+              limit: z.number().int().min(1).max(100).optional(),
+            });
+            const parsed = schema.safeParse(args ?? {});
+            if (!parsed.success) {
+              return {
+                content: [
+                  { type: "text", text: JSON.stringify({ ok: false, error: parsed.error.message }) },
+                ],
+              };
+            }
+            const timeZone = tz();
+            const range = resolveCalendarListRange({
+              from: parsed.data.from,
+              to: parsed.data.to,
+              timeZone,
+            });
+            if (!range.ok) {
+              return {
+                content: [{ type: "text", text: JSON.stringify({ ok: false, error: range.error }) }],
+              };
+            }
+            const { from, to } = range;
+            const limit = parsed.data.limit ?? 30;
+            const listed = await client.listEvents({ from, to, limit });
+            if (!listed.ok) {
+              return {
+                content: [{ type: "text", text: JSON.stringify({ ok: false, error: listed.error }) }],
+              };
+            }
+            const events = listed.data.events.map((e) => {
+              const start = e.start ? parseIso(e.start) : null;
+              const end = e.end ? parseIso(e.end) : null;
+              return {
+                uid: e.uid,
+                href: e.href,
+                title: e.title,
+                notes: e.notes,
+                location: e.location,
+                geo: e.geo,
+                recurrence_rule: e.recurrenceRule,
+                recurrence_id: e.recurrenceId || null,
+                is_recurring_master: Boolean(e.recurrenceRule && !e.recurrenceId),
+                ...publicOptionalDateTimes(start, end, timeZone),
+              };
+            });
             return {
               content: [
-                { type: "text", text: JSON.stringify({ ok: false, error: parsed.error.message }) },
+                {
+                  type: "text",
+                  text: JSON.stringify({ ok: true, data: { events, count: events.length } }),
+                },
               ],
             };
-          }
-          const timeZone = tz();
-          const range = resolveCalendarListRange({
-            from: parsed.data.from,
-            to: parsed.data.to,
-            timeZone,
           });
-          if (!range.ok) {
-            return {
-              content: [{ type: "text", text: JSON.stringify({ ok: false, error: range.error }) }],
-            };
-          }
-          const { from, to } = range;
-          const limit = parsed.data.limit ?? 30;
-          const listed = await client.listEvents({ from, to, limit });
-          if (!listed.ok) {
-            return {
-              content: [{ type: "text", text: JSON.stringify({ ok: false, error: listed.error }) }],
-            };
-          }
-          const events = listed.data.events.map((e) => {
-            const start = e.start ? parseIso(e.start) : null;
-            const end = e.end ? parseIso(e.end) : null;
-            return {
-              uid: e.uid,
-              href: e.href,
-              title: e.title,
-              notes: e.notes,
-              location: e.location,
-              geo: e.geo,
-              recurrence_rule: e.recurrenceRule,
-              recurrence_id: e.recurrenceId || null,
-              is_recurring_master: Boolean(e.recurrenceRule && !e.recurrenceId),
-              ...publicOptionalDateTimes(start, end, timeZone),
-            };
-          });
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({ ok: true, data: { events, count: events.length } }),
-              },
-            ],
-          };
         }
 
         case "calendar_create_event": {
-          const schema = z.object({
-            title: z.string().min(1),
-            start: z.string().min(1),
-            end: z.string().optional(),
-            notes: z.string().optional(),
-            alarm_minutes_before: z
-              .array(z.number().int().nonnegative().max(10080))
-              .nullable()
-              .optional(),
-            rrule: z.string().optional(),
-            recurrence_freq: z.enum(["DAILY", "WEEKLY", "MONTHLY", "YEARLY"]).optional(),
-            recurrence_interval: z.number().int().min(1).optional(),
-            recurrence_count: z.number().int().min(1).optional(),
-            recurrence_until: z.string().optional(),
-            recurrence_byday: z.array(z.string()).optional(),
-            location_name: z.string().min(1).nullable().optional(),
-            location_address: z.string().min(1).nullable().optional(),
-            location_maps_url: z.string().url().nullable().optional(),
-            location_lat: z.number().finite().nullable().optional(),
-            location_lon: z.number().finite().nullable().optional(),
-          });
-          const parsed = schema.safeParse(args);
+          return withToolTelemetry("calendar_create_event", async () => {
+            const schema = z.object({
+              title: z.string().min(1),
+              start: z.string().min(1),
+              end: z.string().optional(),
+              notes: z.string().optional(),
+              alarm_minutes_before: z
+                .array(z.number().int().nonnegative().max(10080))
+                .nullable()
+                .optional(),
+              rrule: z.string().optional(),
+              recurrence_freq: z.enum(["DAILY", "WEEKLY", "MONTHLY", "YEARLY"]).optional(),
+              recurrence_interval: z.number().int().min(1).optional(),
+              recurrence_count: z.number().int().min(1).optional(),
+              recurrence_until: z.string().optional(),
+              recurrence_byday: z.array(z.string()).optional(),
+              location_name: z.string().min(1).nullable().optional(),
+              location_address: z.string().min(1).nullable().optional(),
+              location_maps_url: z.string().url().nullable().optional(),
+              location_lat: z.number().finite().nullable().optional(),
+              location_lon: z.number().finite().nullable().optional(),
+            });
+            const parsed = schema.safeParse(args);
           if (!parsed.success) {
             return {
               content: [
@@ -624,53 +634,55 @@ async function main() {
             };
           }
 
-          const times = publicDateTimes(start, created.data.end, timeZone);
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({
-                  ok: true,
-                  data: {
-                    uid: created.data.uid,
-                    href: created.data.href,
-                    title: parsed.data.title,
-                    notes: parsed.data.notes ?? null,
-                    location: icsLocationFromFields(loc) ?? null,
-                    ...times,
-                  },
-                }),
-              },
-            ],
-          };
+            const times = publicDateTimes(start, created.data.end, timeZone);
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    ok: true,
+                    data: {
+                      uid: created.data.uid,
+                      href: created.data.href,
+                      title: parsed.data.title,
+                      notes: parsed.data.notes ?? null,
+                      location: icsLocationFromFields(loc) ?? null,
+                      ...times,
+                    },
+                  }),
+                },
+              ],
+            };
+          });
         }
 
         case "calendar_update_event": {
-          const schema = z
-            .object({
-              uid: z.string().min(1).optional(),
-              href: z.string().min(1).optional(),
-              title: z.string().min(1).optional(),
-              start: z.string().optional(),
-              end: z.string().optional(),
-              notes: z.string().optional(),
-              alarm_minutes_before: z
-                .array(z.number().int().nonnegative().max(10080))
-                .nullable()
-                .optional(),
-              rrule: z.string().nullable().optional(),
-              clear_recurrence: z.boolean().optional(),
-              location_name: z.string().min(1).nullable().optional(),
-              location_address: z.string().min(1).nullable().optional(),
-              location_maps_url: z.string().url().nullable().optional(),
-              location_lat: z.number().finite().nullable().optional(),
-              location_lon: z.number().finite().nullable().optional(),
-            })
-            .refine((v) => Boolean(v.uid || v.href), {
-              message: "Provide uid or href",
-            });
+          return withToolTelemetry("calendar_update_event", async () => {
+            const schema = z
+              .object({
+                uid: z.string().min(1).optional(),
+                href: z.string().min(1).optional(),
+                title: z.string().min(1).optional(),
+                start: z.string().optional(),
+                end: z.string().optional(),
+                notes: z.string().optional(),
+                alarm_minutes_before: z
+                  .array(z.number().int().nonnegative().max(10080))
+                  .nullable()
+                  .optional(),
+                rrule: z.string().nullable().optional(),
+                clear_recurrence: z.boolean().optional(),
+                location_name: z.string().min(1).nullable().optional(),
+                location_address: z.string().min(1).nullable().optional(),
+                location_maps_url: z.string().url().nullable().optional(),
+                location_lat: z.number().finite().nullable().optional(),
+                location_lon: z.number().finite().nullable().optional(),
+              })
+              .refine((v) => Boolean(v.uid || v.href), {
+                message: "Provide uid or href",
+              });
 
-          const parsed = schema.safeParse(args);
+            const parsed = schema.safeParse(args);
           if (!parsed.success) {
             return {
               content: [
@@ -832,110 +844,113 @@ async function main() {
                 end_local: formatLocal(updated.data.end, timeZone),
               };
 
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({
-                  ok: true,
-                  data: {
-                    uid: updated.data.uid,
-                    href: updated.data.href,
-                    ...times,
-                  },
-                }),
-              },
-            ],
-          };
-        }
-
-        case "calendar_delete_event": {
-          const schema = z
-            .object({
-              uid: z.string().min(1).optional(),
-              href: z.string().min(1).optional(),
-            })
-            .refine((v) => Boolean(v.uid || v.href), {
-              message: "Provide uid or href",
-            });
-
-          const parsed = schema.safeParse(args);
-          if (!parsed.success) {
-            return {
-              content: [
-                { type: "text", text: JSON.stringify({ ok: false, error: parsed.error.message }) },
-              ],
-            };
-          }
-
-          let href = parsed.data.href;
-          let eventUid = parsed.data.uid;
-          let existingEvent: CalendarRemoteEvent | null = null;
-
-          if (!href && eventUid) {
-            const found = await client.findEventByUid(eventUid);
-            if (!found.ok) {
-              return {
-                content: [{ type: "text", text: JSON.stringify({ ok: false, error: found.error }) }],
-              };
-            }
-            if (!found.data) {
-              return {
-                content: [
-                  { type: "text", text: JSON.stringify({ ok: false, error: "Event not found by UID" }) },
-                ],
-              };
-            }
-            href = found.data.event.href;
-            eventUid = found.data.event.uid;
-            existingEvent = found.data.event;
-          }
-
-          if (!href) {
-            return {
-              content: [
-                { type: "text", text: JSON.stringify({ ok: false, error: "Provide uid or href" }) },
-              ],
-            };
-          }
-
-          if (existingEvent?.recurrenceId) {
             return {
               content: [
                 {
                   type: "text",
                   text: JSON.stringify({
-                    ok: false,
-                    error:
-                      "Cannot delete a single recurrence instance. The target event has a recurrence_id, meaning it is an exception to a recurring series. Deleting the master event will delete the entire series. To delete individual instances, use a calendar app directly or cancel the instance. Instance-only deletion via CalDAV is not supported.",
+                    ok: true,
+                    data: {
+                      uid: updated.data.uid,
+                      href: updated.data.href,
+                      ...times,
+                    },
                   }),
                 },
               ],
             };
-          }
+          });
+        }
 
-          const deleted = await client.deleteEvent(href);
-          if (!deleted.ok) {
-            return {
-              content: [{ type: "text", text: JSON.stringify({ ok: false, error: deleted.error }) }],
-            };
-          }
+        case "calendar_delete_event": {
+          return withToolTelemetry("calendar_delete_event", async () => {
+            const schema = z
+              .object({
+                uid: z.string().min(1).optional(),
+                href: z.string().min(1).optional(),
+              })
+              .refine((v) => Boolean(v.uid || v.href), {
+                message: "Provide uid or href",
+              });
 
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({
-                  ok: true,
-                  data: {
-                    deleted: true,
-                    uid: eventUid,
-                    href,
+            const parsed = schema.safeParse(args);
+            if (!parsed.success) {
+              return {
+                content: [
+                  { type: "text", text: JSON.stringify({ ok: false, error: parsed.error.message }) },
+                ],
+              };
+            }
+
+            let href = parsed.data.href;
+            let eventUid = parsed.data.uid;
+            let existingEvent: CalendarRemoteEvent | null = null;
+
+            if (!href && eventUid) {
+              const found = await client.findEventByUid(eventUid);
+              if (!found.ok) {
+                return {
+                  content: [{ type: "text", text: JSON.stringify({ ok: false, error: found.error }) }],
+                };
+              }
+              if (!found.data) {
+                return {
+                  content: [
+                    { type: "text", text: JSON.stringify({ ok: false, error: "Event not found by UID" }) },
+                  ],
+                };
+              }
+              href = found.data.event.href;
+              eventUid = found.data.event.uid;
+              existingEvent = found.data.event;
+            }
+
+            if (!href) {
+              return {
+                content: [
+                  { type: "text", text: JSON.stringify({ ok: false, error: "Provide uid or href" }) },
+                ],
+              };
+            }
+
+            if (existingEvent?.recurrenceId) {
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify({
+                      ok: false,
+                      error:
+                        "Cannot delete a single recurrence instance. The target event has a recurrence_id, meaning it is an exception to a recurring series. Deleting the master event will delete the entire series. To delete individual instances, use a calendar app directly or cancel the instance. Instance-only deletion via CalDAV is not supported.",
+                    }),
                   },
-                }),
-              },
-            ],
-          };
+                ],
+              };
+            }
+
+            const deleted = await client.deleteEvent(href);
+            if (!deleted.ok) {
+              return {
+                content: [{ type: "text", text: JSON.stringify({ ok: false, error: deleted.error }) }],
+              };
+            }
+
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    ok: true,
+                    data: {
+                      deleted: true,
+                      uid: eventUid,
+                      href,
+                    },
+                  }),
+                },
+              ],
+            };
+          });
         }
 
         default:
@@ -953,9 +968,20 @@ async function main() {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
+
+  process.on("SIGINT", async () => {
+    await shutdownTelemetry();
+    process.exit(0);
+  });
+
+  process.on("SIGTERM", async () => {
+    await shutdownTelemetry();
+    process.exit(0);
+  });
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error("Fatal error:", err);
+  await shutdownTelemetry();
   process.exit(1);
 });

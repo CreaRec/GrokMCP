@@ -10,9 +10,21 @@ services:
     environment:
       - PORT=8792
       - HOST=0.0.0.0
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://alloy:4318}
+      - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-apple-calendar}
+      - OTEL_SERVICE_NAMESPACE=${OTEL_SERVICE_NAMESPACE:-mcp}
+      - DEPLOY_ENV=${DEPLOY_ENV:-production}
+      - OTEL_SERVICE_VERSION=${OTEL_SERVICE_VERSION:-}
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8792/health"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
+    networks:
+      - default
+      - lgtm
+
+networks:
+  lgtm:
+    external: true

@@ -7,6 +7,11 @@ import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import {
+  startTelemetry,
+  shutdownTelemetry,
+  withToolTelemetry,
+} from "./telemetry.js";
+import {
   TsdavICloudCalendarClient,
   type CalendarEventInput,
   type CalendarEventPatch,
@@ -196,36 +201,38 @@ function createServer(config: ReturnType<typeof getConfig>) {
       },
     },
     async ({ from, to, limit }) => {
-      const timeZone = tz();
-      const range = resolveCalendarListRange({ from, to, timeZone });
-      if (!range.ok) {
-        return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: range.error }) }] };
-      }
-      const { from: fromDate, to: toDate } = range;
-      const maxResults = limit ?? 30;
-      const listed = await client.listEvents({ from: fromDate, to: toDate, limit: maxResults });
-      if (!listed.ok) {
-        return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: listed.error }) }] };
-      }
-      const events = listed.data.events.map((e) => {
-        const start = e.start ? parseIso(e.start) : null;
-        const end = e.end ? parseIso(e.end) : null;
+      return withToolTelemetry("calendar_list", async () => {
+        const timeZone = tz();
+        const range = resolveCalendarListRange({ from, to, timeZone });
+        if (!range.ok) {
+          return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: range.error }) }] };
+        }
+        const { from: fromDate, to: toDate } = range;
+        const maxResults = limit ?? 30;
+        const listed = await client.listEvents({ from: fromDate, to: toDate, limit: maxResults });
+        if (!listed.ok) {
+          return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: listed.error }) }] };
+        }
+        const events = listed.data.events.map((e) => {
+          const start = e.start ? parseIso(e.start) : null;
+          const end = e.end ? parseIso(e.end) : null;
+          return {
+            uid: e.uid,
+            href: e.href,
+            title: e.title,
+            notes: e.notes,
+            location: e.location,
+            geo: e.geo,
+            recurrence_rule: e.recurrenceRule,
+            recurrence_id: e.recurrenceId || null,
+            is_recurring_master: Boolean(e.recurrenceRule && !e.recurrenceId),
+            ...publicOptionalDateTimes(start, end, timeZone),
+          };
+        });
         return {
-          uid: e.uid,
-          href: e.href,
-          title: e.title,
-          notes: e.notes,
-          location: e.location,
-          geo: e.geo,
-          recurrence_rule: e.recurrenceRule,
-          recurrence_id: e.recurrenceId || null,
-          is_recurring_master: Boolean(e.recurrenceRule && !e.recurrenceId),
-          ...publicOptionalDateTimes(start, end, timeZone),
+          content: [{ type: "text", text: JSON.stringify({ ok: true, data: { events, count: events.length } }) }],
         };
       });
-      return {
-        content: [{ type: "text", text: JSON.stringify({ ok: true, data: { events, count: events.length } }) }],
-      };
     },
   );
 
@@ -254,7 +261,8 @@ function createServer(config: ReturnType<typeof getConfig>) {
       },
     },
     async (args) => {
-      const hasRrule = args.rrule !== undefined;
+      return withToolTelemetry("calendar_create_event", async () => {
+        const hasRrule = args.rrule !== undefined;
       const hasStructuredRecurrence =
         args.recurrence_freq !== undefined ||
         args.recurrence_interval !== undefined ||
@@ -407,6 +415,7 @@ function createServer(config: ReturnType<typeof getConfig>) {
           }),
         }],
       };
+      });
     },
   );
 
@@ -433,9 +442,10 @@ function createServer(config: ReturnType<typeof getConfig>) {
       },
     },
     async (args) => {
-      if (!args.uid && !args.href) {
-        return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: "Provide uid or href" }) }] };
-      }
+      return withToolTelemetry("calendar_update_event", async () => {
+        if (!args.uid && !args.href) {
+          return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: "Provide uid or href" }) }] };
+        }
 
       let href = args.href;
       let eventUid = args.uid;
@@ -569,6 +579,7 @@ function createServer(config: ReturnType<typeof getConfig>) {
           }),
         }],
       };
+      });
     },
   );
 
@@ -583,9 +594,10 @@ function createServer(config: ReturnType<typeof getConfig>) {
       },
     },
     async (args) => {
-      if (!args.uid && !args.href) {
-        return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: "Provide uid or href" }) }] };
-      }
+      return withToolTelemetry("calendar_delete_event", async () => {
+        if (!args.uid && !args.href) {
+          return { content: [{ type: "text", text: JSON.stringify({ ok: false, error: "Provide uid or href" }) }] };
+        }
 
       let href = args.href;
       let eventUid = args.uid;
@@ -631,6 +643,7 @@ function createServer(config: ReturnType<typeof getConfig>) {
           text: JSON.stringify({ ok: true, data: { deleted: true, uid: eventUid, href } }),
         }],
       };
+      });
     },
   );
 
@@ -638,6 +651,8 @@ function createServer(config: ReturnType<typeof getConfig>) {
 }
 
 async function main() {
+  startTelemetry();
+
   const config = getConfig();
   const PORT = parseInt(process.env.PORT ?? "8792", 10);
   const HOST = process.env.HOST ?? "0.0.0.0";
@@ -700,13 +715,15 @@ async function main() {
     console.error(`Health check: http://${HOST}:${PORT}/health`);
   });
 
-  process.on("SIGINT", () => {
+  process.on("SIGINT", async () => {
     console.error("Shutting down...");
+    await shutdownTelemetry();
     process.exit(0);
   });
 
-  process.on("SIGTERM", () => {
+  process.on("SIGTERM", async () => {
     console.error("Shutting down...");
+    await shutdownTelemetry();
     process.exit(0);
   });
 }
