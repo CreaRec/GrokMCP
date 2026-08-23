@@ -8,8 +8,19 @@ A monorepo of custom MCP (Model Context Protocol) servers for Grok Bot.
 GrokMCP/
 ├── servers/
 │   └── apple-calendar/   # Apple Calendar (iCloud CalDAV) MCP
+├── docker-compose.yml    # Production deployment
+├── docs/
+│   └── deploy.md         # Deployment guide
 └── README.md
 ```
+
+## Deployment
+
+Production deployment uses Docker Compose + GHCR. See **[docs/deploy.md](./docs/deploy.md)** for:
+
+- One-time server bootstrap
+- GitHub Actions secrets (same as CreaJarvis2)
+- Day-to-day operations
 
 ## Available Servers
 
@@ -62,9 +73,17 @@ Each server is independent with its own `package.json`. To work on a server:
 cd servers/apple-calendar
 npm install
 npm test        # Run tests
-npm run dev     # Run with hot reload
+npm run dev     # Run stdio mode (local)
+npm run dev:http  # Run HTTP mode (production-like)
 npm run build   # Compile TypeScript
 ```
+
+## CI/CD
+
+- **PRs**: Run tests, build images (no push)
+- **Push to main**: Test → publish to GHCR → deploy via Tailscale SSH
+
+Path filters ensure only changed services rebuild/redeploy.
 
 ## License
 
