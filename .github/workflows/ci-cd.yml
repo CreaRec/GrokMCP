@@ -120,6 +120,9 @@ jobs:
         || needs.changes.outputs.compose == 'true'
       )
       && (needs.publish.result == 'success' || needs.publish.result == 'skipped')
+    permissions:
+      contents: read
+      packages: read
     steps:
       - uses: actions/checkout@v7
 
@@ -144,6 +147,8 @@ jobs:
           SERVER_HOST: ${{ secrets.DEPLOY_HOST }}
           IMAGE_TAG_NEW: ${{ needs.publish.outputs.image_tag }}
           APPLE_CALENDAR_CHANGED: ${{ needs.changes.outputs.apple-calendar }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
         run: |
           set -euo pipefail
           SSH_TARGET="${SSH_USER}@${SERVER_HOST}"
@@ -152,6 +157,10 @@ jobs:
 
           "${SSH[@]}" "$SSH_TARGET" "mkdir -p '${DEPLOY_DIR}'"
           "${SCP[@]}" docker-compose.yml "${SSH_TARGET}:${DEPLOY_DIR}/docker-compose.yml"
+
+          # Log remote Docker into GHCR (stdin, never echo token)
+          printf '%s' "$GHCR_TOKEN" | "${SSH[@]}" "$SSH_TARGET" \
+            "docker login ghcr.io -u '$GHCR_USER' --password-stdin"
 
           "${SSH[@]}" "$SSH_TARGET" bash -s <<EOF
           set -euo pipefail
@@ -173,6 +182,9 @@ jobs:
           if [ '${APPLE_CALENDAR_CHANGED}' = 'true' ]; then
             docker compose logs --tail=30 apple-calendar || true
           fi
+
+          # Logout so credentials don't persist on disk
+          docker logout ghcr.io || true
           EOF
 
   ghcr_cleanup:
