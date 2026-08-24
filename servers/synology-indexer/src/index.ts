@@ -8,6 +8,7 @@ import { shouldMarkDirty, getParentFolderPaths, type ExistingFileRow } from "./d
 import { describeWithVision, checkOllamaAvailable } from "./vision.js";
 import { embedText } from "./embedder.js";
 import { generateFolderSummary, type ChildDescription } from "./folder-summarizer.js";
+import { withGpuPod, type RunPodConfig } from "./runpod.js";
 
 interface IndexStats {
   seen: number;
@@ -141,19 +142,13 @@ async function runIndex(config: Config): Promise<IndexStats> {
   );
 
   if (stats.dirty === 0) {
-    console.log("[indexer] No dirty files, skipping vision/embedding");
+    console.log("[indexer] No dirty files, skipping vision/embedding phase");
     const elapsed = Math.round((Date.now() - startTime) / 1000);
     console.log(`[indexer] Index complete in ${elapsed}s`);
     return stats;
   }
 
-  const ollamaAvailable = config.ollamaBaseUrl
-    ? await checkOllamaAvailable(config.ollamaBaseUrl)
-    : false;
-
-  if (!ollamaAvailable) {
-    console.log("[indexer] Ollama not available, skipping vision descriptions");
-  } else {
+  const processVisionPhase = async (ollamaUrl: string): Promise<void> => {
     console.log(`[indexer] Processing ${stats.dirty} dirty files with vision model`);
 
     const dirtyFiles = await db.file.findMany({
@@ -167,13 +162,13 @@ async function runIndex(config: Config): Promise<IndexStats> {
 
         const vision = await describeWithVision(
           absolutePath,
-          config.ollamaBaseUrl!,
+          ollamaUrl,
           config.visionModel,
         );
 
         const embed = await embedText(
           vision.description,
-          config.ollamaBaseUrl!,
+          ollamaUrl,
           config.embedModel,
         );
 
@@ -201,36 +196,34 @@ async function runIndex(config: Config): Promise<IndexStats> {
         stats.errors++;
       }
     }
-  }
 
-  if (processedFolderPaths.size > 0) {
-    console.log(`[indexer] Rebuilding ${processedFolderPaths.size} affected folders`);
+    if (processedFolderPaths.size > 0) {
+      console.log(`[indexer] Rebuilding ${processedFolderPaths.size} affected folders`);
 
-    const sortedPaths = Array.from(processedFolderPaths).sort(
-      (a, b) => b.split("/").length - a.split("/").length,
-    );
+      const sortedPaths = Array.from(processedFolderPaths).sort(
+        (a, b) => b.split("/").length - a.split("/").length,
+      );
 
-    for (const folderPath of sortedPaths) {
-      try {
-        const folder = await db.folder.findFirst({
-          where: { synoPath: folderPath },
-        });
-        if (!folder) continue;
+      for (const folderPath of sortedPaths) {
+        try {
+          const folder = await db.folder.findFirst({
+            where: { synoPath: folderPath },
+          });
+          if (!folder) continue;
 
-        const children = await db.file.findMany({
-          where: { folderId: folder.id },
-          select: { label: true, description: true, kind: true },
-        });
+          const children = await db.file.findMany({
+            where: { folderId: folder.id },
+            select: { label: true, description: true, kind: true },
+          });
 
-        const summary = generateFolderSummary(
-          folderPath,
-          children as ChildDescription[],
-        );
+          const summary = generateFolderSummary(
+            folderPath,
+            children as ChildDescription[],
+          );
 
-        if (config.ollamaBaseUrl && ollamaAvailable) {
           const embed = await embedText(
             summary.description,
-            config.ollamaBaseUrl,
+            ollamaUrl,
             config.embedModel,
           );
 
@@ -245,24 +238,42 @@ async function runIndex(config: Config): Promise<IndexStats> {
               dirty = false
             WHERE id = ${folder.id}::uuid
           `;
-        } else {
-          await db.folder.update({
-            where: { id: folder.id },
-            data: {
-              label: summary.label,
-              description: summary.description,
-              updatedAt: now,
-              dirty: false,
-            },
-          });
-        }
 
-        stats.foldersRebuilt++;
-      } catch (err) {
-        console.error(`[indexer] Error rebuilding folder ${folderPath}:`, err);
-        stats.errors++;
+          stats.foldersRebuilt++;
+        } catch (err) {
+          console.error(`[indexer] Error rebuilding folder ${folderPath}:`, err);
+          stats.errors++;
+        }
       }
     }
+  };
+
+  const hasRunPod = config.runpodApiKey && config.runpodPodId;
+
+  if (hasRunPod) {
+    console.log(`[indexer] Using RunPod GPU pod ${config.runpodPodId}`);
+    const runpodConfig: RunPodConfig = {
+      apiKey: config.runpodApiKey!,
+      podId: config.runpodPodId!,
+      ollamaPort: config.runpodOllamaPort,
+    };
+
+    await withGpuPod(
+      runpodConfig,
+      config.ollamaBaseUrl,
+      config.visionModel,
+      config.embedModel,
+      processVisionPhase,
+    );
+  } else if (config.ollamaBaseUrl) {
+    const ollamaAvailable = await checkOllamaAvailable(config.ollamaBaseUrl);
+    if (ollamaAvailable) {
+      await processVisionPhase(config.ollamaBaseUrl);
+    } else {
+      console.log("[indexer] Ollama not available, skipping vision descriptions");
+    }
+  } else {
+    console.log("[indexer] No RunPod or Ollama configured, skipping vision descriptions");
   }
 
   const elapsed = Math.round((Date.now() - startTime) / 1000);
@@ -319,6 +330,7 @@ async function main(): Promise<void> {
   console.log(`[indexer] Daily index at: ${config.indexDailyAt}`);
   console.log(`[indexer] Run once: ${config.runOnce}`);
   console.log(`[indexer] Ollama URL: ${config.ollamaBaseUrl ?? "not configured"}`);
+  console.log(`[indexer] RunPod: ${config.runpodPodId ? `pod ${config.runpodPodId}` : "not configured"}`);
 
   if (config.runOnce) {
     console.log("[indexer] RUN_ONCE mode, running immediately");

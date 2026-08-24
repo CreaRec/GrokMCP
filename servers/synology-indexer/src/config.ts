@@ -10,6 +10,9 @@ export interface Config {
   dsmHost: string | null;
   dsmShareUser: string | null;
   dsmSharePassword: string | null;
+  runpodApiKey: string | null;
+  runpodPodId: string | null;
+  runpodOllamaPort: number;
 }
 
 export function getConfig(): Config {
@@ -38,6 +41,9 @@ export function getConfig(): Config {
     dsmHost: process.env.DSM_HOST ?? null,
     dsmShareUser: process.env.DSM_SHARE_USER ?? null,
     dsmSharePassword: process.env.DSM_SHARE_PASSWORD ?? null,
+    runpodApiKey: process.env.RUNPOD_API_KEY ?? null,
+    runpodPodId: process.env.RUNPOD_POD_ID ?? null,
+    runpodOllamaPort: parseInt(process.env.RUNPOD_OLLAMA_PORT ?? "11434", 10),
   };
 }
 

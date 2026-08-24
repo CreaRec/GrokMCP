@@ -108,6 +108,9 @@ services:
       - MOUNT_ROOT=/mnt/synology/Documents
       - INDEX_DAILY_AT=${INDEX_DAILY_AT:-21:00}
       - TZ=${TZ:-America/Chicago}
+      - RUNPOD_API_KEY=${RUNPOD_API_KEY:-}
+      - RUNPOD_POD_ID=${RUNPOD_POD_ID:-}
+      - RUNPOD_OLLAMA_PORT=${RUNPOD_OLLAMA_PORT:-11434}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-}
       - VISION_MODEL=${VISION_MODEL:-qwen2.5vl:7b}
       - EMBED_MODEL=${EMBED_MODEL:-mxbai-embed-large}
