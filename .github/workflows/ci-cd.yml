@@ -9,6 +9,7 @@ on:
 env:
   APPLE_CALENDAR_IMAGE: ghcr.io/crearec/grok-mcp-apple-calendar
   SYNOLOGY_IMAGE: ghcr.io/crearec/grok-mcp-synology
+  SYNOLOGY_INDEXER_IMAGE: ghcr.io/crearec/grok-mcp-synology-indexer
   DEPLOY_DIR: /home/crearec/grok-mcp
 
 jobs:
@@ -20,6 +21,7 @@ jobs:
     outputs:
       apple-calendar: ${{ steps.filter.outputs.apple-calendar }}
       synology: ${{ steps.filter.outputs.synology }}
+      synology-indexer: ${{ steps.filter.outputs.synology-indexer }}
       compose: ${{ steps.filter.outputs.compose }}
       ci: ${{ steps.filter.outputs.ci }}
     steps:
@@ -33,6 +35,8 @@ jobs:
               - 'servers/apple-calendar/**'
             synology:
               - 'servers/synology/**'
+            synology-indexer:
+              - 'servers/synology-indexer/**'
             compose:
               - 'docker-compose.yml'
             ci:
@@ -128,6 +132,54 @@ jobs:
           secrets: |
             NODE_AUTH_TOKEN=${{ secrets.GITHUB_TOKEN }}
 
+  test-synology-indexer:
+    runs-on: ubuntu-latest
+    needs: changes
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: servers/synology-indexer/package-lock.json
+          registry-url: https://npm.pkg.github.com
+          scope: "@crearec"
+
+      - name: Install dependencies
+        working-directory: servers/synology-indexer
+        run: npm ci
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate Prisma client
+        working-directory: servers/synology-indexer
+        run: npx prisma generate
+        env:
+          DATABASE_URL: "postgresql://dummy:dummy@localhost:5432/dummy"
+
+      - name: Run tests
+        working-directory: servers/synology-indexer
+        run: npm test
+
+      - uses: docker/setup-buildx-action@v4
+        if: needs.changes.outputs.synology-indexer == 'true'
+
+      - name: Build synology-indexer image (no push)
+        if: needs.changes.outputs.synology-indexer == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: servers/synology-indexer
+          push: false
+          tags: ${{ env.SYNOLOGY_INDEXER_IMAGE }}:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          secrets: |
+            NODE_AUTH_TOKEN=${{ secrets.GITHUB_TOKEN }}
+
   publish-apple-calendar:
     runs-on: ubuntu-latest
     needs: [test-apple-calendar, changes]
@@ -212,17 +264,61 @@ jobs:
           secrets: |
             NODE_AUTH_TOKEN=${{ secrets.GITHUB_TOKEN }}
 
+  publish-synology-indexer:
+    runs-on: ubuntu-latest
+    needs: [test-synology-indexer, changes]
+    if: >-
+      github.event_name == 'push'
+      && github.ref == 'refs/heads/main'
+      && needs.changes.outputs.synology-indexer == 'true'
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags
+        id: meta
+        run: |
+          SHORT_SHA="$(echo "${GITHUB_SHA}" | cut -c1-7)"
+          echo "image_tag=sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "tags=${{ env.SYNOLOGY_INDEXER_IMAGE }}:main,${{ env.SYNOLOGY_INDEXER_IMAGE }}:sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: servers/synology-indexer
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          secrets: |
+            NODE_AUTH_TOKEN=${{ secrets.GITHUB_TOKEN }}
+
   deploy:
     runs-on: ubuntu-latest
-    needs: [test-apple-calendar, test-synology, changes, publish-apple-calendar, publish-synology]
+    needs: [test-apple-calendar, test-synology, test-synology-indexer, changes, publish-apple-calendar, publish-synology, publish-synology-indexer]
     if: >-
       always()
       && !cancelled()
       && github.ref == 'refs/heads/main'
       && needs.test-apple-calendar.result == 'success'
       && needs.test-synology.result == 'success'
+      && needs.test-synology-indexer.result == 'success'
       && (needs.publish-apple-calendar.result == 'success' || needs.publish-apple-calendar.result == 'skipped')
       && (needs.publish-synology.result == 'success' || needs.publish-synology.result == 'skipped')
+      && (needs.publish-synology-indexer.result == 'success' || needs.publish-synology-indexer.result == 'skipped')
       && (
         github.event_name == 'workflow_dispatch'
         || (
@@ -230,6 +326,7 @@ jobs:
           && (
             needs.changes.outputs.apple-calendar == 'true'
             || needs.changes.outputs.synology == 'true'
+            || needs.changes.outputs.synology-indexer == 'true'
             || needs.changes.outputs.compose == 'true'
             || needs.changes.outputs.ci == 'true'
           )
@@ -262,8 +359,10 @@ jobs:
           SERVER_HOST: ${{ secrets.DEPLOY_HOST }}
           APPLE_CALENDAR_IMAGE_TAG_NEW: ${{ needs.publish-apple-calendar.outputs.image_tag }}
           SYNOLOGY_IMAGE_TAG_NEW: ${{ needs.publish-synology.outputs.image_tag }}
+          SYNOLOGY_INDEXER_IMAGE_TAG_NEW: ${{ needs.publish-synology-indexer.outputs.image_tag }}
           APPLE_CALENDAR_CHANGED: ${{ needs.changes.outputs.apple-calendar }}
           SYNOLOGY_CHANGED: ${{ needs.changes.outputs.synology }}
+          SYNOLOGY_INDEXER_CHANGED: ${{ needs.changes.outputs.synology-indexer }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
         run: |
@@ -295,6 +394,9 @@ jobs:
           if [ '${SYNOLOGY_CHANGED}' = 'true' ] && [ -n '${SYNOLOGY_IMAGE_TAG_NEW}' ]; then
             export SYNOLOGY_IMAGE_TAG='${SYNOLOGY_IMAGE_TAG_NEW}'
           fi
+          if [ '${SYNOLOGY_INDEXER_CHANGED}' = 'true' ] && [ -n '${SYNOLOGY_INDEXER_IMAGE_TAG_NEW}' ]; then
+            export SYNOLOGY_INDEXER_IMAGE_TAG='${SYNOLOGY_INDEXER_IMAGE_TAG_NEW}'
+          fi
 
           docker compose pull
           docker compose up -d
@@ -305,6 +407,9 @@ jobs:
           if [ '${SYNOLOGY_CHANGED}' = 'true' ]; then
             docker compose logs --tail=30 synology-mcp || true
           fi
+          if [ '${SYNOLOGY_INDEXER_CHANGED}' = 'true' ]; then
+            docker compose logs --tail=30 synology-indexer || true
+          fi
 
           # Logout so credentials don't persist on disk
           docker logout ghcr.io || true
@@ -312,13 +417,13 @@ jobs:
 
   ghcr_cleanup:
     runs-on: ubuntu-latest
-    needs: [publish-apple-calendar, publish-synology]
+    needs: [publish-apple-calendar, publish-synology, publish-synology-indexer]
     if: >-
       always()
       && !cancelled()
       && github.event_name == 'push'
       && github.ref == 'refs/heads/main'
-      && (needs.publish-apple-calendar.result == 'success' || needs.publish-synology.result == 'success')
+      && (needs.publish-apple-calendar.result == 'success' || needs.publish-synology.result == 'success' || needs.publish-synology-indexer.result == 'success')
     concurrency:
       group: ghcr-cleanup
       cancel-in-progress: false
@@ -342,6 +447,17 @@ jobs:
         uses: dataaxiom/ghcr-cleanup-action@v1
         with:
           packages: grok-mcp-synology
+          delete-tags: sha-*
+          keep-n-tagged: "10"
+          exclude-tags: main
+          delete-untagged: true
+          delete-orphaned-images: true
+
+      - name: Prune grok-mcp-synology-indexer (keep 10 sha-*)
+        if: needs.publish-synology-indexer.result == 'success'
+        uses: dataaxiom/ghcr-cleanup-action@v1
+        with:
+          packages: grok-mcp-synology-indexer
           delete-tags: sha-*
           keep-n-tagged: "10"
           exclude-tags: main

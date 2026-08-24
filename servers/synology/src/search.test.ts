@@ -84,6 +84,27 @@ describe("SearchResult type", () => {
     expect("content_hash" in result).toBe(false);
   });
 
+  it("should never include lastSeenAt field", () => {
+    const result: SearchResult = {
+      label: "Test",
+      shareUrl: "https://example.com/share/test",
+      kind: "file",
+    };
+
+    expect("lastSeenAt" in result).toBe(false);
+    expect("last_seen_at" in result).toBe(false);
+  });
+
+  it("should never include dirty field", () => {
+    const result: SearchResult = {
+      label: "Test",
+      shareUrl: "https://example.com/share/test",
+      kind: "file",
+    };
+
+    expect("dirty" in result).toBe(false);
+  });
+
   it("kind should be either file or folder", () => {
     const fileResult: SearchResult = {
       label: "File",
@@ -115,6 +136,9 @@ describe("Privacy compliance", () => {
     "share_password",
     "contentHash",
     "content_hash",
+    "lastSeenAt",
+    "last_seen_at",
+    "dirty",
   ];
 
   it("SearchResult interface excludes all forbidden fields", () => {
