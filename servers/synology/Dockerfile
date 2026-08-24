@@ -36,8 +36,11 @@ RUN --mount=type=secret,id=NODE_AUTH_TOKEN \
   NODE_AUTH_TOKEN="$(cat /run/secrets/NODE_AUTH_TOKEN)" npm ci --omit=dev && \
   npx prisma generate && \
   npm cache clean --force
+COPY prisma.config.ts ./
 COPY --from=builder /app/dist ./dist
-RUN mkdir -p /app/.cache/transformers && chown -R node:node /app/.cache
+COPY docker-entrypoint.sh ./
+RUN chmod +x docker-entrypoint.sh && \
+  mkdir -p /app/.cache/transformers && chown -R node:node /app/.cache
 USER node
 EXPOSE 8794
-CMD ["node", "dist/http.js"]
+ENTRYPOINT ["./docker-entrypoint.sh"]
