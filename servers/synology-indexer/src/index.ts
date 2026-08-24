@@ -9,6 +9,14 @@ import { describeWithVision, checkOllamaAvailable } from "./vision.js";
 import { embedText } from "./embedder.js";
 import { generateFolderSummary, type ChildDescription } from "./folder-summarizer.js";
 import { withGpuPod, type RunPodConfig } from "./runpod.js";
+import {
+  startTelemetry,
+  shutdownTelemetry,
+  logInfo,
+  logWarn,
+  logError,
+  logErrorWithCause,
+} from "./telemetry.js";
 
 interface IndexStats {
   seen: number;
@@ -39,17 +47,18 @@ async function runIndex(config: Config): Promise<IndexStats> {
     aborted: false,
   };
 
-  console.log(`[indexer] Starting index of ${config.mountRoot}`);
+  logInfo("index run started", { mount_root: config.mountRoot });
   const startTime = Date.now();
 
   const walkResult = await walkDirectory(config.mountRoot);
   stats.seen = walkResult.files.length + walkResult.folders.length;
   stats.skipped = walkResult.skipped;
 
-  console.log(
-    `[indexer] Walk complete: ${walkResult.files.length} files, ` +
-      `${walkResult.folders.length} folders, ${walkResult.skipped} skipped`,
-  );
+  logInfo("walk complete", {
+    files: walkResult.files.length,
+    folders: walkResult.folders.length,
+    skipped: walkResult.skipped,
+  });
 
   const db = getPrisma();
   const now = new Date();
@@ -78,7 +87,7 @@ async function runIndex(config: Config): Promise<IndexStats> {
         });
         if (wasDeleted) {
           stats.undeleted++;
-          console.log(`[indexer] Undeleted folder: ${folder.synoPath}`);
+          logInfo("undeleted folder", { syno_path: folder.synoPath });
         }
       } else {
         await db.folder.create({
@@ -91,7 +100,7 @@ async function runIndex(config: Config): Promise<IndexStats> {
         });
       }
     } catch (err) {
-      console.error(`[indexer] Error upserting folder ${folder.synoPath}:`, err);
+      logErrorWithCause("folder upsert failed", err, { syno_path: folder.synoPath });
       stats.errors++;
     }
   }
@@ -150,7 +159,7 @@ async function runIndex(config: Config): Promise<IndexStats> {
 
         if (wasDeleted) {
           stats.undeleted++;
-          console.log(`[indexer] Undeleted file: ${file.synoPath}`);
+          logInfo("undeleted file", { syno_path: file.synoPath });
         }
         if (decision.dirty) {
           dirtyFileIds.add(existing.id);
@@ -179,14 +188,12 @@ async function runIndex(config: Config): Promise<IndexStats> {
         stats.dirty++;
       }
     } catch (err) {
-      console.error(`[indexer] Error processing file ${file.synoPath}:`, err);
+      logErrorWithCause("file processing failed", err, { syno_path: file.synoPath });
       stats.errors++;
     }
   }
 
-  console.log(
-    `[indexer] Hashed ${stats.hashed} files, ${stats.dirty} marked dirty`,
-  );
+  logInfo("hash phase complete", { hashed: stats.hashed, dirty: stats.dirty });
 
   const previousNonDeletedCount = await db.$queryRaw<Array<{ count: bigint }>>`
     SELECT COUNT(*) as count FROM files WHERE deleted_at IS NULL
@@ -196,16 +203,14 @@ async function runIndex(config: Config): Promise<IndexStats> {
   const abortCheck = shouldAbortSoftDelete(seenFileCount, previousNonDeletedCount);
 
   if (abortCheck.shouldAbort) {
-    const reason = abortCheck.reason === "zero_seen"
-      ? "zero"
-      : `less than half of previous non-deleted count (${previousNonDeletedCount})`;
-    console.error(
-      `[indexer] ABORT: Seen file count (${seenFileCount}) is ${reason}. ` +
-        `This may indicate a mount issue. Skipping soft-delete to prevent data loss.`,
-    );
+    logError("soft-delete aborted: mount blip guard", {
+      seen: seenFileCount,
+      previous_non_deleted: previousNonDeletedCount,
+      reason: abortCheck.reason,
+    });
     stats.aborted = true;
     const elapsed = Math.round((Date.now() - startTime) / 1000);
-    console.log(`[indexer] Index aborted in ${elapsed}s`);
+    logWarn("index run aborted", { elapsed_seconds: elapsed, ...stats });
     return stats;
   }
 
@@ -217,7 +222,7 @@ async function runIndex(config: Config): Promise<IndexStats> {
   `;
   stats.softDeleted += Number(softDeleteResult);
   if (softDeleteResult > 0) {
-    console.log(`[indexer] Soft-deleted ${softDeleteResult} files not seen this scan`);
+    logInfo("soft-deleted files not seen this scan", { count: Number(softDeleteResult) });
   }
 
   const allFolders = await db.folder.findMany({
@@ -241,7 +246,7 @@ async function runIndex(config: Config): Promise<IndexStats> {
         data: { deletedAt: now },
       });
       stats.softDeleted++;
-      console.log(`[indexer] Soft-deleted folder (no live children): ${folder.synoPath}`);
+      logInfo("soft-deleted folder with no live children", { syno_path: folder.synoPath });
     }
   }
 
@@ -253,7 +258,7 @@ async function runIndex(config: Config): Promise<IndexStats> {
   `;
   stats.hardDeleted += Number(hardDeleteFilesResult);
   if (hardDeleteFilesResult > 0) {
-    console.log(`[indexer] Hard-deleted ${hardDeleteFilesResult} files (older than 30 days)`);
+    logInfo("hard-deleted files older than retention", { count: Number(hardDeleteFilesResult) });
   }
 
   const hardDeleteFoldersResult = await db.$executeRaw`
@@ -262,18 +267,18 @@ async function runIndex(config: Config): Promise<IndexStats> {
   `;
   stats.hardDeleted += Number(hardDeleteFoldersResult);
   if (hardDeleteFoldersResult > 0) {
-    console.log(`[indexer] Hard-deleted ${hardDeleteFoldersResult} folders (older than 30 days)`);
+    logInfo("hard-deleted folders older than retention", { count: Number(hardDeleteFoldersResult) });
   }
 
   if (stats.dirty === 0) {
-    console.log("[indexer] No dirty files, skipping vision/embedding phase");
+    logInfo("no dirty files; skipping vision phase");
     const elapsed = Math.round((Date.now() - startTime) / 1000);
-    console.log(`[indexer] Index complete in ${elapsed}s`);
+    logInfo("index run complete", { elapsed_seconds: elapsed, ...stats });
     return stats;
   }
 
   const processVisionPhase = async (ollamaUrl: string): Promise<void> => {
-    console.log(`[indexer] Processing ${stats.dirty} dirty files with vision model`);
+    logInfo("vision phase started", { dirty: stats.dirty });
 
     const dirtyFiles = await db.file.findMany({
       where: { dirty: true, deletedAt: null },
@@ -316,13 +321,13 @@ async function runIndex(config: Config): Promise<IndexStats> {
           processedFolderPaths.add(p);
         }
       } catch (err) {
-        console.error(`[indexer] Error describing/embedding ${file.synoPath}:`, err);
+        logErrorWithCause("vision/embedding failed", err, { syno_path: file.synoPath });
         stats.errors++;
       }
     }
 
     if (processedFolderPaths.size > 0) {
-      console.log(`[indexer] Rebuilding ${processedFolderPaths.size} affected folders`);
+      logInfo("rebuilding affected folders", { count: processedFolderPaths.size });
 
       const sortedPaths = Array.from(processedFolderPaths).sort(
         (a, b) => b.split("/").length - a.split("/").length,
@@ -365,7 +370,7 @@ async function runIndex(config: Config): Promise<IndexStats> {
 
           stats.foldersRebuilt++;
         } catch (err) {
-          console.error(`[indexer] Error rebuilding folder ${folderPath}:`, err);
+          logErrorWithCause("folder rebuild failed", err, { syno_path: folderPath });
           stats.errors++;
         }
       }
@@ -375,7 +380,7 @@ async function runIndex(config: Config): Promise<IndexStats> {
   const hasRunPod = config.runpodApiKey && config.runpodPodId;
 
   if (hasRunPod) {
-    console.log(`[indexer] Using RunPod GPU pod ${config.runpodPodId}`);
+    logInfo("using RunPod GPU pod", { pod_id: config.runpodPodId! });
     const runpodConfig: RunPodConfig = {
       apiKey: config.runpodApiKey!,
       podId: config.runpodPodId!,
@@ -395,20 +400,14 @@ async function runIndex(config: Config): Promise<IndexStats> {
     if (ollamaAvailable) {
       await processVisionPhase(config.ollamaBaseUrl);
     } else {
-      console.log("[indexer] Ollama not available, skipping vision descriptions");
+      logWarn("ollama unavailable; skipping vision phase");
     }
   } else {
-    console.log("[indexer] No RunPod or Ollama configured, skipping vision descriptions");
+    logInfo("no RunPod or Ollama configured; skipping vision phase");
   }
 
   const elapsed = Math.round((Date.now() - startTime) / 1000);
-  console.log(
-    `[indexer] Index complete in ${elapsed}s: ` +
-      `${stats.seen} seen, ${stats.hashed} hashed, ${stats.dirty} dirty, ` +
-      `${stats.processed} processed, ${stats.foldersRebuilt} folders rebuilt, ` +
-      `${stats.softDeleted} soft-deleted, ${stats.undeleted} undeleted, ` +
-      `${stats.hardDeleted} hard-deleted, ${stats.errors} errors`,
-  );
+  logInfo("index run complete", { elapsed_seconds: elapsed, ...stats });
 
   return stats;
 }
@@ -448,21 +447,23 @@ function msUntilNextRun(hour: number, minute: number, timezone: string): number 
 }
 
 async function main(): Promise<void> {
+  startTelemetry();
   const config = getConfig();
 
-  console.log("[indexer] Synology Indexer starting");
-  console.log(`[indexer] Mount root: ${config.mountRoot}`);
-  console.log(`[indexer] Timezone: ${config.timezone}`);
-  console.log(`[indexer] Daily index at: ${config.indexDailyAt}`);
-  console.log(`[indexer] Run once: ${config.runOnce}`);
-  console.log(`[indexer] Ollama URL: ${config.ollamaBaseUrl ?? "not configured"}`);
-  console.log(`[indexer] RunPod: ${config.runpodPodId ? `pod ${config.runpodPodId}` : "not configured"}`);
+  logInfo("synology indexer starting", {
+    timezone: config.timezone,
+    index_daily_at: config.indexDailyAt,
+    run_once: config.runOnce,
+    ollama_configured: Boolean(config.ollamaBaseUrl),
+    runpod_configured: Boolean(config.runpodPodId),
+  });
 
   if (config.runOnce) {
-    console.log("[indexer] RUN_ONCE mode, running immediately");
+    logInfo("run_once mode; running immediately");
     await runIndex(config);
     await disconnectPrisma();
-    console.log("[indexer] Done");
+    await shutdownTelemetry();
+    logInfo("run_once complete");
     return;
   }
 
@@ -472,36 +473,42 @@ async function main(): Promise<void> {
     while (true) {
       const msToWait = msUntilNextRun(hour, minute, config.timezone);
       const hoursToWait = Math.round(msToWait / 1000 / 60 / 60 * 10) / 10;
-      console.log(
-        `[indexer] Next run in ${hoursToWait}h at ${config.indexDailyAt} ${config.timezone}`,
-      );
+      logInfo("scheduled run waiting", {
+        hours_until_run: hoursToWait,
+        index_daily_at: config.indexDailyAt,
+        timezone: config.timezone,
+      });
 
       await new Promise((resolve) => setTimeout(resolve, msToWait));
 
       try {
         await runIndex(config);
       } catch (err) {
-        console.error("[indexer] Index run failed:", err);
+        logErrorWithCause("index run failed", err);
       }
     }
   };
 
-  process.on("SIGINT", async () => {
-    console.log("[indexer] Shutting down...");
+  const shutdown = async (signal: string): Promise<void> => {
+    logInfo("shutting down", { signal });
     await disconnectPrisma();
+    await shutdownTelemetry();
     process.exit(0);
+  };
+
+  process.on("SIGINT", () => {
+    void shutdown("SIGINT");
   });
 
-  process.on("SIGTERM", async () => {
-    console.log("[indexer] Shutting down...");
-    await disconnectPrisma();
-    process.exit(0);
+  process.on("SIGTERM", () => {
+    void shutdown("SIGTERM");
   });
 
   await runLoop();
 }
 
-main().catch((err) => {
-  console.error("[indexer] Fatal error:", err);
+main().catch(async (err) => {
+  logErrorWithCause("fatal error", err);
+  await shutdownTelemetry();
   process.exit(1);
 });

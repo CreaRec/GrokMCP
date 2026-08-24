@@ -118,6 +118,11 @@ services:
       - DSM_HOST=${DSM_HOST:-}
       - DSM_SHARE_USER=${DSM_SHARE_USER:-}
       - DSM_SHARE_PASSWORD=${DSM_SHARE_PASSWORD:-}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://alloy:4318}
+      - OTEL_SERVICE_NAME=${SYNOLOGY_INDEXER_OTEL_SERVICE_NAME:-synology-indexer}
+      - OTEL_SERVICE_NAMESPACE=${OTEL_SERVICE_NAMESPACE:-mcp}
+      - DEPLOY_ENV=${DEPLOY_ENV:-production}
+      - OTEL_SERVICE_VERSION=${SYNOLOGY_INDEXER_OTEL_SERVICE_VERSION:-}
     volumes:
       - ${SYNOLOGY_MOUNT_PATH:-/mnt/synology/Documents}:/mnt/synology/Documents:ro
     depends_on:
@@ -125,6 +130,7 @@ services:
         condition: service_healthy
     networks:
       - default
+      - lgtm
 
 volumes:
   synology-db-data:

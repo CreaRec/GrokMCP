@@ -13,6 +13,7 @@
     "db:generate": "prisma generate"
   },
   "dependencies": {
+    "@crearec/otel": "^0.0.3",
     "@prisma/adapter-pg": "^7.9.1",
     "@prisma/client": "^7.9.1",
     "pg": "^8.23.0",
