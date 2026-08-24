@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { shouldMarkDirty, shouldRebuildFolder, getParentFolderPaths } from "./dirty.js";
+import {
+  shouldMarkDirty,
+  shouldRebuildFolder,
+  getParentFolderPaths,
+  shouldAbortSoftDelete,
+  isEligibleForHardDelete,
+  shouldUndelete,
+} from "./dirty.js";
 import { generateFolderSummary } from "./folder-summarizer.js";
 import { mountPathToSynoPath } from "./walker.js";
 import { parseIndexTime } from "./config.js";
@@ -216,5 +223,144 @@ describe("backfill hash behavior", () => {
 
     expect(result.dirty).toBe(true);
     expect(result.reason).toBe("hash_missing");
+  });
+});
+
+describe("shouldAbortSoftDelete", () => {
+  it("aborts when seen file count is zero", () => {
+    const result = shouldAbortSoftDelete(0, 100);
+    expect(result.shouldAbort).toBe(true);
+    expect(result.reason).toBe("zero_seen");
+  });
+
+  it("aborts when seen count is less than half of previous", () => {
+    const result = shouldAbortSoftDelete(10, 100);
+    expect(result.shouldAbort).toBe(true);
+    expect(result.reason).toBe("less_than_half");
+  });
+
+  it("does not abort when seen count equals half of previous", () => {
+    const result = shouldAbortSoftDelete(50, 100);
+    expect(result.shouldAbort).toBe(false);
+    expect(result.reason).toBe("ok");
+  });
+
+  it("does not abort when seen count is greater than half", () => {
+    const result = shouldAbortSoftDelete(60, 100);
+    expect(result.shouldAbort).toBe(false);
+    expect(result.reason).toBe("ok");
+  });
+
+  it("does not abort when no previous files exist", () => {
+    const result = shouldAbortSoftDelete(0, 0);
+    expect(result.shouldAbort).toBe(true);
+    expect(result.reason).toBe("zero_seen");
+  });
+
+  it("does not abort with first scan (previousCount=0, seen>0)", () => {
+    const result = shouldAbortSoftDelete(50, 0);
+    expect(result.shouldAbort).toBe(false);
+    expect(result.reason).toBe("ok");
+  });
+
+  it("aborts at exactly less than half (49 seen out of 100)", () => {
+    const result = shouldAbortSoftDelete(49, 100);
+    expect(result.shouldAbort).toBe(true);
+    expect(result.reason).toBe("less_than_half");
+  });
+});
+
+describe("isEligibleForHardDelete", () => {
+  it("returns false when deletedAt is null", () => {
+    const now = new Date();
+    expect(isEligibleForHardDelete(null, now)).toBe(false);
+  });
+
+  it("returns false when deleted less than 30 days ago", () => {
+    const now = new Date();
+    const twentyNineDaysAgo = new Date(now.getTime() - 29 * 24 * 60 * 60 * 1000);
+    expect(isEligibleForHardDelete(twentyNineDaysAgo, now)).toBe(false);
+  });
+
+  it("returns true when deleted exactly 30 days ago", () => {
+    const now = new Date();
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    expect(isEligibleForHardDelete(thirtyDaysAgo, now)).toBe(true);
+  });
+
+  it("returns true when deleted more than 30 days ago", () => {
+    const now = new Date();
+    const sixtyDaysAgo = new Date(now.getTime() - 60 * 24 * 60 * 60 * 1000);
+    expect(isEligibleForHardDelete(sixtyDaysAgo, now)).toBe(true);
+  });
+});
+
+describe("shouldUndelete", () => {
+  it("undeletes a previously soft-deleted file when seen again", () => {
+    const existing = {
+      id: "test-id",
+      contentHash: "same-hash",
+      hasEmbedding: true,
+      description: "Description",
+      deletedAt: new Date(),
+    };
+    const result = shouldUndelete(existing, "same-hash");
+    expect(result.undelete).toBe(true);
+    expect(result.dirty).toBe(false);
+    expect(result.reason).toBe("undeleted_clean");
+  });
+
+  it("undeletes and marks dirty when hash changed", () => {
+    const existing = {
+      id: "test-id",
+      contentHash: "old-hash",
+      hasEmbedding: true,
+      description: "Description",
+      deletedAt: new Date(),
+    };
+    const result = shouldUndelete(existing, "new-hash");
+    expect(result.undelete).toBe(true);
+    expect(result.dirty).toBe(true);
+    expect(result.reason).toBe("undeleted_hash_changed");
+  });
+
+  it("does not undelete a file that was not deleted", () => {
+    const existing = {
+      id: "test-id",
+      contentHash: "same-hash",
+      hasEmbedding: true,
+      description: "Description",
+      deletedAt: null,
+    };
+    const result = shouldUndelete(existing, "same-hash");
+    expect(result.undelete).toBe(false);
+    expect(result.dirty).toBe(false);
+    expect(result.reason).toBe("clean");
+  });
+
+  it("does not set dirty when hash matches after undelete", () => {
+    const existing = {
+      id: "test-id",
+      contentHash: "same-hash",
+      hasEmbedding: true,
+      description: "Description",
+      deletedAt: new Date(),
+    };
+    const result = shouldUndelete(existing, "same-hash");
+    expect(result.undelete).toBe(true);
+    expect(result.dirty).toBe(false);
+  });
+});
+
+describe("soft-delete behavior", () => {
+  it("dirty flag is false when hash unchanged (skip GPU)", () => {
+    const existing = {
+      id: "test-id",
+      contentHash: "unchanged-hash",
+      hasEmbedding: true,
+      description: "Already processed",
+    };
+    const result = shouldMarkDirty(existing, "unchanged-hash");
+    expect(result.dirty).toBe(false);
   });
 });

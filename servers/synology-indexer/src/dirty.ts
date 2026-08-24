@@ -51,3 +51,45 @@ export function getParentFolderPaths(synoPath: string): string[] {
 
   return parents;
 }
+
+export interface AbortCheckResult {
+  shouldAbort: boolean;
+  reason: "zero_seen" | "less_than_half" | "ok";
+}
+
+export function shouldAbortSoftDelete(
+  seenFileCount: number,
+  previousNonDeletedCount: number,
+): AbortCheckResult {
+  if (seenFileCount === 0) {
+    return { shouldAbort: true, reason: "zero_seen" };
+  }
+
+  if (previousNonDeletedCount > 0) {
+    const halfPreviousCount = Math.floor(previousNonDeletedCount / 2);
+    if (seenFileCount < halfPreviousCount) {
+      return { shouldAbort: true, reason: "less_than_half" };
+    }
+  }
+
+  return { shouldAbort: false, reason: "ok" };
+}
+
+export function isEligibleForHardDelete(deletedAt: Date | null, now: Date): boolean {
+  if (!deletedAt) return false;
+  const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+  return now.getTime() - deletedAt.getTime() >= thirtyDaysMs;
+}
+
+export function shouldUndelete(
+  existing: ExistingFileRow & { deletedAt: Date | null },
+  newHash: string,
+): { undelete: boolean; dirty: boolean; reason: string } {
+  if (!existing.deletedAt) {
+    const decision = shouldMarkDirty(existing, newHash);
+    return { undelete: false, dirty: decision.dirty, reason: decision.reason };
+  }
+
+  const decision = shouldMarkDirty(existing, newHash);
+  return { undelete: true, dirty: decision.dirty, reason: `undeleted_${decision.reason}` };
+}
