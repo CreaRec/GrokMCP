@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { basename, extname } from "node:path";
+import { basename } from "node:path";
 
 export interface VisionResult {
   label: string;
@@ -32,24 +32,6 @@ function redactPii(text: string): { text: string; wasRedacted: boolean } {
   return { text: redacted, wasRedacted };
 }
 
-function getMimeType(filePath: string): string {
-  const ext = extname(filePath).toLowerCase();
-  const mimeTypes: Record<string, string> = {
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".png": "image/png",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-    ".bmp": "image/bmp",
-    ".tiff": "image/tiff",
-    ".tif": "image/tiff",
-    ".heic": "image/heic",
-    ".heif": "image/heif",
-    ".pdf": "application/pdf",
-  };
-  return mimeTypes[ext] ?? "application/octet-stream";
-}
-
 export async function describeWithVision(
   filePath: string,
   ollamaBaseUrl: string,
@@ -57,7 +39,6 @@ export async function describeWithVision(
 ): Promise<VisionResult> {
   const fileBuffer = await readFile(filePath);
   const base64 = fileBuffer.toString("base64");
-  const mimeType = getMimeType(filePath);
   const fileName = basename(filePath);
 
   const prompt = `Describe this document or image. Provide:

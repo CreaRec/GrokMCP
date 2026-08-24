@@ -15,7 +15,7 @@ describe("shouldMarkDirty", () => {
     const existing = {
       id: "test-id",
       contentHash: null,
-      embedding: null,
+      hasEmbedding: false,
       description: null,
     };
     const result = shouldMarkDirty(existing, "abc123");
@@ -27,7 +27,7 @@ describe("shouldMarkDirty", () => {
     const existing = {
       id: "test-id",
       contentHash: null,
-      embedding: [0.1, 0.2],
+      hasEmbedding: true,
       description: "Already described",
     };
     const result = shouldMarkDirty(existing, "abc123");
@@ -39,7 +39,7 @@ describe("shouldMarkDirty", () => {
     const existing = {
       id: "test-id",
       contentHash: "old-hash",
-      embedding: [0.1, 0.2],
+      hasEmbedding: true,
       description: "Old description",
     };
     const result = shouldMarkDirty(existing, "new-hash");
@@ -51,7 +51,7 @@ describe("shouldMarkDirty", () => {
     const existing = {
       id: "test-id",
       contentHash: "same-hash",
-      embedding: [0.1, 0.2],
+      hasEmbedding: true,
       description: "Description",
     };
     const result = shouldMarkDirty(existing, "same-hash");
@@ -194,7 +194,7 @@ describe("backfill hash behavior", () => {
     const existingWithEmbedding = {
       id: "existing-id",
       contentHash: null,
-      embedding: [0.1, 0.2, 0.3],
+      hasEmbedding: true,
       description: "Already processed",
     };
 
@@ -208,7 +208,7 @@ describe("backfill hash behavior", () => {
     const existingWithoutEmbedding = {
       id: "existing-id",
       contentHash: null,
-      embedding: null,
+      hasEmbedding: false,
       description: null,
     };
 

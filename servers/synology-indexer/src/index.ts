@@ -2,11 +2,11 @@
 import { basename } from "node:path";
 import { getConfig, parseIndexTime, type Config } from "./config.js";
 import { getPrisma, disconnectPrisma, formatVectorForPg } from "./db.js";
-import { walkDirectory, type FileEntry, type FolderEntry } from "./walker.js";
+import { walkDirectory } from "./walker.js";
 import { hashFile } from "./hasher.js";
 import { shouldMarkDirty, getParentFolderPaths, type ExistingFileRow } from "./dirty.js";
 import { describeWithVision, checkOllamaAvailable } from "./vision.js";
-import { embedText, EMBEDDING_DIM } from "./embedder.js";
+import { embedText } from "./embedder.js";
 import { generateFolderSummary, type ChildDescription } from "./folder-summarizer.js";
 
 interface IndexStats {
@@ -73,17 +73,25 @@ async function runIndex(config: Config): Promise<IndexStats> {
       const hash = await hashFile(file.absolutePath);
       stats.hashed++;
 
-      const existing = await db.file.findFirst({
-        where: { synoPath: file.synoPath },
-        select: {
-          id: true,
-          contentHash: true,
-          embedding: true,
-          description: true,
-        },
-      });
+      const existingRows = await db.$queryRaw<
+        Array<{ id: string; content_hash: string | null; has_embedding: boolean; description: string | null }>
+      >`
+        SELECT id, content_hash, (embedding IS NOT NULL) as has_embedding, description
+        FROM files
+        WHERE syno_path = ${file.synoPath}
+        LIMIT 1
+      `;
+      const existingRow = existingRows[0] ?? null;
+      const existing: ExistingFileRow | null = existingRow
+        ? {
+            id: existingRow.id,
+            contentHash: existingRow.content_hash,
+            hasEmbedding: existingRow.has_embedding,
+            description: existingRow.description,
+          }
+        : null;
 
-      const decision = shouldMarkDirty(existing as ExistingFileRow | null, hash);
+      const decision = shouldMarkDirty(existing, hash);
 
       if (existing) {
         await db.file.update({

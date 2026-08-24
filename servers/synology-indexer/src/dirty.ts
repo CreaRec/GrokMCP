@@ -1,7 +1,7 @@
 export interface ExistingFileRow {
   id: string;
   contentHash: string | null;
-  embedding: unknown | null;
+  hasEmbedding: boolean;
   description: string | null;
 }
 
@@ -19,7 +19,7 @@ export function shouldMarkDirty(
   }
 
   if (!existingRow.contentHash) {
-    if (existingRow.embedding && existingRow.description) {
+    if (existingRow.hasEmbedding && existingRow.description) {
       return { dirty: false, reason: "clean" };
     }
     return { dirty: true, reason: "hash_missing" };
