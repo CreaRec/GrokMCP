@@ -1,5 +1,6 @@
 import { readdir, stat } from "node:fs/promises";
 import { join, extname, basename, relative } from "node:path";
+import { logErrorWithCause } from "./telemetry.js";
 
 export interface FileEntry {
   absolutePath: string;
@@ -120,7 +121,7 @@ export async function walkDirectory(mountRoot: string): Promise<WalkResult> {
     try {
       entries = await readdir(dir, { withFileTypes: true });
     } catch (err) {
-      console.error(`[walker] Error reading directory ${dir}:`, err);
+      logErrorWithCause("walker readdir failed", err);
       return;
     }
 
@@ -152,7 +153,7 @@ export async function walkDirectory(mountRoot: string): Promise<WalkResult> {
             kind: getKind(name),
           });
         } catch (err) {
-          console.error(`[walker] Error stat-ing ${absolutePath}:`, err);
+          logErrorWithCause("walker stat failed", err);
           skipped++;
         }
       }

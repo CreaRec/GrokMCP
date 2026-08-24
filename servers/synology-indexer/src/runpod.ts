@@ -1,3 +1,5 @@
+import { logInfo, logErrorWithCause } from "./telemetry.js";
+
 const RUNPOD_API_BASE = "https://api.runpod.io/graphql";
 
 export interface RunPodConfig {
@@ -85,7 +87,7 @@ export async function startPod(config: RunPodConfig): Promise<void> {
   `;
 
   await graphqlRequest(config.apiKey, query, { podId: config.podId });
-  console.log(`[runpod] Started pod ${config.podId}`);
+  logInfo("runpod pod started", { pod_id: config.podId });
 }
 
 export async function stopPod(config: RunPodConfig): Promise<void> {
@@ -99,7 +101,7 @@ export async function stopPod(config: RunPodConfig): Promise<void> {
   `;
 
   await graphqlRequest(config.apiKey, query, { podId: config.podId });
-  console.log(`[runpod] Stopped pod ${config.podId}`);
+  logInfo("runpod pod stopped", { pod_id: config.podId });
 }
 
 export function getOllamaUrlFromPod(pod: PodInfo, ollamaPort: number): string | null {
@@ -126,7 +128,7 @@ export async function waitForPodRunning(
     const { status, pod } = await getPodStatus(config);
 
     if (status === "RUNNING" && pod) {
-      console.log(`[runpod] Pod ${config.podId} is RUNNING`);
+      logInfo("runpod pod running", { pod_id: config.podId });
       return pod;
     }
 
@@ -134,7 +136,7 @@ export async function waitForPodRunning(
       throw new Error(`Pod ${config.podId} is TERMINATED and cannot be started`);
     }
 
-    console.log(`[runpod] Pod status: ${status}, waiting...`);
+    logInfo("runpod waiting for pod", { pod_id: config.podId, status });
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
   }
 
@@ -152,14 +154,14 @@ export async function waitForOllamaHealthy(
     try {
       const response = await fetch(`${ollamaUrl}/api/tags`, { method: "GET" });
       if (response.ok) {
-        console.log(`[runpod] Ollama is healthy at ${ollamaUrl}`);
+        logInfo("runpod ollama healthy");
         return;
       }
     } catch {
       // Connection refused or other error, keep trying
     }
 
-    console.log(`[runpod] Waiting for Ollama to be healthy...`);
+    logInfo("runpod waiting for ollama");
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
   }
 
@@ -181,11 +183,11 @@ export async function pullModelIfMissing(
   );
 
   if (modelExists) {
-    console.log(`[runpod] Model ${modelName} already present`);
+    logInfo("runpod model already present", { model: modelName });
     return;
   }
 
-  console.log(`[runpod] Pulling model ${modelName}...`);
+  logInfo("runpod pulling model", { model: modelName });
   const pullResponse = await fetch(`${ollamaUrl}/api/pull`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -196,7 +198,7 @@ export async function pullModelIfMissing(
     throw new Error(`Failed to pull model ${modelName}: ${pullResponse.status}`);
   }
 
-  console.log(`[runpod] Model ${modelName} pulled successfully`);
+  logInfo("runpod model pulled", { model: modelName });
 }
 
 export interface GpuLifecycleOptions {
@@ -220,11 +222,11 @@ export async function withGpuPod<T>(
     const { status } = await getPodStatus(config);
     
     if (status !== "RUNNING") {
-      console.log(`[runpod] Pod status is ${status}, starting...`);
+      logInfo("runpod starting pod", { pod_id: config.podId, status });
       await startPod(config);
       options?.onStart?.();
     } else {
-      console.log(`[runpod] Pod already RUNNING`);
+      logInfo("runpod pod already running", { pod_id: config.podId });
     }
 
     podUsed = true;
@@ -236,7 +238,7 @@ export async function withGpuPod<T>(
       if (!ollamaUrl) {
         throw new Error(`Could not determine Ollama URL from pod ports`);
       }
-      console.log(`[runpod] Derived Ollama URL: ${ollamaUrl}`);
+      logInfo("runpod derived ollama url");
     }
 
     await waitForOllamaHealthy(ollamaUrl);
@@ -251,10 +253,10 @@ export async function withGpuPod<T>(
         await stopPod(config);
         options?.onStop?.();
       } catch (err) {
-        console.error(`[runpod] Error stopping pod:`, err);
+        logErrorWithCause("runpod stop failed", err, { pod_id: config.podId });
       }
     } else if (options?.leaveRunning) {
-      console.log(`[runpod] Leaving pod ${config.podId} running (RUNPOD_LEAVE_RUNNING=1)`);
+      logInfo("runpod leaving pod running", { pod_id: config.podId });
     }
   }
 }
