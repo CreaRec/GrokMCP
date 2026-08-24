@@ -49,6 +49,7 @@ export async function searchSynology(
     FROM files
     WHERE embedding IS NOT NULL
       AND share_url IS NOT NULL
+      AND deleted_at IS NULL
     ORDER BY distance ASC
     LIMIT ${limit}
   `;
@@ -63,6 +64,7 @@ export async function searchSynology(
     FROM folders
     WHERE embedding IS NOT NULL
       AND share_url IS NOT NULL
+      AND deleted_at IS NULL
     ORDER BY distance ASC
     LIMIT ${limit}
   `;

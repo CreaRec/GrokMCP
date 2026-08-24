@@ -105,6 +105,17 @@ describe("SearchResult type", () => {
     expect("dirty" in result).toBe(false);
   });
 
+  it("should never include deletedAt field", () => {
+    const result: SearchResult = {
+      label: "Test",
+      shareUrl: "https://example.com/share/test",
+      kind: "file",
+    };
+
+    expect("deletedAt" in result).toBe(false);
+    expect("deleted_at" in result).toBe(false);
+  });
+
   it("kind should be either file or folder", () => {
     const fileResult: SearchResult = {
       label: "File",
@@ -139,6 +150,8 @@ describe("Privacy compliance", () => {
     "lastSeenAt",
     "last_seen_at",
     "dirty",
+    "deletedAt",
+    "deleted_at",
   ];
 
   it("SearchResult interface excludes all forbidden fields", () => {

@@ -35,9 +35,11 @@ model File {
   contentHash    String?   @map("content_hash") // SHA-256 hex of file bytes, written by indexer/backfill
   lastSeenAt     DateTime? @map("last_seen_at") @db.Timestamptz // this scan saw the path
   dirty          Boolean   @default(false)                      // needs LLM/embed work
+  deletedAt      DateTime? @map("deleted_at") @db.Timestamptz   // soft-delete timestamp; hard-delete after 30 days
 
   folder Folder? @relation(fields: [folderId], references: [id])
 
+  @@index([deletedAt])
   @@map("files")
 }
 
@@ -54,8 +56,10 @@ model Folder {
   updatedAt   DateTime? @map("updated_at") @db.Timestamptz
   lastSeenAt  DateTime? @map("last_seen_at") @db.Timestamptz // this scan saw the path
   dirty       Boolean   @default(false)                      // needs LLM/embed work
+  deletedAt   DateTime? @map("deleted_at") @db.Timestamptz   // soft-delete timestamp; hard-delete after 30 days
 
   files File[]
 
+  @@index([deletedAt])
   @@map("folders")
 }

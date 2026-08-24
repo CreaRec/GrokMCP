@@ -4,7 +4,7 @@ import { getConfig, parseIndexTime, type Config } from "./config.js";
 import { getPrisma, disconnectPrisma, formatVectorForPg } from "./db.js";
 import { walkDirectory } from "./walker.js";
 import { hashFile } from "./hasher.js";
-import { shouldMarkDirty, getParentFolderPaths, type ExistingFileRow } from "./dirty.js";
+import { shouldMarkDirty, getParentFolderPaths, shouldAbortSoftDelete, type ExistingFileRow } from "./dirty.js";
 import { describeWithVision, checkOllamaAvailable } from "./vision.js";
 import { embedText } from "./embedder.js";
 import { generateFolderSummary, type ChildDescription } from "./folder-summarizer.js";
@@ -18,6 +18,10 @@ interface IndexStats {
   processed: number;
   foldersRebuilt: number;
   errors: number;
+  softDeleted: number;
+  undeleted: number;
+  hardDeleted: number;
+  aborted: boolean;
 }
 
 async function runIndex(config: Config): Promise<IndexStats> {
@@ -29,6 +33,10 @@ async function runIndex(config: Config): Promise<IndexStats> {
     processed: 0,
     foldersRebuilt: 0,
     errors: 0,
+    softDeleted: 0,
+    undeleted: 0,
+    hardDeleted: 0,
+    aborted: false,
   };
 
   console.log(`[indexer] Starting index of ${config.mountRoot}`);
@@ -48,21 +56,40 @@ async function runIndex(config: Config): Promise<IndexStats> {
 
   const dirtyFileIds = new Set<string>();
   const processedFolderPaths = new Set<string>();
+  const seenFilePaths = new Set<string>();
+  const seenFolderPaths = new Set<string>();
 
   for (const folder of walkResult.folders) {
+    seenFolderPaths.add(folder.synoPath);
     try {
-      await db.folder.upsert({
+      const existingFolder = await db.folder.findFirst({
         where: { synoPath: folder.synoPath },
-        create: {
-          synoPath: folder.synoPath,
-          label: basename(folder.synoPath) || folder.synoPath,
-          lastSeenAt: now,
-          dirty: false,
-        },
-        update: {
-          lastSeenAt: now,
-        },
+        select: { id: true, deletedAt: true },
       });
+
+      if (existingFolder) {
+        const wasDeleted = existingFolder.deletedAt !== null;
+        await db.folder.update({
+          where: { id: existingFolder.id },
+          data: {
+            lastSeenAt: now,
+            deletedAt: null,
+          },
+        });
+        if (wasDeleted) {
+          stats.undeleted++;
+          console.log(`[indexer] Undeleted folder: ${folder.synoPath}`);
+        }
+      } else {
+        await db.folder.create({
+          data: {
+            synoPath: folder.synoPath,
+            label: basename(folder.synoPath) || folder.synoPath,
+            lastSeenAt: now,
+            dirty: false,
+          },
+        });
+      }
     } catch (err) {
       console.error(`[indexer] Error upserting folder ${folder.synoPath}:`, err);
       stats.errors++;
@@ -70,31 +97,45 @@ async function runIndex(config: Config): Promise<IndexStats> {
   }
 
   for (const file of walkResult.files) {
+    seenFilePaths.add(file.synoPath);
     try {
       const hash = await hashFile(file.absolutePath);
       stats.hashed++;
 
       const existingRows = await db.$queryRaw<
-        Array<{ id: string; content_hash: string | null; has_embedding: boolean; description: string | null }>
+        Array<{
+          id: string;
+          content_hash: string | null;
+          has_embedding: boolean;
+          description: string | null;
+          deleted_at: Date | null;
+        }>
       >`
-        SELECT id, content_hash, (embedding IS NOT NULL) as has_embedding, description
+        SELECT id, content_hash, (embedding IS NOT NULL) as has_embedding, description, deleted_at
         FROM files
         WHERE syno_path = ${file.synoPath}
         LIMIT 1
       `;
       const existingRow = existingRows[0] ?? null;
-      const existing: ExistingFileRow | null = existingRow
+      const existing: (ExistingFileRow & { deletedAt: Date | null }) | null = existingRow
         ? {
             id: existingRow.id,
             contentHash: existingRow.content_hash,
             hasEmbedding: existingRow.has_embedding,
             description: existingRow.description,
+            deletedAt: existingRow.deleted_at,
           }
         : null;
 
-      const decision = shouldMarkDirty(existing, hash);
-
       if (existing) {
+        const wasDeleted = existing.deletedAt !== null;
+        const decision = wasDeleted
+          ? shouldMarkDirty(
+              { ...existing, contentHash: existing.contentHash, hasEmbedding: existing.hasEmbedding },
+              hash,
+            )
+          : shouldMarkDirty(existing, hash);
+
         await db.file.update({
           where: { id: existing.id },
           data: {
@@ -103,8 +144,14 @@ async function runIndex(config: Config): Promise<IndexStats> {
             bytes: file.bytes,
             mtime: file.mtime,
             dirty: decision.dirty,
+            deletedAt: null,
           },
         });
+
+        if (wasDeleted) {
+          stats.undeleted++;
+          console.log(`[indexer] Undeleted file: ${file.synoPath}`);
+        }
         if (decision.dirty) {
           dirtyFileIds.add(existing.id);
           stats.dirty++;
@@ -141,6 +188,83 @@ async function runIndex(config: Config): Promise<IndexStats> {
     `[indexer] Hashed ${stats.hashed} files, ${stats.dirty} marked dirty`,
   );
 
+  const previousNonDeletedCount = await db.$queryRaw<Array<{ count: bigint }>>`
+    SELECT COUNT(*) as count FROM files WHERE deleted_at IS NULL
+  `.then((rows) => Number(rows[0]?.count ?? 0));
+
+  const seenFileCount = walkResult.files.length;
+  const abortCheck = shouldAbortSoftDelete(seenFileCount, previousNonDeletedCount);
+
+  if (abortCheck.shouldAbort) {
+    const reason = abortCheck.reason === "zero_seen"
+      ? "zero"
+      : `less than half of previous non-deleted count (${previousNonDeletedCount})`;
+    console.error(
+      `[indexer] ABORT: Seen file count (${seenFileCount}) is ${reason}. ` +
+        `This may indicate a mount issue. Skipping soft-delete to prevent data loss.`,
+    );
+    stats.aborted = true;
+    const elapsed = Math.round((Date.now() - startTime) / 1000);
+    console.log(`[indexer] Index aborted in ${elapsed}s`);
+    return stats;
+  }
+
+  const softDeleteResult = await db.$executeRaw`
+    UPDATE files
+    SET deleted_at = ${now}
+    WHERE deleted_at IS NULL
+      AND last_seen_at < ${now}
+  `;
+  stats.softDeleted += Number(softDeleteResult);
+  if (softDeleteResult > 0) {
+    console.log(`[indexer] Soft-deleted ${softDeleteResult} files not seen this scan`);
+  }
+
+  const allFolders = await db.folder.findMany({
+    where: { deletedAt: null },
+    select: { id: true, synoPath: true },
+  });
+
+  for (const folder of allFolders) {
+    if (seenFolderPaths.has(folder.synoPath)) {
+      continue;
+    }
+
+    const liveChildCount = await db.$queryRaw<Array<{ count: bigint }>>`
+      SELECT COUNT(*) as count FROM files
+      WHERE folder_id = ${folder.id}::uuid AND deleted_at IS NULL
+    `.then((rows) => Number(rows[0]?.count ?? 0));
+
+    if (liveChildCount === 0) {
+      await db.folder.update({
+        where: { id: folder.id },
+        data: { deletedAt: now },
+      });
+      stats.softDeleted++;
+      console.log(`[indexer] Soft-deleted folder (no live children): ${folder.synoPath}`);
+    }
+  }
+
+  const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+  const hardDeleteFilesResult = await db.$executeRaw`
+    DELETE FROM files
+    WHERE deleted_at IS NOT NULL AND deleted_at < ${thirtyDaysAgo}
+  `;
+  stats.hardDeleted += Number(hardDeleteFilesResult);
+  if (hardDeleteFilesResult > 0) {
+    console.log(`[indexer] Hard-deleted ${hardDeleteFilesResult} files (older than 30 days)`);
+  }
+
+  const hardDeleteFoldersResult = await db.$executeRaw`
+    DELETE FROM folders
+    WHERE deleted_at IS NOT NULL AND deleted_at < ${thirtyDaysAgo}
+  `;
+  stats.hardDeleted += Number(hardDeleteFoldersResult);
+  if (hardDeleteFoldersResult > 0) {
+    console.log(`[indexer] Hard-deleted ${hardDeleteFoldersResult} folders (older than 30 days)`);
+  }
+
   if (stats.dirty === 0) {
     console.log("[indexer] No dirty files, skipping vision/embedding phase");
     const elapsed = Math.round((Date.now() - startTime) / 1000);
@@ -152,7 +276,7 @@ async function runIndex(config: Config): Promise<IndexStats> {
     console.log(`[indexer] Processing ${stats.dirty} dirty files with vision model`);
 
     const dirtyFiles = await db.file.findMany({
-      where: { dirty: true },
+      where: { dirty: true, deletedAt: null },
       select: { id: true, synoPath: true },
     });
 
@@ -207,12 +331,12 @@ async function runIndex(config: Config): Promise<IndexStats> {
       for (const folderPath of sortedPaths) {
         try {
           const folder = await db.folder.findFirst({
-            where: { synoPath: folderPath },
+            where: { synoPath: folderPath, deletedAt: null },
           });
           if (!folder) continue;
 
           const children = await db.file.findMany({
-            where: { folderId: folder.id },
+            where: { folderId: folder.id, deletedAt: null },
             select: { label: true, description: true, kind: true },
           });
 
@@ -282,7 +406,8 @@ async function runIndex(config: Config): Promise<IndexStats> {
     `[indexer] Index complete in ${elapsed}s: ` +
       `${stats.seen} seen, ${stats.hashed} hashed, ${stats.dirty} dirty, ` +
       `${stats.processed} processed, ${stats.foldersRebuilt} folders rebuilt, ` +
-      `${stats.errors} errors`,
+      `${stats.softDeleted} soft-deleted, ${stats.undeleted} undeleted, ` +
+      `${stats.hardDeleted} hard-deleted, ${stats.errors} errors`,
   );
 
   return stats;
