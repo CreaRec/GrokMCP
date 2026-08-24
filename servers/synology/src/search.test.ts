@@ -73,6 +73,17 @@ describe("SearchResult type", () => {
     expect("embedding" in result).toBe(false);
   });
 
+  it("should never include contentHash field", () => {
+    const result: SearchResult = {
+      label: "Test",
+      shareUrl: "https://example.com/share/test",
+      kind: "file",
+    };
+
+    expect("contentHash" in result).toBe(false);
+    expect("content_hash" in result).toBe(false);
+  });
+
   it("kind should be either file or folder", () => {
     const fileResult: SearchResult = {
       label: "File",
@@ -102,6 +113,8 @@ describe("Privacy compliance", () => {
     "password",
     "sharePassword",
     "share_password",
+    "contentHash",
+    "content_hash",
   ];
 
   it("SearchResult interface excludes all forbidden fields", () => {

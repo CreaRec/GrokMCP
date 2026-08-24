@@ -41,6 +41,7 @@ The MCP server **NEVER** returns:
 - `syno_path` / `synoPath` — Synology file system path
 - `syno_id` / `synoId` — Synology internal ID
 - `embedding` — Vector data
+- `content_hash` / `contentHash` — Internal SHA-256 checksum for deduplication
 - Share passwords (not stored in DB)
 - Raw file bytes
 
