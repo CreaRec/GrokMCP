@@ -32,6 +32,7 @@ model File {
   embedModel     String?   @map("embed_model")
   indexedAt      DateTime? @map("indexed_at") @db.Timestamptz
   redacted       Boolean   @default(false)
+  contentHash    String?   @map("content_hash") // SHA-256 hex of file bytes, written by indexer/backfill
 
   folder Folder? @relation(fields: [folderId], references: [id])
 
