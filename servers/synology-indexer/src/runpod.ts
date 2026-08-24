@@ -117,7 +117,7 @@ export function getOllamaUrlFromPod(pod: PodInfo, ollamaPort: number): string | 
 
 export async function waitForPodRunning(
   config: RunPodConfig,
-  timeoutMs: number = 120000,
+  timeoutMs: number = 600000,
   pollIntervalMs: number = 5000,
 ): Promise<PodInfo> {
   const startTime = Date.now();
@@ -199,7 +199,8 @@ export async function pullModelIfMissing(
   console.log(`[runpod] Model ${modelName} pulled successfully`);
 }
 
-export interface GpuLifecycleCallbacks {
+export interface GpuLifecycleOptions {
+  leaveRunning?: boolean;
   onStart?: () => void;
   onStop?: () => void;
 }
@@ -210,10 +211,10 @@ export async function withGpuPod<T>(
   visionModel: string,
   embedModel: string,
   fn: (ollamaUrl: string) => Promise<T>,
-  callbacks?: GpuLifecycleCallbacks,
+  options?: GpuLifecycleOptions,
 ): Promise<T> {
-  let podStarted = false;
   let ollamaUrl = ollamaUrlOverride;
+  let podUsed = false;
 
   try {
     const { status } = await getPodStatus(config);
@@ -221,11 +222,12 @@ export async function withGpuPod<T>(
     if (status !== "RUNNING") {
       console.log(`[runpod] Pod status is ${status}, starting...`);
       await startPod(config);
-      podStarted = true;
-      callbacks?.onStart?.();
+      options?.onStart?.();
     } else {
       console.log(`[runpod] Pod already RUNNING`);
     }
+
+    podUsed = true;
 
     const pod = await waitForPodRunning(config);
 
@@ -244,13 +246,15 @@ export async function withGpuPod<T>(
 
     return await fn(ollamaUrl);
   } finally {
-    if (podStarted) {
+    if (podUsed && !options?.leaveRunning) {
       try {
         await stopPod(config);
-        callbacks?.onStop?.();
+        options?.onStop?.();
       } catch (err) {
         console.error(`[runpod] Error stopping pod:`, err);
       }
+    } else if (options?.leaveRunning) {
+      console.log(`[runpod] Leaving pod ${config.podId} running (RUNPOD_LEAVE_RUNNING=1)`);
     }
   }
 }

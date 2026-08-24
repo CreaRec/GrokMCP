@@ -13,6 +13,7 @@ export interface Config {
   runpodApiKey: string | null;
   runpodPodId: string | null;
   runpodOllamaPort: number;
+  runpodLeaveRunning: boolean;
 }
 
 export function getConfig(): Config {
@@ -44,6 +45,7 @@ export function getConfig(): Config {
     runpodApiKey: process.env.RUNPOD_API_KEY ?? null,
     runpodPodId: process.env.RUNPOD_POD_ID ?? null,
     runpodOllamaPort: parseInt(process.env.RUNPOD_OLLAMA_PORT ?? "11434", 10),
+    runpodLeaveRunning: process.env.RUNPOD_LEAVE_RUNNING === "1",
   };
 }
 

@@ -264,6 +264,7 @@ async function runIndex(config: Config): Promise<IndexStats> {
       config.visionModel,
       config.embedModel,
       processVisionPhase,
+      { leaveRunning: config.runpodLeaveRunning },
     );
   } else if (config.ollamaBaseUrl) {
     const ollamaAvailable = await checkOllamaAvailable(config.ollamaBaseUrl);

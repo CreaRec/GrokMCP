@@ -15,8 +15,9 @@ describe("RunPod GPU lifecycle", () => {
       const stopPodCalled = vi.fn();
 
       const dirtyCount = 0;
+      const hasRunPod = true;
 
-      if (dirtyCount > 0) {
+      if (dirtyCount > 0 && hasRunPod) {
         startPodCalled();
         try {
           // vision processing would happen here
@@ -29,92 +30,119 @@ describe("RunPod GPU lifecycle", () => {
       expect(stopPodCalled).not.toHaveBeenCalled();
     });
 
-    it("should call start when dirty files exist", async () => {
-      const startPodCalled = vi.fn();
-      const stopPodCalled = vi.fn();
+    it("should not call withGpuPod at all when dirty=0", async () => {
+      const withGpuPodCalled = vi.fn();
+      const dirtyCount = 0;
 
+      if (dirtyCount > 0) {
+        withGpuPodCalled();
+      }
+
+      expect(withGpuPodCalled).not.toHaveBeenCalled();
+    });
+
+    it("should call withGpuPod when dirty > 0", async () => {
+      const withGpuPodCalled = vi.fn();
       const dirtyCount = 5;
 
       if (dirtyCount > 0) {
-        startPodCalled();
-        try {
-          // vision processing would happen here
-        } finally {
-          stopPodCalled();
-        }
+        withGpuPodCalled();
       }
 
-      expect(startPodCalled).toHaveBeenCalledTimes(1);
-      expect(stopPodCalled).toHaveBeenCalledTimes(1);
+      expect(withGpuPodCalled).toHaveBeenCalledTimes(1);
     });
   });
 
-  describe("stop is always called after start succeeds", () => {
+  describe("stop is always called after withGpuPod", () => {
     it("should call stop even if processing throws", async () => {
-      const startPodCalled = vi.fn();
       const stopPodCalled = vi.fn();
       const processingError = new Error("Processing failed");
+      let podUsed = false;
 
       let caughtError: Error | null = null;
 
       try {
-        startPodCalled();
-        try {
-          throw processingError;
-        } finally {
-          stopPodCalled();
-        }
+        podUsed = true;
+        throw processingError;
       } catch (err) {
         caughtError = err as Error;
+      } finally {
+        if (podUsed) {
+          stopPodCalled();
+        }
       }
 
-      expect(startPodCalled).toHaveBeenCalledTimes(1);
       expect(stopPodCalled).toHaveBeenCalledTimes(1);
       expect(caughtError).toBe(processingError);
     });
 
-    it("should not call stop if start was never called", async () => {
+    it("should call stop even when pod was already RUNNING", async () => {
       const stopPodCalled = vi.fn();
-      let podStarted = false;
+      let podUsed = false;
+      const initialStatus = "RUNNING";
 
-      try {
-        // Simulate condition where start is not called
-        if (false) {
-          podStarted = true;
-        }
-        throw new Error("Some error before start");
-      } catch {
-        // error handling
-      } finally {
-        if (podStarted) {
-          stopPodCalled();
-        }
-      }
-
-      expect(stopPodCalled).not.toHaveBeenCalled();
-    });
-
-    it("should call stop only if start succeeded (podStarted flag pattern)", async () => {
-      const stopPodCalled = vi.fn();
-      let podStarted = false;
-
-      const simulateWithGpuPod = async (shouldStart: boolean, shouldFail: boolean) => {
+      const simulateWithGpuPod = async (leaveRunning: boolean) => {
         try {
-          if (shouldStart) {
-            podStarted = true;
+          if (initialStatus !== "RUNNING") {
+            // Would call startPod here
           }
-          if (shouldFail) {
-            throw new Error("Processing failed");
-          }
+          podUsed = true;
+          // Processing happens here
         } finally {
-          if (podStarted) {
+          if (podUsed && !leaveRunning) {
             stopPodCalled();
           }
         }
       };
 
-      await simulateWithGpuPod(true, true).catch(() => {});
+      await simulateWithGpuPod(false);
+
       expect(stopPodCalled).toHaveBeenCalledTimes(1);
+    });
+
+    it("should NOT call stop when RUNPOD_LEAVE_RUNNING=1", async () => {
+      const stopPodCalled = vi.fn();
+      let podUsed = false;
+
+      const simulateWithGpuPod = async (leaveRunning: boolean) => {
+        try {
+          podUsed = true;
+        } finally {
+          if (podUsed && !leaveRunning) {
+            stopPodCalled();
+          }
+        }
+      };
+
+      await simulateWithGpuPod(true);
+
+      expect(stopPodCalled).not.toHaveBeenCalled();
+    });
+
+    it("should call stop regardless of whether we started it or it was already running", async () => {
+      const scenarios = [
+        { initialStatus: "PAUSED", expectedStopCalls: 1 },
+        { initialStatus: "RUNNING", expectedStopCalls: 1 },
+        { initialStatus: "EXITED", expectedStopCalls: 1 },
+      ];
+
+      for (const scenario of scenarios) {
+        const stopPodCalled = vi.fn();
+        let podUsed = false;
+
+        try {
+          if (scenario.initialStatus !== "RUNNING") {
+            // Would start pod here
+          }
+          podUsed = true;
+        } finally {
+          if (podUsed) {
+            stopPodCalled();
+          }
+        }
+
+        expect(stopPodCalled).toHaveBeenCalledTimes(scenario.expectedStopCalls);
+      }
     });
   });
 
@@ -171,67 +199,117 @@ describe("RunPod GPU lifecycle", () => {
 });
 
 describe("withGpuPod behavior", () => {
-  it("should track podStarted flag correctly", async () => {
-    let podStarted = false;
+  it("should track podUsed flag correctly and always stop", async () => {
+    let podUsed = false;
     let stopCalled = false;
-
-    const mockStart = async () => {
-      podStarted = true;
-    };
 
     const mockStop = async () => {
       stopCalled = true;
     };
 
-    const withGpuPodSimulation = async <T>(fn: () => Promise<T>): Promise<T> => {
+    const withGpuPodSimulation = async <T>(
+      initialStatus: string,
+      leaveRunning: boolean,
+      fn: () => Promise<T>,
+    ): Promise<T> => {
       try {
-        await mockStart();
+        if (initialStatus !== "RUNNING") {
+          // Would call startPod here
+        }
+        podUsed = true;
         return await fn();
       } finally {
-        if (podStarted) {
+        if (podUsed && !leaveRunning) {
           await mockStop();
         }
       }
     };
 
-    await withGpuPodSimulation(async () => "result");
+    await withGpuPodSimulation("PAUSED", false, async () => "result");
     
-    expect(podStarted).toBe(true);
+    expect(podUsed).toBe(true);
+    expect(stopCalled).toBe(true);
+  });
+
+  it("should stop pod even when pod was already RUNNING", async () => {
+    let podUsed = false;
+    let stopCalled = false;
+
+    const withGpuPodSimulation = async <T>(
+      initialStatus: string,
+      leaveRunning: boolean,
+      fn: () => Promise<T>,
+    ): Promise<T> => {
+      try {
+        if (initialStatus !== "RUNNING") {
+          // Would call startPod here - but it's already running!
+        }
+        podUsed = true;
+        return await fn();
+      } finally {
+        if (podUsed && !leaveRunning) {
+          stopCalled = true;
+        }
+      }
+    };
+
+    await withGpuPodSimulation("RUNNING", false, async () => "result");
+
+    expect(podUsed).toBe(true);
     expect(stopCalled).toBe(true);
   });
 
   it("should stop pod even when function throws", async () => {
-    let podStarted = false;
+    let podUsed = false;
     let stopCalled = false;
 
-    const mockStart = async () => {
-      podStarted = true;
-    };
-
-    const mockStop = async () => {
-      stopCalled = true;
-    };
-
-    const withGpuPodSimulation = async <T>(fn: () => Promise<T>): Promise<T> => {
+    const withGpuPodSimulation = async <T>(
+      leaveRunning: boolean,
+      fn: () => Promise<T>,
+    ): Promise<T> => {
       try {
-        await mockStart();
+        podUsed = true;
         return await fn();
       } finally {
-        if (podStarted) {
-          await mockStop();
+        if (podUsed && !leaveRunning) {
+          stopCalled = true;
         }
       }
     };
 
     try {
-      await withGpuPodSimulation(async () => {
+      await withGpuPodSimulation(false, async () => {
         throw new Error("Vision processing failed");
       });
     } catch {
       // Expected
     }
 
-    expect(podStarted).toBe(true);
+    expect(podUsed).toBe(true);
     expect(stopCalled).toBe(true);
+  });
+
+  it("should respect leaveRunning option", async () => {
+    let podUsed = false;
+    let stopCalled = false;
+
+    const withGpuPodSimulation = async <T>(
+      leaveRunning: boolean,
+      fn: () => Promise<T>,
+    ): Promise<T> => {
+      try {
+        podUsed = true;
+        return await fn();
+      } finally {
+        if (podUsed && !leaveRunning) {
+          stopCalled = true;
+        }
+      }
+    };
+
+    await withGpuPodSimulation(true, async () => "result");
+
+    expect(podUsed).toBe(true);
+    expect(stopCalled).toBe(false);
   });
 });
