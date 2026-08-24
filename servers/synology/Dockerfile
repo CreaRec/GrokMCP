@@ -32,12 +32,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY .npmrc package.json package-lock.json ./
 COPY prisma/ ./prisma/
+COPY prisma.config.ts ./
 RUN --mount=type=secret,id=NODE_AUTH_TOKEN \
   NODE_AUTH_TOKEN="$(cat /run/secrets/NODE_AUTH_TOKEN)" npm ci --omit=dev && \
   npx prisma generate && \
   npm cache clean --force
 COPY --from=builder /app/dist ./dist
-RUN mkdir -p /app/.cache/transformers && chown -R node:node /app/.cache
+COPY docker-entrypoint.sh ./
+RUN chmod +x docker-entrypoint.sh && \
+  mkdir -p /app/.cache/transformers && chown -R node:node /app/.cache
 USER node
 EXPOSE 8794
-CMD ["node", "dist/http.js"]
+ENTRYPOINT ["./docker-entrypoint.sh"]
