@@ -97,6 +97,35 @@ services:
       - default
       - lgtm
 
+  synology-indexer:
+    image: ${SYNOLOGY_INDEXER_IMAGE:-ghcr.io/crearec/grok-mcp-synology-indexer}:${SYNOLOGY_INDEXER_IMAGE_TAG:-main}
+    container_name: grok-mcp-synology-indexer
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://${SYNOLOGY_DB_USER:-synology}:${SYNOLOGY_DB_PASSWORD}@synology-db:5432/${SYNOLOGY_DB_NAME:-synology}
+      - MOUNT_ROOT=/mnt/synology/Documents
+      - INDEX_DAILY_AT=${INDEX_DAILY_AT:-21:00}
+      - TZ=${TZ:-America/Chicago}
+      - RUNPOD_API_KEY=${RUNPOD_API_KEY:-}
+      - RUNPOD_POD_ID=${RUNPOD_POD_ID:-}
+      - RUNPOD_OLLAMA_PORT=${RUNPOD_OLLAMA_PORT:-11434}
+      - RUNPOD_LEAVE_RUNNING=${RUNPOD_LEAVE_RUNNING:-}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-}
+      - VISION_MODEL=${VISION_MODEL:-qwen2.5vl:7b}
+      - EMBED_MODEL=${EMBED_MODEL:-mxbai-embed-large}
+      - DSM_HOST=${DSM_HOST:-}
+      - DSM_SHARE_USER=${DSM_SHARE_USER:-}
+      - DSM_SHARE_PASSWORD=${DSM_SHARE_PASSWORD:-}
+    volumes:
+      - ${SYNOLOGY_MOUNT_PATH:-/mnt/synology/Documents}:/mnt/synology/Documents:ro
+    depends_on:
+      synology-db:
+        condition: service_healthy
+    networks:
+      - default
+
 volumes:
   synology-db-data:
   synology-mcp-cache:
