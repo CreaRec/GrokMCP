@@ -9,6 +9,7 @@ import { describeWithVision, checkOllamaAvailable } from "./vision.js";
 import { embedText } from "./embedder.js";
 import { generateFolderSummary, type ChildDescription } from "./folder-summarizer.js";
 import { withGpuPod, type RunPodConfig } from "./runpod.js";
+import { msUntilNextRun } from "./schedule.js";
 import {
   startTelemetry,
   shutdownTelemetry,
@@ -410,40 +411,6 @@ async function runIndex(config: Config): Promise<IndexStats> {
   logInfo("index run complete", { elapsed_seconds: elapsed, ...stats });
 
   return stats;
-}
-
-function msUntilNextRun(hour: number, minute: number, timezone: string): number {
-  const now = new Date();
-
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone: timezone,
-    hour: "numeric",
-    minute: "numeric",
-    hour12: false,
-  });
-
-  const parts = formatter.formatToParts(now);
-  const currentHour = parseInt(
-    parts.find((p) => p.type === "hour")?.value ?? "0",
-    10,
-  );
-  const currentMinute = parseInt(
-    parts.find((p) => p.type === "minute")?.value ?? "0",
-    10,
-  );
-
-  let targetDate = new Date(now);
-  targetDate.setHours(hour, minute, 0, 0);
-
-  const tzOffset =
-    (currentHour - now.getUTCHours()) * 60 + (currentMinute - now.getUTCMinutes());
-  targetDate = new Date(targetDate.getTime() - tzOffset * 60 * 1000);
-
-  if (targetDate <= now) {
-    targetDate = new Date(targetDate.getTime() + 24 * 60 * 60 * 1000);
-  }
-
-  return targetDate.getTime() - now.getTime();
 }
 
 async function main(): Promise<void> {
