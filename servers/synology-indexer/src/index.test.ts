@@ -6,10 +6,26 @@ import {
   shouldAbortSoftDelete,
   isEligibleForHardDelete,
   shouldUndelete,
+  isDos83ShortBasename,
 } from "./dirty.js";
 import { generateFolderSummary } from "./folder-summarizer.js";
 import { mountPathToSynoPath } from "./walker.js";
 import { parseIndexTime } from "./config.js";
+
+describe("isDos83ShortBasename", () => {
+  it("detects issue #27 CIFS short names", () => {
+    expect(isDos83ShortBasename("BKZZW3~2.PDF")).toBe(true);
+    expect(isDos83ShortBasename("BY3IVZ~I.PDF")).toBe(true);
+    expect(isDos83ShortBasename("GT50G8~Y.PDF")).toBe(true);
+    expect(isDos83ShortBasename("/Documents/Archive/GN invite 2024/BKZZW3~2.PDF")).toBe(true);
+  });
+
+  it("does not match normal long names like receipt.pdf", () => {
+    expect(isDos83ShortBasename("receipt.pdf")).toBe(false);
+    expect(isDos83ShortBasename("Booking.com: Potwierdzenie.pdf")).toBe(false);
+    expect(isDos83ShortBasename("Gmail - Fwd: Thank you for shopping at Walgreens..pdf")).toBe(false);
+  });
+});
 
 describe("shouldMarkDirty", () => {
   it("marks new files as dirty", () => {
@@ -73,7 +89,7 @@ describe("shouldMarkDirty", () => {
       hasEmbedding: false,
       description: null,
     };
-    const result = shouldMarkDirty(existing, "same-hash");
+    const result = shouldMarkDirty(existing, "same-hash", "receipt.pdf");
     expect(result.dirty).toBe(true);
     expect(result.reason).toBe("incomplete");
   });
@@ -98,6 +114,32 @@ describe("shouldMarkDirty", () => {
       description: "Partial vision result",
     };
     const result = shouldMarkDirty(existing, "same-hash");
+    expect(result.dirty).toBe(true);
+    expect(result.reason).toBe("incomplete");
+  });
+
+  it("does not mark 8.3 short names dirty when embedding is missing (skipped_83)", () => {
+    const existing = {
+      id: "short-id",
+      contentHash: "same-hash",
+      hasEmbedding: false,
+      description: null,
+    };
+    for (const name of ["BKZZW3~2.PDF", "BY3IVZ~I.PDF", "GT50G8~Y.PDF"] as const) {
+      const result = shouldMarkDirty(existing, "same-hash", name);
+      expect(result.dirty).toBe(false);
+      expect(result.reason).toBe("skipped_83");
+    }
+  });
+
+  it("still marks receipt.pdf dirty when hash matches but embedding is missing", () => {
+    const existing = {
+      id: "receipt-id",
+      contentHash: "receipt-hash",
+      hasEmbedding: false,
+      description: null,
+    };
+    const result = shouldMarkDirty(existing, "receipt-hash", "receipt.pdf");
     expect(result.dirty).toBe(true);
     expect(result.reason).toBe("incomplete");
   });

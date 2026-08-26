@@ -4,7 +4,13 @@ import { getConfig, parseIndexTime, type Config } from "./config.js";
 import { getPrisma, disconnectPrisma, formatVectorForPg } from "./db.js";
 import { walkDirectory } from "./walker.js";
 import { hashFile } from "./hasher.js";
-import { shouldMarkDirty, getParentFolderPaths, shouldAbortSoftDelete, type ExistingFileRow } from "./dirty.js";
+import {
+  shouldMarkDirty,
+  getParentFolderPaths,
+  shouldAbortSoftDelete,
+  isDos83ShortBasename,
+  type ExistingFileRow,
+} from "./dirty.js";
 import { describeWithVision, checkOllamaAvailable } from "./vision.js";
 import { embedText } from "./embedder.js";
 import { generateFolderSummary, type ChildDescription } from "./folder-summarizer.js";
@@ -114,6 +120,7 @@ async function runIndex(
     try {
       const hash = await hashFile(file.absolutePath);
       stats.hashed++;
+      const fileBasename = basename(file.synoPath);
 
       const existingRows = await db.$queryRaw<
         Array<{
@@ -142,12 +149,7 @@ async function runIndex(
 
       if (existing) {
         const wasDeleted = existing.deletedAt !== null;
-        const decision = wasDeleted
-          ? shouldMarkDirty(
-              { ...existing, contentHash: existing.contentHash, hasEmbedding: existing.hasEmbedding },
-              hash,
-            )
-          : shouldMarkDirty(existing, hash);
+        const decision = shouldMarkDirty(existing, hash, fileBasename);
 
         await db.file.update({
           where: { id: existing.id },
@@ -175,21 +177,24 @@ async function runIndex(
           ? await db.folder.findFirst({ where: { synoPath: parentPath } })
           : null;
 
+        const decision = shouldMarkDirty(null, hash, fileBasename);
         const newFile = await db.file.create({
           data: {
             synoPath: file.synoPath,
             kind: file.kind,
             bytes: file.bytes,
             mtime: file.mtime,
-            label: basename(file.synoPath),
+            label: fileBasename,
             contentHash: hash,
             lastSeenAt: now,
-            dirty: true,
+            dirty: decision.dirty,
             folderId: folder?.id,
           },
         });
-        dirtyFileIds.add(newFile.id);
-        stats.dirty++;
+        if (decision.dirty) {
+          dirtyFileIds.add(newFile.id);
+          stats.dirty++;
+        }
       }
     } catch (err) {
       logErrorWithCause("file processing failed", err, { syno_path: file.synoPath });
@@ -291,6 +296,17 @@ async function runIndex(
 
     for (const file of dirtyFiles) {
       try {
+        const fileBasename = basename(file.synoPath);
+        // Defense in depth for #27: never send CIFS 8.3 duplicates through vision/GPU.
+        if (isDos83ShortBasename(fileBasename)) {
+          logInfo("skipping 8.3 short name in vision", { syno_path: file.synoPath });
+          await db.file.update({
+            where: { id: file.id },
+            data: { dirty: false },
+          });
+          continue;
+        }
+
         const absolutePath = `${config.mountRoot}${file.synoPath.slice(file.synoPath.indexOf("/", 1))}`;
 
         const vision = await describeWithVision(
