@@ -1,315 +1,236 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import {
+  startPod,
+  withGpuPod,
+  isRetryablePodStartError,
+  getStartPodRetryDefaults,
+  DEFAULT_START_ATTEMPTS,
+  DEFAULT_START_RETRY_MS,
+  type RunPodConfig,
+} from "./runpod.js";
 
-describe("RunPod GPU lifecycle", () => {
-  beforeEach(() => {
-    vi.resetAllMocks();
+const API_KEY = "rp_secret_key_do_not_log";
+const POD_ID = "test-pod-123";
+
+function makeConfig(overrides: Partial<RunPodConfig> = {}): RunPodConfig {
+  return {
+    apiKey: API_KEY,
+    podId: POD_ID,
+    ollamaPort: 11434,
+    ...overrides,
+  };
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    statusText: status === 200 ? "OK" : status === 401 ? "Unauthorized" : "Error",
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+describe("isRetryablePodStartError", () => {
+  it("retries GPU capacity / no-free-GPU errors", () => {
+    expect(
+      isRetryablePodStartError(
+        new Error(
+          "RunPod GraphQL error: There are not enough free GPUs on the host machine to start this pod",
+        ),
+      ),
+    ).toBe(true);
+    expect(isRetryablePodStartError(new Error("no free GPUs available"))).toBe(true);
+    expect(isRetryablePodStartError(new Error("Insufficient GPU capacity"))).toBe(true);
   });
 
-  afterEach(() => {
-    vi.restoreAllMocks();
+  it("does not retry auth / 401", () => {
+    expect(isRetryablePodStartError(new Error("RunPod API error: 401 Unauthorized"))).toBe(false);
+    expect(isRetryablePodStartError(new Error("authentication failed"))).toBe(false);
   });
 
-  describe("dirty=0 never calls start", () => {
-    it("should not attempt to start pod when no dirty files exist", async () => {
-      const startPodCalled = vi.fn();
-      const stopPodCalled = vi.fn();
-
-      const dirtyCount = 0;
-      const hasRunPod = true;
-
-      if (dirtyCount > 0 && hasRunPod) {
-        startPodCalled();
-        try {
-          // vision processing would happen here
-        } finally {
-          stopPodCalled();
-        }
-      }
-
-      expect(startPodCalled).not.toHaveBeenCalled();
-      expect(stopPodCalled).not.toHaveBeenCalled();
-    });
-
-    it("should not call withGpuPod at all when dirty=0", async () => {
-      const withGpuPodCalled = vi.fn();
-      const dirtyCount = 0;
-
-      if (dirtyCount > 0) {
-        withGpuPodCalled();
-      }
-
-      expect(withGpuPodCalled).not.toHaveBeenCalled();
-    });
-
-    it("should call withGpuPod when dirty > 0", async () => {
-      const withGpuPodCalled = vi.fn();
-      const dirtyCount = 5;
-
-      if (dirtyCount > 0) {
-        withGpuPodCalled();
-      }
-
-      expect(withGpuPodCalled).toHaveBeenCalledTimes(1);
-    });
-  });
-
-  describe("stop is always called after withGpuPod", () => {
-    it("should call stop even if processing throws", async () => {
-      const stopPodCalled = vi.fn();
-      const processingError = new Error("Processing failed");
-      let podUsed = false;
-
-      let caughtError: Error | null = null;
-
-      try {
-        podUsed = true;
-        throw processingError;
-      } catch (err) {
-        caughtError = err as Error;
-      } finally {
-        if (podUsed) {
-          stopPodCalled();
-        }
-      }
-
-      expect(stopPodCalled).toHaveBeenCalledTimes(1);
-      expect(caughtError).toBe(processingError);
-    });
-
-    it("should call stop even when pod was already RUNNING", async () => {
-      const stopPodCalled = vi.fn();
-      let podUsed = false;
-      const initialStatus = "RUNNING";
-
-      const simulateWithGpuPod = async (leaveRunning: boolean) => {
-        try {
-          if (initialStatus !== "RUNNING") {
-            // Would call startPod here
-          }
-          podUsed = true;
-          // Processing happens here
-        } finally {
-          if (podUsed && !leaveRunning) {
-            stopPodCalled();
-          }
-        }
-      };
-
-      await simulateWithGpuPod(false);
-
-      expect(stopPodCalled).toHaveBeenCalledTimes(1);
-    });
-
-    it("should NOT call stop when RUNPOD_LEAVE_RUNNING=1", async () => {
-      const stopPodCalled = vi.fn();
-      let podUsed = false;
-
-      const simulateWithGpuPod = async (leaveRunning: boolean) => {
-        try {
-          podUsed = true;
-        } finally {
-          if (podUsed && !leaveRunning) {
-            stopPodCalled();
-          }
-        }
-      };
-
-      await simulateWithGpuPod(true);
-
-      expect(stopPodCalled).not.toHaveBeenCalled();
-    });
-
-    it("should call stop regardless of whether we started it or it was already running", async () => {
-      const scenarios = [
-        { initialStatus: "PAUSED", expectedStopCalls: 1 },
-        { initialStatus: "RUNNING", expectedStopCalls: 1 },
-        { initialStatus: "EXITED", expectedStopCalls: 1 },
-      ];
-
-      for (const scenario of scenarios) {
-        const stopPodCalled = vi.fn();
-        let podUsed = false;
-
-        try {
-          if (scenario.initialStatus !== "RUNNING") {
-            // Would start pod here
-          }
-          podUsed = true;
-        } finally {
-          if (podUsed) {
-            stopPodCalled();
-          }
-        }
-
-        expect(stopPodCalled).toHaveBeenCalledTimes(scenario.expectedStopCalls);
-      }
-    });
-  });
-
-  describe("API key is never logged", () => {
-    it("should not include API key in any log output", () => {
-      const apiKey = "rp_secret_key_12345";
-      const podId = "y5m6f3oroycbs1";
-
-      const logMessages: string[] = [];
-      const mockLog = (msg: string) => {
-        logMessages.push(msg);
-      };
-
-      mockLog(`[runpod] Starting pod ${podId}`);
-      mockLog(`[runpod] Pod ${podId} is RUNNING`);
-      mockLog(`[runpod] Stopped pod ${podId}`);
-
-      for (const msg of logMessages) {
-        expect(msg).not.toContain(apiKey);
-        expect(msg).not.toContain("secret");
-        expect(msg).not.toContain("rp_");
-      }
-    });
-
-    it("should not expose API key in error messages", () => {
-      const apiKey = "rp_secret_key_12345";
-
-      const createErrorMessage = (status: number) => {
-        return `RunPod API error: ${status} Unauthorized`;
-      };
-
-      const errorMsg = createErrorMessage(401);
-      expect(errorMsg).not.toContain(apiKey);
-    });
-
-    it("RunPodConfig type should have apiKey but logs should use podId only", () => {
-      interface RunPodConfig {
-        apiKey: string;
-        podId: string;
-        ollamaPort: number;
-      }
-
-      const config: RunPodConfig = {
-        apiKey: "secret_api_key",
-        podId: "test-pod-123",
-        ollamaPort: 11434,
-      };
-
-      const safeLogMessage = `[runpod] Using pod ${config.podId}`;
-      expect(safeLogMessage).toContain(config.podId);
-      expect(safeLogMessage).not.toContain(config.apiKey);
-    });
+  it("does not retry TERMINATED", () => {
+    expect(
+      isRetryablePodStartError(new Error(`Pod ${POD_ID} is TERMINATED and cannot be started`)),
+    ).toBe(false);
   });
 });
 
-describe("withGpuPod behavior", () => {
-  it("should track podUsed flag correctly and always stop", async () => {
-    let podUsed = false;
-    let stopCalled = false;
-
-    const mockStop = async () => {
-      stopCalled = true;
-    };
-
-    const withGpuPodSimulation = async <T>(
-      initialStatus: string,
-      leaveRunning: boolean,
-      fn: () => Promise<T>,
-    ): Promise<T> => {
-      try {
-        if (initialStatus !== "RUNNING") {
-          // Would call startPod here
-        }
-        podUsed = true;
-        return await fn();
-      } finally {
-        if (podUsed && !leaveRunning) {
-          await mockStop();
-        }
-      }
-    };
-
-    await withGpuPodSimulation("PAUSED", false, async () => "result");
-    
-    expect(podUsed).toBe(true);
-    expect(stopCalled).toBe(true);
+describe("getStartPodRetryDefaults", () => {
+  it("uses 6 attempts and 120s by default", () => {
+    expect(getStartPodRetryDefaults({})).toEqual({
+      maxAttempts: DEFAULT_START_ATTEMPTS,
+      retryDelayMs: DEFAULT_START_RETRY_MS,
+    });
+    expect(DEFAULT_START_ATTEMPTS).toBe(6);
+    expect(DEFAULT_START_RETRY_MS).toBe(120_000);
   });
 
-  it("should stop pod even when pod was already RUNNING", async () => {
-    let podUsed = false;
-    let stopCalled = false;
+  it("reads RUNPOD_START_RETRIES and RUNPOD_START_RETRY_MS", () => {
+    expect(
+      getStartPodRetryDefaults({
+        RUNPOD_START_RETRIES: "3",
+        RUNPOD_START_RETRY_MS: "5000",
+      }),
+    ).toEqual({ maxAttempts: 3, retryDelayMs: 5000 });
+  });
+});
 
-    const withGpuPodSimulation = async <T>(
-      initialStatus: string,
-      leaveRunning: boolean,
-      fn: () => Promise<T>,
-    ): Promise<T> => {
-      try {
-        if (initialStatus !== "RUNNING") {
-          // Would call startPod here - but it's already running!
-        }
-        podUsed = true;
-        return await fn();
-      } finally {
-        if (podUsed && !leaveRunning) {
-          stopCalled = true;
-        }
-      }
-    };
+describe("startPod retries", () => {
+  const sleep = vi.fn(async () => {});
 
-    await withGpuPodSimulation("RUNNING", false, async () => "result");
-
-    expect(podUsed).toBe(true);
-    expect(stopCalled).toBe(true);
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    sleep.mockClear();
+    vi.stubGlobal("fetch", vi.fn());
   });
 
-  it("should stop pod even when function throws", async () => {
-    let podUsed = false;
-    let stopCalled = false;
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
 
-    const withGpuPodSimulation = async <T>(
-      leaveRunning: boolean,
-      fn: () => Promise<T>,
-    ): Promise<T> => {
-      try {
-        podUsed = true;
-        return await fn();
-      } finally {
-        if (podUsed && !leaveRunning) {
-          stopCalled = true;
-        }
-      }
+  it("succeeds after capacity errors then a successful resume", async () => {
+    const fetchMock = vi.mocked(fetch);
+    const capacityBody = {
+      errors: [
+        {
+          message:
+            "There are not enough free GPUs on the host machine to start this pod",
+        },
+      ],
+    };
+    const successBody = {
+      data: { podResume: { id: POD_ID, desiredStatus: "RUNNING" } },
     };
 
-    try {
-      await withGpuPodSimulation(false, async () => {
-        throw new Error("Vision processing failed");
-      });
-    } catch {
-      // Expected
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(capacityBody))
+      .mockResolvedValueOnce(jsonResponse(capacityBody))
+      .mockResolvedValueOnce(jsonResponse(successBody));
+
+    await startPod(makeConfig(), {
+      maxAttempts: 6,
+      retryDelayMs: 10,
+      sleep,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledWith(10);
+
+    for (const call of fetchMock.mock.calls) {
+      const init = call[1] as RequestInit;
+      const headers = init.headers as Record<string, string>;
+      expect(headers.Authorization).toBe(`Bearer ${API_KEY}`);
+      // Request body must not be logged; assert auth header exists but tests never print it.
+      expect(JSON.stringify(init.body)).not.toContain("log");
     }
-
-    expect(podUsed).toBe(true);
-    expect(stopCalled).toBe(true);
   });
 
-  it("should respect leaveRunning option", async () => {
-    let podUsed = false;
-    let stopCalled = false;
+  it("does not retry on 401 Unauthorized", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(jsonResponse({ message: "nope" }, 401));
 
-    const withGpuPodSimulation = async <T>(
-      leaveRunning: boolean,
-      fn: () => Promise<T>,
-    ): Promise<T> => {
-      try {
-        podUsed = true;
-        return await fn();
-      } finally {
-        if (podUsed && !leaveRunning) {
-          stopCalled = true;
-        }
+    await expect(
+      startPod(makeConfig(), { maxAttempts: 6, retryDelayMs: 10, sleep }),
+    ).rejects.toThrow(/401/);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("does not retry TERMINATED GraphQL errors", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        errors: [{ message: "Pod is TERMINATED and cannot be resumed" }],
+      }),
+    );
+
+    await expect(
+      startPod(makeConfig(), { maxAttempts: 6, retryDelayMs: 10, sleep }),
+    ).rejects.toThrow(/TERMINATED/);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("throws after exhausting capacity retries", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async () =>
+      jsonResponse({
+        errors: [{ message: "There are not enough free GPUs on the host machine to start this pod" }],
+      }),
+    );
+
+    await expect(
+      startPod(makeConfig(), { maxAttempts: 3, retryDelayMs: 5, sleep }),
+    ).rejects.toThrow(/not enough free GPUs/i);
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("withGpuPod start failure leaves pod unused (no stop)", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.stubGlobal("fetch", vi.fn());
+    vi.stubEnv("RUNPOD_START_RETRIES", "2");
+    vi.stubEnv("RUNPOD_START_RETRY_MS", "0");
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it("does not call podStop when startPod fails on capacity after retries", async () => {
+    const fetchMock = vi.mocked(fetch);
+    const stopBodies: string[] = [];
+    let resumeCalls = 0;
+
+    fetchMock.mockImplementation(async (_url, init) => {
+      const body = typeof init?.body === "string" ? init.body : "";
+      if (body.includes("podStop")) {
+        stopBodies.push(body);
+        return jsonResponse({ data: { podStop: { id: POD_ID, desiredStatus: "EXITED" } } });
       }
-    };
+      if (body.includes("podResume")) {
+        resumeCalls++;
+        return jsonResponse({
+          errors: [
+            {
+              message:
+                "There are not enough free GPUs on the host machine to start this pod",
+            },
+          ],
+        });
+      }
+      // getPodStatus
+      return jsonResponse({
+        data: { pod: { id: POD_ID, desiredStatus: "EXITED", runtime: null } },
+      });
+    });
 
-    await withGpuPodSimulation(true, async () => "result");
+    const fn = vi.fn(async () => "should-not-run");
 
-    expect(podUsed).toBe(true);
-    expect(stopCalled).toBe(false);
+    await expect(
+      withGpuPod(makeConfig(), null, "vision", "embed", fn, {
+        leaveRunning: false,
+      }),
+    ).rejects.toThrow(/not enough free GPUs/i);
+
+    expect(fn).not.toHaveBeenCalled();
+    expect(resumeCalls).toBe(2);
+    expect(stopBodies).toHaveLength(0);
+  });
+});
+
+describe("API key is never logged by startPod helpers", () => {
+  it("error and retry messages do not embed the API key", () => {
+    const err = new Error("RunPod API error: 401 Unauthorized");
+    expect(err.message).not.toContain(API_KEY);
+    expect(isRetryablePodStartError(err)).toBe(false);
   });
 });

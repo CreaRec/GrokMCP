@@ -7,19 +7,41 @@ export interface ExistingFileRow {
 
 export interface DirtyDecision {
   dirty: boolean;
-  reason: "new" | "hash_missing" | "hash_changed" | "clean";
+  reason: "new" | "hash_missing" | "hash_changed" | "incomplete" | "skipped_83" | "clean";
+}
+
+/** Vision result is complete only when both embedding and description exist. */
+export function hasCompleteVisionResult(row: ExistingFileRow): boolean {
+  return Boolean(row.hasEmbedding && row.description);
+}
+
+/**
+ * Detect Windows 8.3 short basenames (CIFS duplicates of long names).
+ * Examples: BKZZW3~2.PDF, BY3IVZ~I.PDF, GT50G8~Y.PDF.
+ * Does not match normal long names like receipt.pdf (see #27).
+ */
+export function isDos83ShortBasename(name: string): boolean {
+  const base = name.includes("/") ? name.slice(name.lastIndexOf("/") + 1) : name;
+  // ≤8-char stem: up to 6 prefix chars + "~" + 1–2 generation chars; ≤3-char extension.
+  return /^[^./\\]{1,6}~[0-9A-Za-z]{1,2}\.[^./\\]{1,3}$/.test(base);
 }
 
 export function shouldMarkDirty(
   existingRow: ExistingFileRow | null,
   newHash: string,
+  fileBasename?: string,
 ): DirtyDecision {
+  // Temporary (#27): never queue 8.3 CIFS duplicates for vision/GPU.
+  if (fileBasename !== undefined && isDos83ShortBasename(fileBasename)) {
+    return { dirty: false, reason: "skipped_83" };
+  }
+
   if (!existingRow) {
     return { dirty: true, reason: "new" };
   }
 
   if (!existingRow.contentHash) {
-    if (existingRow.hasEmbedding && existingRow.description) {
+    if (hasCompleteVisionResult(existingRow)) {
       return { dirty: false, reason: "clean" };
     }
     return { dirty: true, reason: "hash_missing" };
@@ -27,6 +49,12 @@ export function shouldMarkDirty(
 
   if (existingRow.contentHash !== newHash) {
     return { dirty: true, reason: "hash_changed" };
+  }
+
+  // Same bytes as last hash, but vision never finished (e.g. RunPod start failed
+  // after dirty was set). Keep dirty so the next run retries embedding.
+  if (!hasCompleteVisionResult(existingRow)) {
+    return { dirty: true, reason: "incomplete" };
   }
 
   return { dirty: false, reason: "clean" };

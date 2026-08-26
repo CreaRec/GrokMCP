@@ -1,6 +1,10 @@
-import { logInfo, logErrorWithCause } from "./telemetry.js";
+import { logInfo, logErrorWithCause, logWarn } from "./telemetry.js";
 
 const RUNPOD_API_BASE = "https://api.runpod.io/graphql";
+
+/** Default: 6 attempts ~2 minutes apart ≈ 10–12 minutes total. */
+export const DEFAULT_START_ATTEMPTS = 6;
+export const DEFAULT_START_RETRY_MS = 120_000;
 
 export interface RunPodConfig {
   apiKey: string;
@@ -10,12 +14,68 @@ export interface RunPodConfig {
 
 export type PodStatus = "CREATED" | "RUNNING" | "EXITED" | "PAUSED" | "TERMINATED" | "UNKNOWN";
 
+export interface StartPodOptions {
+  /** Total resume attempts (default 6 from RUNPOD_START_RETRIES). */
+  maxAttempts?: number;
+  /** Delay between capacity retries in ms (default 120000 from RUNPOD_START_RETRY_MS). */
+  retryDelayMs?: number;
+  /** Injectable sleep for tests. */
+  sleep?: (ms: number) => Promise<void>;
+}
+
 interface PodInfo {
   id: string;
   desiredStatus: string;
   runtime: {
     ports?: Array<{ ip: string; publicPort: number; privatePort: number; type: string }>;
   } | null;
+}
+
+export function getStartPodRetryDefaults(
+  env: NodeJS.ProcessEnv = process.env,
+): { maxAttempts: number; retryDelayMs: number } {
+  const retriesRaw = env.RUNPOD_START_RETRIES;
+  const delayRaw = env.RUNPOD_START_RETRY_MS;
+
+  const parsedAttempts = retriesRaw !== undefined ? parseInt(retriesRaw, 10) : DEFAULT_START_ATTEMPTS;
+  const parsedDelay = delayRaw !== undefined ? parseInt(delayRaw, 10) : DEFAULT_START_RETRY_MS;
+
+  return {
+    maxAttempts: Number.isFinite(parsedAttempts) && parsedAttempts >= 1 ? parsedAttempts : DEFAULT_START_ATTEMPTS,
+    retryDelayMs: Number.isFinite(parsedDelay) && parsedDelay >= 0 ? parsedDelay : DEFAULT_START_RETRY_MS,
+  };
+}
+
+/**
+ * Retry only host GPU capacity / no-free-GPU class errors.
+ * Never retry auth (401) or TERMINATED pods.
+ */
+export function isRetryablePodStartError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  const lower = message.toLowerCase();
+
+  if (
+    lower.includes("401") ||
+    lower.includes("unauthorized") ||
+    lower.includes("forbidden") ||
+    lower.includes("authentication") ||
+    lower.includes("terminated")
+  ) {
+    return false;
+  }
+
+  return (
+    lower.includes("not enough free gpu") ||
+    lower.includes("not enough free gpus") ||
+    lower.includes("no free gpu") ||
+    lower.includes("no free gpus") ||
+    (lower.includes("insufficient") && lower.includes("gpu")) ||
+    (lower.includes("capacity") && lower.includes("gpu"))
+  );
+}
+
+async function defaultSleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function graphqlRequest(
@@ -76,7 +136,15 @@ export async function getPodStatus(config: RunPodConfig): Promise<{ status: PodS
   };
 }
 
-export async function startPod(config: RunPodConfig): Promise<void> {
+export async function startPod(
+  config: RunPodConfig,
+  options: StartPodOptions = {},
+): Promise<void> {
+  const defaults = getStartPodRetryDefaults();
+  const maxAttempts = options.maxAttempts ?? defaults.maxAttempts;
+  const retryDelayMs = options.retryDelayMs ?? defaults.retryDelayMs;
+  const sleep = options.sleep ?? defaultSleep;
+
   const query = `
     mutation resumePod($podId: String!) {
       podResume(input: { podId: $podId }) {
@@ -86,8 +154,47 @@ export async function startPod(config: RunPodConfig): Promise<void> {
     }
   `;
 
-  await graphqlRequest(config.apiKey, query, { podId: config.podId });
-  logInfo("runpod pod started", { pod_id: config.podId });
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await graphqlRequest(config.apiKey, query, { podId: config.podId });
+      logInfo("runpod pod started", {
+        pod_id: config.podId,
+        attempt,
+        max_attempts: maxAttempts,
+      });
+      return;
+    } catch (err) {
+      lastError = err;
+      const retryable = isRetryablePodStartError(err);
+      const message = err instanceof Error ? err.message : String(err);
+
+      if (!retryable || attempt >= maxAttempts) {
+        logWarn("runpod pod start failed", {
+          pod_id: config.podId,
+          attempt,
+          max_attempts: maxAttempts,
+          retryable,
+          error: message,
+        });
+        throw err;
+      }
+
+      logWarn("runpod pod start capacity error; retrying", {
+        pod_id: config.podId,
+        attempt,
+        max_attempts: maxAttempts,
+        retry_delay_ms: retryDelayMs,
+        error: message,
+      });
+      await sleep(retryDelayMs);
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(`Failed to start pod ${config.podId}`);
 }
 
 export async function stopPod(config: RunPodConfig): Promise<void> {
