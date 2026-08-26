@@ -9,7 +9,7 @@ import { describeWithVision, checkOllamaAvailable } from "./vision.js";
 import { embedText } from "./embedder.js";
 import { generateFolderSummary, type ChildDescription } from "./folder-summarizer.js";
 import { withGpuPod, type RunPodConfig } from "./runpod.js";
-import { msUntilNextRun } from "./schedule.js";
+import { createIndexDaemon, type IndexRunReason } from "./daemon.js";
 import {
   startTelemetry,
   shutdownTelemetry,
@@ -33,7 +33,10 @@ interface IndexStats {
   aborted: boolean;
 }
 
-async function runIndex(config: Config): Promise<IndexStats> {
+async function runIndex(
+  config: Config,
+  reason: IndexRunReason = "scheduled",
+): Promise<IndexStats> {
   const stats: IndexStats = {
     seen: 0,
     hashed: 0,
@@ -48,7 +51,7 @@ async function runIndex(config: Config): Promise<IndexStats> {
     aborted: false,
   };
 
-  logInfo("index run started", { mount_root: config.mountRoot });
+  logInfo("index run started", { mount_root: config.mountRoot, reason });
   const startTime = Date.now();
 
   const walkResult = await walkDirectory(config.mountRoot);
@@ -211,7 +214,7 @@ async function runIndex(config: Config): Promise<IndexStats> {
     });
     stats.aborted = true;
     const elapsed = Math.round((Date.now() - startTime) / 1000);
-    logWarn("index run aborted", { elapsed_seconds: elapsed, ...stats });
+    logWarn("index run aborted", { elapsed_seconds: elapsed, reason, ...stats });
     return stats;
   }
 
@@ -274,7 +277,7 @@ async function runIndex(config: Config): Promise<IndexStats> {
   if (stats.dirty === 0) {
     logInfo("no dirty files; skipping vision phase");
     const elapsed = Math.round((Date.now() - startTime) / 1000);
-    logInfo("index run complete", { elapsed_seconds: elapsed, ...stats });
+    logInfo("index run complete", { elapsed_seconds: elapsed, reason, ...stats });
     return stats;
   }
 
@@ -408,7 +411,7 @@ async function runIndex(config: Config): Promise<IndexStats> {
   }
 
   const elapsed = Math.round((Date.now() - startTime) / 1000);
-  logInfo("index run complete", { elapsed_seconds: elapsed, ...stats });
+  logInfo("index run complete", { elapsed_seconds: elapsed, reason, ...stats });
 
   return stats;
 }
@@ -427,7 +430,7 @@ async function main(): Promise<void> {
 
   if (config.runOnce) {
     logInfo("run_once mode; running immediately");
-    await runIndex(config);
+    await runIndex(config, "scheduled");
     await disconnectPrisma();
     await shutdownTelemetry();
     logInfo("run_once complete");
@@ -436,28 +439,22 @@ async function main(): Promise<void> {
 
   const { hour, minute } = parseIndexTime(config.indexDailyAt);
 
-  const runLoop = async (): Promise<void> => {
-    while (true) {
-      const msToWait = msUntilNextRun(hour, minute, config.timezone);
-      const hoursToWait = Math.round(msToWait / 1000 / 60 / 60 * 10) / 10;
-      logInfo("scheduled run waiting", {
-        hours_until_run: hoursToWait,
-        index_daily_at: config.indexDailyAt,
-        timezone: config.timezone,
-      });
-
-      await new Promise((resolve) => setTimeout(resolve, msToWait));
-
-      try {
-        await runIndex(config);
-      } catch (err) {
-        logErrorWithCause("index run failed", err);
-      }
-    }
-  };
+  const daemon = createIndexDaemon({
+    hour,
+    minute,
+    timezone: config.timezone,
+    indexDailyAt: config.indexDailyAt,
+    runIndex: async (reason) => {
+      await runIndex(config, reason);
+    },
+    logInfo,
+    logWarn,
+    logErrorWithCause,
+  });
 
   const shutdown = async (signal: string): Promise<void> => {
     logInfo("shutting down", { signal });
+    daemon.stop();
     await disconnectPrisma();
     await shutdownTelemetry();
     process.exit(0);
@@ -471,7 +468,13 @@ async function main(): Promise<void> {
     void shutdown("SIGTERM");
   });
 
-  await runLoop();
+  // On-demand full index without restarting the container or shifting INDEX_DAILY_AT.
+  // From the host: docker kill -s USR1 grok-mcp-synology-indexer
+  process.on("SIGUSR1", () => {
+    daemon.requestManualRun();
+  });
+
+  await daemon.run();
 }
 
 main().catch(async (err) => {
