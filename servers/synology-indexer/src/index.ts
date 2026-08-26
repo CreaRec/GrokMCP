@@ -469,8 +469,9 @@ async function main(): Promise<void> {
   });
 
   // On-demand full index without restarting the container or shifting INDEX_DAILY_AT.
-  // From the host: docker kill -s USR1 grok-mcp-synology-indexer
-  process.on("SIGUSR1", () => {
+  // SIGUSR2 (not SIGUSR1 — Node reserves USR1 for the inspector).
+  // From the host: docker kill -s USR2 grok-mcp-synology-indexer
+  process.on("SIGUSR2", () => {
     daemon.requestManualRun();
   });
 

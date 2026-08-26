@@ -27,7 +27,7 @@ export interface IndexDaemon {
   /** Run the wait → index loop until `stop()` is called. */
   run(): Promise<void>;
   /**
-   * Request an immediate index run (e.g. SIGUSR1).
+   * Request an immediate index run (e.g. SIGUSR2).
    * No-ops with a warning if a run is already in flight.
    */
   requestManualRun(): void;

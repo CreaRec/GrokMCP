@@ -218,7 +218,7 @@ docker compose restart apple-calendar
 The indexer daemon sleeps until `INDEX_DAILY_AT` (default 21:00 America/Chicago). To kick one full index now without restarting the container or shifting the daily slot:
 
 ```sh
-docker kill -s USR1 grok-mcp-synology-indexer
+docker kill -s USR2 grok-mcp-synology-indexer
 ```
 
 If a run is already in flight, the signal is ignored (logged) so GPU work never overlaps. After the manual run finishes, the daemon resumes waiting for the next `INDEX_DAILY_AT`.
