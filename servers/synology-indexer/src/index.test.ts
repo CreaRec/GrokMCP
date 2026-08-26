@@ -65,6 +65,42 @@ describe("shouldMarkDirty", () => {
     expect(result.dirty).toBe(false);
     expect(result.reason).toBe("clean");
   });
+
+  it("keeps dirty when hash matches but embedding is missing (incomplete)", () => {
+    const existing = {
+      id: "receipt-id",
+      contentHash: "same-hash",
+      hasEmbedding: false,
+      description: null,
+    };
+    const result = shouldMarkDirty(existing, "same-hash");
+    expect(result.dirty).toBe(true);
+    expect(result.reason).toBe("incomplete");
+  });
+
+  it("keeps dirty when hash matches but description is missing", () => {
+    const existing = {
+      id: "test-id",
+      contentHash: "same-hash",
+      hasEmbedding: true,
+      description: null,
+    };
+    const result = shouldMarkDirty(existing, "same-hash");
+    expect(result.dirty).toBe(true);
+    expect(result.reason).toBe("incomplete");
+  });
+
+  it("keeps dirty when hash matches but embedding is missing even if description exists", () => {
+    const existing = {
+      id: "test-id",
+      contentHash: "same-hash",
+      hasEmbedding: false,
+      description: "Partial vision result",
+    };
+    const result = shouldMarkDirty(existing, "same-hash");
+    expect(result.dirty).toBe(true);
+    expect(result.reason).toBe("incomplete");
+  });
 });
 
 describe("shouldRebuildFolder", () => {

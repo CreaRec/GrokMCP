@@ -7,7 +7,12 @@ export interface ExistingFileRow {
 
 export interface DirtyDecision {
   dirty: boolean;
-  reason: "new" | "hash_missing" | "hash_changed" | "clean";
+  reason: "new" | "hash_missing" | "hash_changed" | "incomplete" | "clean";
+}
+
+/** Vision result is complete only when both embedding and description exist. */
+export function hasCompleteVisionResult(row: ExistingFileRow): boolean {
+  return Boolean(row.hasEmbedding && row.description);
 }
 
 export function shouldMarkDirty(
@@ -19,7 +24,7 @@ export function shouldMarkDirty(
   }
 
   if (!existingRow.contentHash) {
-    if (existingRow.hasEmbedding && existingRow.description) {
+    if (hasCompleteVisionResult(existingRow)) {
       return { dirty: false, reason: "clean" };
     }
     return { dirty: true, reason: "hash_missing" };
@@ -27,6 +32,12 @@ export function shouldMarkDirty(
 
   if (existingRow.contentHash !== newHash) {
     return { dirty: true, reason: "hash_changed" };
+  }
+
+  // Same bytes as last hash, but vision never finished (e.g. RunPod start failed
+  // after dirty was set). Keep dirty so the next run retries embedding.
+  if (!hasCompleteVisionResult(existingRow)) {
+    return { dirty: true, reason: "incomplete" };
   }
 
   return { dirty: false, reason: "clean" };
