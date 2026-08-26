@@ -6,15 +6,22 @@ import { walkDirectory } from "./walker.js";
 import { hashFile } from "./hasher.js";
 import {
   shouldMarkDirty,
-  getParentFolderPaths,
+  getDirectParentFolderPath,
   shouldAbortSoftDelete,
   isDos83ShortBasename,
+  fileNeedsVision,
   type ExistingFileRow,
 } from "./dirty.js";
 import { describeWithVision, checkOllamaAvailable } from "./vision.js";
 import { embedText } from "./embedder.js";
-import { generateFolderSummary, type ChildDescription } from "./folder-summarizer.js";
+import { embedTextCpu } from "./cpu-embedder.js";
+import {
+  markFoldersDirtyByPaths,
+  countDirtyFolders,
+  rebuildDirtyFolders,
+} from "./folder-rebuild.js";
 import { withGpuPod, type RunPodConfig } from "./runpod.js";
+import { planIndexWork } from "./index-plan.js";
 import { createIndexDaemon, type IndexRunReason } from "./daemon.js";
 import {
   startTelemetry,
@@ -25,7 +32,7 @@ import {
   logErrorWithCause,
 } from "./telemetry.js";
 
-interface IndexStats {
+export interface IndexStats {
   seen: number;
   hashed: number;
   dirty: number;
@@ -39,7 +46,7 @@ interface IndexStats {
   aborted: boolean;
 }
 
-async function runIndex(
+export async function runIndex(
   config: Config,
   reason: IndexRunReason = "scheduled",
 ): Promise<IndexStats> {
@@ -73,8 +80,7 @@ async function runIndex(
   const db = getPrisma();
   const now = new Date();
 
-  const dirtyFileIds = new Set<string>();
-  const processedFolderPaths = new Set<string>();
+  const folderPathsToDirty = new Set<string>();
   const seenFilePaths = new Set<string>();
   const seenFolderPaths = new Set<string>();
 
@@ -97,6 +103,7 @@ async function runIndex(
         });
         if (wasDeleted) {
           stats.undeleted++;
+          folderPathsToDirty.add(folder.synoPath);
           logInfo("undeleted folder", { syno_path: folder.synoPath });
         }
       } else {
@@ -166,19 +173,24 @@ async function runIndex(
         if (wasDeleted) {
           stats.undeleted++;
           logInfo("undeleted file", { syno_path: file.synoPath });
+          const parentPath = getDirectParentFolderPath(file.synoPath);
+          if (parentPath) folderPathsToDirty.add(parentPath);
+        } else if (decision.dirty) {
+          const parentPath = getDirectParentFolderPath(file.synoPath);
+          if (parentPath) folderPathsToDirty.add(parentPath);
         }
+
         if (decision.dirty) {
-          dirtyFileIds.add(existing.id);
           stats.dirty++;
         }
       } else {
-        const parentPath = getParentFolderPaths(file.synoPath).pop();
+        const parentPath = getDirectParentFolderPath(file.synoPath);
         const folder = parentPath
           ? await db.folder.findFirst({ where: { synoPath: parentPath } })
           : null;
 
         const decision = shouldMarkDirty(null, hash, fileBasename);
-        const newFile = await db.file.create({
+        await db.file.create({
           data: {
             synoPath: file.synoPath,
             kind: file.kind,
@@ -191,8 +203,11 @@ async function runIndex(
             folderId: folder?.id,
           },
         });
+
+        if (parentPath) {
+          folderPathsToDirty.add(parentPath);
+        }
         if (decision.dirty) {
-          dirtyFileIds.add(newFile.id);
           stats.dirty++;
         }
       }
@@ -223,6 +238,18 @@ async function runIndex(
     return stats;
   }
 
+  const filesToSoftDelete = await db.file.findMany({
+    where: { deletedAt: null, lastSeenAt: { lt: now } },
+    select: { synoPath: true },
+  });
+
+  for (const file of filesToSoftDelete) {
+    const parentPath = getDirectParentFolderPath(file.synoPath);
+    if (parentPath) {
+      folderPathsToDirty.add(parentPath);
+    }
+  }
+
   const softDeleteResult = await db.$executeRaw`
     UPDATE files
     SET deleted_at = ${now}
@@ -234,16 +261,16 @@ async function runIndex(
     logInfo("soft-deleted files not seen this scan", { count: Number(softDeleteResult) });
   }
 
+  await markFoldersDirtyByPaths(db, folderPathsToDirty);
+
   const allFolders = await db.folder.findMany({
     where: { deletedAt: null },
     select: { id: true, synoPath: true },
   });
 
-  for (const folder of allFolders) {
-    if (seenFolderPaths.has(folder.synoPath)) {
-      continue;
-    }
+  const foldersToSoftDeleteLater: string[] = [];
 
+  for (const folder of allFolders) {
     const liveChildCount = await db.$queryRaw<Array<{ count: bigint }>>`
       SELECT COUNT(*) as count FROM files
       WHERE folder_id = ${folder.id}::uuid AND deleted_at IS NULL
@@ -252,10 +279,11 @@ async function runIndex(
     if (liveChildCount === 0) {
       await db.folder.update({
         where: { id: folder.id },
-        data: { deletedAt: now },
+        data: { dirty: true },
       });
-      stats.softDeleted++;
-      logInfo("soft-deleted folder with no live children", { syno_path: folder.synoPath });
+      if (!seenFolderPaths.has(folder.synoPath)) {
+        foldersToSoftDeleteLater.push(folder.synoPath);
+      }
     }
   }
 
@@ -279,34 +307,47 @@ async function runIndex(
     logInfo("hard-deleted folders older than retention", { count: Number(hardDeleteFoldersResult) });
   }
 
-  if (stats.dirty === 0) {
-    logInfo("no dirty files; skipping vision phase");
+  const dirtyFiles = await db.file.findMany({
+    where: { dirty: true, deletedAt: null },
+    select: { id: true, synoPath: true },
+  });
+
+  for (const file of dirtyFiles) {
+    const fileBasename = basename(file.synoPath);
+    if (isDos83ShortBasename(fileBasename)) {
+      logInfo("clearing 8.3 short name without vision", { syno_path: file.synoPath });
+      await db.file.update({
+        where: { id: file.id },
+        data: { dirty: false },
+      });
+    }
+  }
+
+  const remainingDirtyFiles = await db.file.findMany({
+    where: { dirty: true, deletedAt: null },
+    select: { id: true, synoPath: true },
+  });
+
+  const visionQueue = remainingDirtyFiles.filter((file) =>
+    fileNeedsVision(true, basename(file.synoPath)),
+  );
+
+  const dirtyFolderCount = await countDirtyFolders(db);
+
+  const workKind = planIndexWork(visionQueue.length, dirtyFolderCount);
+
+  if (workKind === "none") {
+    logInfo("nothing dirty; skipping embed/vision phase");
     const elapsed = Math.round((Date.now() - startTime) / 1000);
     logInfo("index run complete", { elapsed_seconds: elapsed, reason, ...stats });
     return stats;
   }
 
   const processVisionPhase = async (ollamaUrl: string): Promise<void> => {
-    logInfo("vision phase started", { dirty: stats.dirty });
+    logInfo("vision phase started", { dirty_files: visionQueue.length });
 
-    const dirtyFiles = await db.file.findMany({
-      where: { dirty: true, deletedAt: null },
-      select: { id: true, synoPath: true },
-    });
-
-    for (const file of dirtyFiles) {
+    for (const file of visionQueue) {
       try {
-        const fileBasename = basename(file.synoPath);
-        // Defense in depth for #27: never send CIFS 8.3 duplicates through vision/GPU.
-        if (isDos83ShortBasename(fileBasename)) {
-          logInfo("skipping 8.3 short name in vision", { syno_path: file.synoPath });
-          await db.file.update({
-            where: { id: file.id },
-            data: { dirty: false },
-          });
-          continue;
-        }
-
         const absolutePath = `${config.mountRoot}${file.synoPath.slice(file.synoPath.indexOf("/", 1))}`;
 
         const vision = await describeWithVision(
@@ -323,7 +364,7 @@ async function runIndex(
 
         await db.$executeRaw`
           UPDATE files
-          SET 
+          SET
             label = ${vision.label},
             description = ${vision.description},
             embedding = ${formatVectorForPg(embed.embedding)}::vector,
@@ -335,95 +376,103 @@ async function runIndex(
         `;
 
         stats.processed++;
-
-        const parentPaths = getParentFolderPaths(file.synoPath);
-        for (const p of parentPaths) {
-          processedFolderPaths.add(p);
-        }
       } catch (err) {
         logErrorWithCause("vision/embedding failed", err, { syno_path: file.synoPath });
         stats.errors++;
       }
     }
 
-    if (processedFolderPaths.size > 0) {
-      logInfo("rebuilding affected folders", { count: processedFolderPaths.size });
-
-      const sortedPaths = Array.from(processedFolderPaths).sort(
-        (a, b) => b.split("/").length - a.split("/").length,
-      );
-
-      for (const folderPath of sortedPaths) {
-        try {
-          const folder = await db.folder.findFirst({
-            where: { synoPath: folderPath, deletedAt: null },
-          });
-          if (!folder) continue;
-
-          const children = await db.file.findMany({
-            where: { folderId: folder.id, deletedAt: null },
-            select: { label: true, description: true, kind: true },
-          });
-
-          const summary = generateFolderSummary(
-            folderPath,
-            children as ChildDescription[],
-          );
-
-          const embed = await embedText(
-            summary.description,
-            ollamaUrl,
-            config.embedModel,
-          );
-
-          await db.$executeRaw`
-            UPDATE folders
-            SET 
-              label = ${summary.label},
-              description = ${summary.description},
-              embedding = ${formatVectorForPg(embed.embedding)}::vector,
-              embed_model = ${embed.model},
-              updated_at = ${now},
-              dirty = false
-            WHERE id = ${folder.id}::uuid
-          `;
-
-          stats.foldersRebuilt++;
-        } catch (err) {
-          logErrorWithCause("folder rebuild failed", err, { syno_path: folderPath });
-          stats.errors++;
-        }
+    const folderCount = await countDirtyFolders(db);
+    if (folderCount > 0) {
+      logInfo("rebuilding dirty folders on GPU Ollama session", { count: folderCount });
+      try {
+        stats.foldersRebuilt += await rebuildDirtyFolders(
+          db,
+          (text) => embedText(text, ollamaUrl, config.embedModel),
+          now,
+        );
+      } catch (err) {
+        logErrorWithCause("folder rebuild failed", err);
+        stats.errors++;
       }
+    }
+  };
+
+  const processCpuFolderRebuild = async (): Promise<void> => {
+    const folderCount = await countDirtyFolders(db);
+    if (folderCount === 0) return;
+
+    logInfo("rebuilding dirty folders on CPU embedder", { count: folderCount });
+    try {
+      stats.foldersRebuilt += await rebuildDirtyFolders(
+        db,
+        (text) => embedTextCpu(text),
+        now,
+      );
+    } catch (err) {
+      logErrorWithCause("CPU folder rebuild failed", err);
+      stats.errors++;
     }
   };
 
   const hasRunPod = config.runpodApiKey && config.runpodPodId;
 
-  if (hasRunPod) {
-    logInfo("using RunPod GPU pod", { pod_id: config.runpodPodId! });
-    const runpodConfig: RunPodConfig = {
-      apiKey: config.runpodApiKey!,
-      podId: config.runpodPodId!,
-      ollamaPort: config.runpodOllamaPort,
-    };
+  if (workKind === "gpu_vision") {
+    if (hasRunPod) {
+      logInfo("using RunPod GPU pod", { pod_id: config.runpodPodId! });
+      const runpodConfig: RunPodConfig = {
+        apiKey: config.runpodApiKey!,
+        podId: config.runpodPodId!,
+        ollamaPort: config.runpodOllamaPort,
+      };
 
-    await withGpuPod(
-      runpodConfig,
-      config.ollamaBaseUrl,
-      config.visionModel,
-      config.embedModel,
-      processVisionPhase,
-      { leaveRunning: config.runpodLeaveRunning },
-    );
-  } else if (config.ollamaBaseUrl) {
-    const ollamaAvailable = await checkOllamaAvailable(config.ollamaBaseUrl);
-    if (ollamaAvailable) {
-      await processVisionPhase(config.ollamaBaseUrl);
+      await withGpuPod(
+        runpodConfig,
+        config.ollamaBaseUrl,
+        config.visionModel,
+        config.embedModel,
+        processVisionPhase,
+        { leaveRunning: config.runpodLeaveRunning },
+      );
+    } else if (config.ollamaBaseUrl) {
+      const ollamaAvailable = await checkOllamaAvailable(config.ollamaBaseUrl);
+      if (ollamaAvailable) {
+        await processVisionPhase(config.ollamaBaseUrl);
+      } else {
+        logWarn("ollama unavailable; skipping vision phase");
+      }
     } else {
-      logWarn("ollama unavailable; skipping vision phase");
+      logWarn("no RunPod or Ollama configured; skipping vision phase for dirty files");
     }
-  } else {
-    logInfo("no RunPod or Ollama configured; skipping vision phase");
+  } else if (workKind === "cpu_folders") {
+    await processCpuFolderRebuild();
+  }
+
+  for (const folderPath of foldersToSoftDeleteLater) {
+    try {
+      const folder = await db.folder.findFirst({
+        where: { synoPath: folderPath, deletedAt: null },
+        select: { id: true },
+      });
+      if (!folder) continue;
+
+      const liveChildCount = await db.$queryRaw<Array<{ count: bigint }>>`
+        SELECT COUNT(*) as count FROM files
+        WHERE folder_id = ${folder.id}::uuid AND deleted_at IS NULL
+      `.then((rows) => Number(rows[0]?.count ?? 0));
+
+      if (liveChildCount === 0) {
+        await db.folder.update({
+          where: { id: folder.id },
+          data: { deletedAt: now },
+        });
+        stats.softDeleted++;
+        logInfo("soft-deleted folder with no live children", { syno_path: folderPath });
+      }
+    } catch (err) {
+      logErrorWithCause("folder soft-delete failed", err, { syno_path: folderPath });
+      stats.errors++;
+    }
   }
 
   const elapsed = Math.round((Date.now() - startTime) / 1000);

@@ -80,6 +80,17 @@ export function getParentFolderPaths(synoPath: string): string[] {
   return parents;
 }
 
+/** Direct parent folder for a file syno_path (the folder whose child list changes). */
+export function getDirectParentFolderPath(synoPath: string): string | null {
+  const parents = getParentFolderPaths(synoPath);
+  return parents.length > 0 ? parents[parents.length - 1]! : null;
+}
+
+/** True when a dirty file should go through vision/GPU (8.3 names are excluded). */
+export function fileNeedsVision(fileDirty: boolean, fileBasename: string): boolean {
+  return fileDirty && !isDos83ShortBasename(fileBasename);
+}
+
 export interface AbortCheckResult {
   shouldAbort: boolean;
   reason: "zero_seen" | "less_than_half" | "ok";

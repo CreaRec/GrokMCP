@@ -3,6 +3,8 @@ import {
   shouldMarkDirty,
   shouldRebuildFolder,
   getParentFolderPaths,
+  getDirectParentFolderPath,
+  fileNeedsVision,
   shouldAbortSoftDelete,
   isEligibleForHardDelete,
   shouldUndelete,
@@ -168,6 +170,22 @@ describe("shouldRebuildFolder", () => {
     const dirtyIds = new Set(["file-1"]);
     const childIds: string[] = [];
     expect(shouldRebuildFolder(dirtyIds, childIds)).toBe(false);
+  });
+});
+
+describe("getDirectParentFolderPath", () => {
+  it("returns the immediate parent folder", () => {
+    expect(getDirectParentFolderPath("/Documents/Finance/Taxes/2024.pdf")).toBe(
+      "/Documents/Finance/Taxes",
+    );
+  });
+});
+
+describe("fileNeedsVision", () => {
+  it("requires vision for dirty non-8.3 files only", () => {
+    expect(fileNeedsVision(true, "receipt.pdf")).toBe(true);
+    expect(fileNeedsVision(true, "BKZZW3~2.PDF")).toBe(false);
+    expect(fileNeedsVision(false, "receipt.pdf")).toBe(false);
   });
 });
 
