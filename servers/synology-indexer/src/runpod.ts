@@ -5,8 +5,24 @@ const RUNPOD_API_BASE = "https://api.runpod.io/graphql";
 /** Default: 6 attempts ~2 minutes apart ≈ 10–12 minutes total. */
 export const DEFAULT_START_ATTEMPTS = 6;
 export const DEFAULT_START_RETRY_MS = 120_000;
+export const DEFAULT_OLLAMA_HEALTHY_TIMEOUT_MS = 180_000;
 
-export interface RunPodConfig {
+/** Deploy-time configuration for ephemeral on-demand pods. */
+export interface RunPodDeployConfig {
+  apiKey: string;
+  ollamaPort: number;
+  templateId: string | null;
+  imageName: string;
+  cloudType: string;
+  gpuTypeId: string;
+  containerDiskInGb: number;
+  dataCenterId: string | null;
+  podName: string;
+  ollamaHealthyTimeoutMs: number;
+}
+
+/** Runtime reference to a specific pod instance. */
+export interface RunPodPodConfig {
   apiKey: string;
   podId: string;
   ollamaPort: number;
@@ -14,8 +30,8 @@ export interface RunPodConfig {
 
 export type PodStatus = "CREATED" | "RUNNING" | "EXITED" | "PAUSED" | "TERMINATED" | "UNKNOWN";
 
-export interface StartPodOptions {
-  /** Total resume attempts (default 6 from RUNPOD_START_RETRIES). */
+export interface CreatePodOptions {
+  /** Total create attempts (default 6 from RUNPOD_START_RETRIES). */
   maxAttempts?: number;
   /** Delay between capacity retries in ms (default 120000 from RUNPOD_START_RETRY_MS). */
   retryDelayMs?: number;
@@ -47,7 +63,7 @@ export function getStartPodRetryDefaults(
 }
 
 /**
- * Retry only host GPU capacity / no-free-GPU class errors.
+ * Retry only GPU capacity / fleet stock class errors on pod create.
  * Never retry auth (401) or TERMINATED pods.
  */
 export function isRetryablePodStartError(err: unknown): boolean {
@@ -69,6 +85,9 @@ export function isRetryablePodStartError(err: unknown): boolean {
     lower.includes("not enough free gpus") ||
     lower.includes("no free gpu") ||
     lower.includes("no free gpus") ||
+    lower.includes("no longer any instances available") ||
+    lower.includes("no instances available") ||
+    lower.includes("zero gpu") ||
     (lower.includes("insufficient") && lower.includes("gpu")) ||
     (lower.includes("capacity") && lower.includes("gpu"))
   );
@@ -104,7 +123,129 @@ async function graphqlRequest(
   return result.data;
 }
 
-export async function getPodStatus(config: RunPodConfig): Promise<{ status: PodStatus; pod: PodInfo | null }> {
+function buildDeployInput(config: RunPodDeployConfig): Record<string, unknown> {
+  const input: Record<string, unknown> = {
+    name: config.podName,
+    gpuCount: 1,
+    volumeInGb: 0,
+    ports: `${config.ollamaPort}/http`,
+  };
+
+  if (config.templateId) {
+    input.templateId = config.templateId;
+  } else {
+    input.cloudType = config.cloudType;
+    input.gpuTypeId = config.gpuTypeId;
+    input.imageName = config.imageName;
+    input.containerDiskInGb = config.containerDiskInGb;
+  }
+
+  if (config.dataCenterId) {
+    input.dataCenterId = config.dataCenterId;
+  }
+
+  return input;
+}
+
+export async function createPod(
+  config: RunPodDeployConfig,
+  options: CreatePodOptions = {},
+): Promise<RunPodPodConfig> {
+  const defaults = getStartPodRetryDefaults();
+  const maxAttempts = options.maxAttempts ?? defaults.maxAttempts;
+  const retryDelayMs = options.retryDelayMs ?? defaults.retryDelayMs;
+  const sleep = options.sleep ?? defaultSleep;
+
+  const query = `
+    mutation deployPod($input: PodFindAndDeployOnDemandInput!) {
+      podFindAndDeployOnDemand(input: $input) {
+        id
+        desiredStatus
+      }
+    }
+  `;
+
+  const variables = { input: buildDeployInput(config) };
+  let lastError: unknown;
+  let allocatedPodId: string | null = null;
+
+  try {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const data = (await graphqlRequest(config.apiKey, query, variables)) as {
+          podFindAndDeployOnDemand: { id: string; desiredStatus: string };
+        };
+
+        allocatedPodId = data.podFindAndDeployOnDemand.id;
+        logInfo("runpod pod created", {
+          pod_id: allocatedPodId,
+          attempt,
+          max_attempts: maxAttempts,
+        });
+
+        return {
+          apiKey: config.apiKey,
+          podId: allocatedPodId,
+          ollamaPort: config.ollamaPort,
+        };
+      } catch (err) {
+        lastError = err;
+        const retryable = isRetryablePodStartError(err);
+        const message = err instanceof Error ? err.message : String(err);
+
+        if (!retryable || attempt >= maxAttempts) {
+          logWarn("runpod pod create failed", {
+            attempt,
+            max_attempts: maxAttempts,
+            retryable,
+            error: message,
+          });
+          throw err;
+        }
+
+        logWarn("runpod pod create capacity error; retrying", {
+          attempt,
+          max_attempts: maxAttempts,
+          retry_delay_ms: retryDelayMs,
+          error: message,
+        });
+        await sleep(retryDelayMs);
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error("Failed to create RunPod pod");
+  } catch (err) {
+    if (allocatedPodId) {
+      try {
+        await terminatePod({
+          apiKey: config.apiKey,
+          podId: allocatedPodId,
+          ollamaPort: config.ollamaPort,
+        });
+      } catch (terminateErr) {
+        logErrorWithCause("runpod terminate after failed create", terminateErr, {
+          pod_id: allocatedPodId,
+        });
+      }
+    }
+    throw err;
+  }
+}
+
+export async function terminatePod(config: RunPodPodConfig): Promise<void> {
+  const query = `
+    mutation terminatePod($input: PodTerminateInput!) {
+      podTerminate(input: $input)
+    }
+  `;
+
+  await graphqlRequest(config.apiKey, query, { input: { podId: config.podId } });
+  logInfo("runpod pod terminated", { pod_id: config.podId });
+}
+
+export async function getPodStatus(
+  config: RunPodPodConfig,
+): Promise<{ status: PodStatus; pod: PodInfo | null }> {
   const query = `
     query getPod($podId: String!) {
       pod(input: { podId: $podId }) {
@@ -136,81 +277,6 @@ export async function getPodStatus(config: RunPodConfig): Promise<{ status: PodS
   };
 }
 
-export async function startPod(
-  config: RunPodConfig,
-  options: StartPodOptions = {},
-): Promise<void> {
-  const defaults = getStartPodRetryDefaults();
-  const maxAttempts = options.maxAttempts ?? defaults.maxAttempts;
-  const retryDelayMs = options.retryDelayMs ?? defaults.retryDelayMs;
-  const sleep = options.sleep ?? defaultSleep;
-
-  const query = `
-    mutation resumePod($podId: String!) {
-      podResume(input: { podId: $podId }) {
-        id
-        desiredStatus
-      }
-    }
-  `;
-
-  let lastError: unknown;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      await graphqlRequest(config.apiKey, query, { podId: config.podId });
-      logInfo("runpod pod started", {
-        pod_id: config.podId,
-        attempt,
-        max_attempts: maxAttempts,
-      });
-      return;
-    } catch (err) {
-      lastError = err;
-      const retryable = isRetryablePodStartError(err);
-      const message = err instanceof Error ? err.message : String(err);
-
-      if (!retryable || attempt >= maxAttempts) {
-        logWarn("runpod pod start failed", {
-          pod_id: config.podId,
-          attempt,
-          max_attempts: maxAttempts,
-          retryable,
-          error: message,
-        });
-        throw err;
-      }
-
-      logWarn("runpod pod start capacity error; retrying", {
-        pod_id: config.podId,
-        attempt,
-        max_attempts: maxAttempts,
-        retry_delay_ms: retryDelayMs,
-        error: message,
-      });
-      await sleep(retryDelayMs);
-    }
-  }
-
-  throw lastError instanceof Error
-    ? lastError
-    : new Error(`Failed to start pod ${config.podId}`);
-}
-
-export async function stopPod(config: RunPodConfig): Promise<void> {
-  const query = `
-    mutation stopPod($podId: String!) {
-      podStop(input: { podId: $podId }) {
-        id
-        desiredStatus
-      }
-    }
-  `;
-
-  await graphqlRequest(config.apiKey, query, { podId: config.podId });
-  logInfo("runpod pod stopped", { pod_id: config.podId });
-}
-
 export function getOllamaUrlFromPod(pod: PodInfo, ollamaPort: number): string | null {
   if (!pod.runtime?.ports) {
     return null;
@@ -225,7 +291,7 @@ export function getOllamaUrlFromPod(pod: PodInfo, ollamaPort: number): string | 
 }
 
 export async function waitForPodRunning(
-  config: RunPodConfig,
+  config: RunPodPodConfig,
   timeoutMs: number = 600000,
   pollIntervalMs: number = 5000,
 ): Promise<PodInfo> {
@@ -252,7 +318,7 @@ export async function waitForPodRunning(
 
 export async function waitForOllamaHealthy(
   ollamaUrl: string,
-  timeoutMs: number = 60000,
+  timeoutMs: number = DEFAULT_OLLAMA_HEALTHY_TIMEOUT_MS,
   pollIntervalMs: number = 3000,
 ): Promise<void> {
   const startTime = Date.now();
@@ -286,7 +352,7 @@ export async function pullModelIfMissing(
 
   const tags = (await tagsResponse.json()) as { models?: Array<{ name: string }> };
   const modelExists = tags.models?.some(
-    (m) => m.name === modelName || m.name.startsWith(`${modelName}:`)
+    (m) => m.name === modelName || m.name.startsWith(`${modelName}:`),
   );
 
   if (modelExists) {
@@ -315,7 +381,7 @@ export interface GpuLifecycleOptions {
 }
 
 export async function withGpuPod<T>(
-  config: RunPodConfig,
+  deployConfig: RunPodDeployConfig,
   ollamaUrlOverride: string | null,
   visionModel: string,
   embedModel: string,
@@ -323,47 +389,39 @@ export async function withGpuPod<T>(
   options?: GpuLifecycleOptions,
 ): Promise<T> {
   let ollamaUrl = ollamaUrlOverride;
-  let podUsed = false;
+  let podRef: RunPodPodConfig | null = null;
 
   try {
-    const { status } = await getPodStatus(config);
-    
-    if (status !== "RUNNING") {
-      logInfo("runpod starting pod", { pod_id: config.podId, status });
-      await startPod(config);
-      options?.onStart?.();
-    } else {
-      logInfo("runpod pod already running", { pod_id: config.podId });
-    }
+    logInfo("runpod creating ephemeral pod");
+    podRef = await createPod(deployConfig);
+    options?.onStart?.();
 
-    podUsed = true;
-
-    const pod = await waitForPodRunning(config);
+    const pod = await waitForPodRunning(podRef);
 
     if (!ollamaUrl) {
-      ollamaUrl = getOllamaUrlFromPod(pod, config.ollamaPort);
+      ollamaUrl = getOllamaUrlFromPod(pod, deployConfig.ollamaPort);
       if (!ollamaUrl) {
-        throw new Error(`Could not determine Ollama URL from pod ports`);
+        throw new Error("Could not determine Ollama URL from pod ports");
       }
       logInfo("runpod derived ollama url");
     }
 
-    await waitForOllamaHealthy(ollamaUrl);
+    await waitForOllamaHealthy(ollamaUrl, deployConfig.ollamaHealthyTimeoutMs);
 
     await pullModelIfMissing(ollamaUrl, visionModel);
     await pullModelIfMissing(ollamaUrl, embedModel);
 
     return await fn(ollamaUrl);
   } finally {
-    if (podUsed && !options?.leaveRunning) {
+    if (podRef && !options?.leaveRunning) {
       try {
-        await stopPod(config);
+        await terminatePod(podRef);
         options?.onStop?.();
       } catch (err) {
-        logErrorWithCause("runpod stop failed", err, { pod_id: config.podId });
+        logErrorWithCause("runpod terminate failed", err, { pod_id: podRef.podId });
       }
-    } else if (options?.leaveRunning) {
-      logInfo("runpod leaving pod running", { pod_id: config.podId });
+    } else if (options?.leaveRunning && podRef) {
+      logInfo("runpod leaving pod running", { pod_id: podRef.podId });
     }
   }
 }
