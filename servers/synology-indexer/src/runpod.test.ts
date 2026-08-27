@@ -3,6 +3,7 @@ import {
   createPod,
   terminatePod,
   withGpuPod,
+  buildDeployInput,
   isRetryablePodStartError,
   getStartPodRetryDefaults,
   DEFAULT_START_ATTEMPTS,
@@ -95,6 +96,28 @@ describe("getStartPodRetryDefaults", () => {
   });
 });
 
+describe("buildDeployInput", () => {
+  it("includes OLLAMA_HOST for image-based deploy", () => {
+    const input = buildDeployInput(makeDeployConfig());
+    expect(input.env).toEqual([{ key: "OLLAMA_HOST", value: "0.0.0.0:11434" }]);
+    expect(input.imageName).toBe("ollama/ollama");
+    expect(input.templateId).toBeUndefined();
+  });
+
+  it("includes OLLAMA_HOST for template-based deploy", () => {
+    const input = buildDeployInput(makeDeployConfig({ templateId: "tmpl-abc" }));
+    expect(input.env).toEqual([{ key: "OLLAMA_HOST", value: "0.0.0.0:11434" }]);
+    expect(input.templateId).toBe("tmpl-abc");
+    expect(input.imageName).toBeUndefined();
+  });
+
+  it("uses configured ollama port in OLLAMA_HOST", () => {
+    const input = buildDeployInput(makeDeployConfig({ ollamaPort: 8080 }));
+    expect(input.env).toEqual([{ key: "OLLAMA_HOST", value: "0.0.0.0:8080" }]);
+    expect(input.ports).toBe("8080/http");
+  });
+});
+
 describe("createPod retries", () => {
   const sleep = vi.fn(async () => {});
 
@@ -144,8 +167,13 @@ describe("createPod retries", () => {
     for (const call of fetchMock.mock.calls) {
       const init = call[1] as RequestInit;
       const headers = init.headers as Record<string, string>;
+      const body = JSON.stringify(init.body);
       expect(headers.Authorization).toBe(`Bearer ${API_KEY}`);
-      expect(JSON.stringify(init.body)).not.toContain(API_KEY);
+      expect(body).not.toContain(API_KEY);
+      if (body.includes("podFindAndDeployOnDemand")) {
+        expect(body).toContain("OLLAMA_HOST");
+        expect(body).toContain("0.0.0.0:11434");
+      }
     }
   });
 

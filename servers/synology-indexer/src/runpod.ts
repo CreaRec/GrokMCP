@@ -123,12 +123,18 @@ async function graphqlRequest(
   return result.data;
 }
 
-function buildDeployInput(config: RunPodDeployConfig): Record<string, unknown> {
+/** RunPod env entries so Ollama listens on all interfaces (not 127.0.0.1). */
+export function ollamaContainerEnv(ollamaPort: number): Array<{ key: string; value: string }> {
+  return [{ key: "OLLAMA_HOST", value: `0.0.0.0:${ollamaPort}` }];
+}
+
+export function buildDeployInput(config: RunPodDeployConfig): Record<string, unknown> {
   const input: Record<string, unknown> = {
     name: config.podName,
     gpuCount: 1,
     volumeInGb: 0,
     ports: `${config.ollamaPort}/http`,
+    env: ollamaContainerEnv(config.ollamaPort),
   };
 
   if (config.templateId) {
