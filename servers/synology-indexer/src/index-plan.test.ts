@@ -15,6 +15,14 @@ describe("planIndexWork", () => {
   it("returns cpu_folders when only folders are dirty", () => {
     expect(planIndexWork(0, 2)).toBe("cpu_folders");
   });
+
+  it("returns cpu_folders when only text PDFs need embed (no VLM)", () => {
+    expect(planIndexWork(0, 0, 4)).toBe("cpu_folders");
+  });
+
+  it("returns none when text count is zero along with vision and folders", () => {
+    expect(planIndexWork(0, 0, 0)).toBe("none");
+  });
 });
 
 describe("folder dirty on child change", () => {

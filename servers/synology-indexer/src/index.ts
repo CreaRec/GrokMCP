@@ -18,7 +18,21 @@ import {
   fileNeedsVision,
   type ExistingFileRow,
 } from "./dirty.js";
-import { describeWithVision, checkOllamaAvailable } from "./vision.js";
+import { classifyMedia } from "./media.js";
+import {
+  describeWithVision,
+  checkOllamaAvailable,
+  prepareVisionImageBase64,
+} from "./vision.js";
+import {
+  extractPdfText,
+  hasUsablePdfText,
+  labelFromPdfText,
+  descriptionFromPdfText,
+  rasterizePdfPages,
+  PDF_VISION_MAX_PAGES,
+} from "./pdf.js";
+import { encodeRasterForVision } from "./image-encode.js";
 import { embedText } from "./embedder.js";
 import { embedTextCpu } from "./cpu-embedder.js";
 import {
@@ -37,6 +51,38 @@ import {
   logError,
   logErrorWithCause,
 } from "./telemetry.js";
+
+const PII_PATTERNS_FOR_TEXT = [
+  /\b\d{3}-\d{2}-\d{4}\b/g,
+  /\b\d{9}\b/g,
+  /passport\s*(?:no|number|#)?\s*[:.]?\s*\w{6,12}/gi,
+  /\bSSN\s*[:.]?\s*\d{3}[-\s]?\d{2}[-\s]?\d{4}/gi,
+  /(?:bank|account)\s*(?:no|number|#)?\s*[:.]?\s*\d{8,17}/gi,
+  /(?:driver'?s?\s*licen[sc]e|DL)\s*(?:no|number|#)?\s*[:.]?\s*\w{5,15}/gi,
+  /\b(?:routing|aba)\s*(?:no|number|#)?\s*[:.]?\s*\d{9}\b/gi,
+];
+
+function redactTextFields(label: string, description: string): {
+  label: string;
+  description: string;
+  redacted: boolean;
+} {
+  let wasRedacted = false;
+  let lab = label;
+  let desc = description;
+  for (const pattern of PII_PATTERNS_FOR_TEXT) {
+    const nextLab = lab.replace(pattern, "[REDACTED]");
+    const nextDesc = desc.replace(pattern, "[REDACTED]");
+    if (nextLab !== lab || nextDesc !== desc) wasRedacted = true;
+    lab = nextLab;
+    desc = nextDesc;
+  }
+  return { label: lab, description: desc, redacted: wasRedacted };
+}
+
+function absoluteFromSynoPath(mountRoot: string, synoPath: string): string {
+  return `${mountRoot}${synoPath.slice(synoPath.indexOf("/", 1))}`;
+}
 
 export interface IndexStats {
   seen: number;
@@ -326,6 +372,18 @@ export async function runIndex(
         where: { id: file.id },
         data: { dirty: false },
       });
+      continue;
+    }
+    if (classifyMedia(fileBasename) === "skip") {
+      // Must clear dirty so nightly GPU does not recreate a 4090 for audio/office/etc.
+      logInfo("clearing non-image without vision", {
+        syno_path: file.synoPath,
+        reason: "unsupported_media",
+      });
+      await db.file.update({
+        where: { id: file.id },
+        data: { dirty: false },
+      });
     }
   }
 
@@ -334,13 +392,79 @@ export async function runIndex(
     select: { id: true, synoPath: true },
   });
 
-  const visionQueue = remainingDirtyFiles.filter((file) =>
-    fileNeedsVision(true, basename(file.synoPath)),
-  );
+  type VisionQueueItem = {
+    id: string;
+    synoPath: string;
+    /** raster image, or PDF already known to lack usable digital text (scan fallback). */
+    visionKind: "raster" | "pdf_scan";
+  };
+  type TextQueueItem = {
+    id: string;
+    synoPath: string;
+    label: string;
+    description: string;
+    redacted: boolean;
+  };
+
+  const visionQueue: VisionQueueItem[] = [];
+  const textQueue: TextQueueItem[] = [];
+
+  for (const file of remainingDirtyFiles) {
+    const fileBasename = basename(file.synoPath);
+    if (!fileNeedsVision(true, fileBasename)) {
+      continue;
+    }
+
+    const media = classifyMedia(fileBasename);
+    const absolutePath = absoluteFromSynoPath(config.mountRoot, file.synoPath);
+
+    if (media === "pdf") {
+      try {
+        const rawText = await extractPdfText(absolutePath);
+        if (hasUsablePdfText(rawText)) {
+          const redacted = redactTextFields(
+            labelFromPdfText(rawText, fileBasename),
+            descriptionFromPdfText(rawText),
+          );
+          textQueue.push({
+            id: file.id,
+            synoPath: file.synoPath,
+            label: redacted.label,
+            description: redacted.description,
+            redacted: redacted.redacted,
+          });
+          continue;
+        }
+        visionQueue.push({
+          id: file.id,
+          synoPath: file.synoPath,
+          visionKind: "pdf_scan",
+        });
+      } catch (err) {
+        logErrorWithCause("pdf text extract failed; queueing scan vision fallback", err, {
+          syno_path: file.synoPath,
+        });
+        visionQueue.push({
+          id: file.id,
+          synoPath: file.synoPath,
+          visionKind: "pdf_scan",
+        });
+      }
+      continue;
+    }
+
+    if (media === "raster") {
+      visionQueue.push({
+        id: file.id,
+        synoPath: file.synoPath,
+        visionKind: "raster",
+      });
+    }
+  }
 
   const dirtyFolderCount = await countDirtyFolders(db);
 
-  const workKind = planIndexWork(visionQueue.length, dirtyFolderCount);
+  const workKind = planIndexWork(visionQueue.length, dirtyFolderCount, textQueue.length);
 
   if (workKind === "none") {
     logInfo("nothing dirty; skipping embed/vision phase");
@@ -349,17 +473,81 @@ export async function runIndex(
     return stats;
   }
 
+  const persistFileEmbedding = async (
+    file: { id: string; label: string; description: string; redacted: boolean },
+    embed: { embedding: number[]; model: string },
+  ): Promise<void> => {
+    await db.$executeRaw`
+      UPDATE files
+      SET
+        label = ${file.label},
+        description = ${file.description},
+        embedding = ${formatVectorForPg(embed.embedding)}::vector,
+        embed_model = ${embed.model},
+        indexed_at = ${now},
+        redacted = ${file.redacted},
+        dirty = false
+      WHERE id = ${file.id}::uuid
+    `;
+  };
+
+  const processTextQueue = async (
+    embedFn: (text: string) => Promise<{ embedding: number[]; model: string }>,
+  ): Promise<void> => {
+    if (textQueue.length === 0) return;
+    logInfo("text-pdf embed phase started", { text_files: textQueue.length });
+    for (const file of textQueue) {
+      try {
+        const embed = await embedFn(file.description);
+        await persistFileEmbedding(file, embed);
+        stats.processed++;
+      } catch (err) {
+        logErrorWithCause("text-pdf embedding failed", err, { syno_path: file.synoPath });
+        stats.errors++;
+      }
+    }
+  };
+
   const processVisionPhase = async (ollamaUrl: string): Promise<void> => {
-    logInfo("vision phase started", { dirty_files: visionQueue.length });
+    logInfo("vision phase started", {
+      dirty_files: visionQueue.length,
+      text_files: textQueue.length,
+    });
+
+    // Text PDFs: embed on the same Ollama session (no VLM / no PDF bytes in images[]).
+    await processTextQueue((text) => embedText(text, ollamaUrl, config.embedModel));
 
     for (const file of visionQueue) {
       try {
-        const absolutePath = `${config.mountRoot}${file.synoPath.slice(file.synoPath.indexOf("/", 1))}`;
+        const absolutePath = absoluteFromSynoPath(config.mountRoot, file.synoPath);
+        let imagesBase64: string[];
+
+        if (file.visionKind === "pdf_scan") {
+          // Scan fallback only: rasterize pages — never base64 the raw PDF.
+          const pages = await rasterizePdfPages(absolutePath, PDF_VISION_MAX_PAGES);
+          if (pages.length === 0) {
+            logInfo("clearing empty pdf after scan rasterize failed", {
+              syno_path: file.synoPath,
+            });
+            await db.file.update({
+              where: { id: file.id },
+              data: { dirty: false },
+            });
+            continue;
+          }
+          imagesBase64 = [];
+          for (const page of pages) {
+            imagesBase64.push(await encodeRasterForVision(page));
+          }
+        } else {
+          imagesBase64 = await prepareVisionImageBase64(absolutePath);
+        }
 
         const vision = await describeWithVision(
-          absolutePath,
+          imagesBase64,
           ollamaUrl,
           config.visionModel,
+          basename(file.synoPath),
         );
 
         const embed = await embedText(
@@ -368,18 +556,15 @@ export async function runIndex(
           config.embedModel,
         );
 
-        await db.$executeRaw`
-          UPDATE files
-          SET
-            label = ${vision.label},
-            description = ${vision.description},
-            embedding = ${formatVectorForPg(embed.embedding)}::vector,
-            embed_model = ${embed.model},
-            indexed_at = ${now},
-            redacted = ${vision.redacted},
-            dirty = false
-          WHERE id = ${file.id}::uuid
-        `;
+        await persistFileEmbedding(
+          {
+            id: file.id,
+            label: vision.label,
+            description: vision.description,
+            redacted: vision.redacted,
+          },
+          embed,
+        );
 
         stats.processed++;
       } catch (err) {
@@ -404,7 +589,9 @@ export async function runIndex(
     }
   };
 
-  const processCpuFolderRebuild = async (): Promise<void> => {
+  const processCpuPhase = async (): Promise<void> => {
+    await processTextQueue((text) => embedTextCpu(text));
+
     const folderCount = await countDirtyFolders(db);
     if (folderCount === 0) return;
 
@@ -462,13 +649,17 @@ export async function runIndex(
       if (ollamaAvailable) {
         await processVisionPhase(config.ollamaBaseUrl);
       } else {
-        logWarn("ollama unavailable; skipping vision phase");
+        logWarn("ollama unavailable; skipping vision phase; embedding text PDFs on CPU");
+        await processCpuPhase();
       }
     } else {
-      logWarn("no RunPod or Ollama configured; skipping vision phase for dirty files");
+      logWarn(
+        "no RunPod or Ollama configured; skipping vision phase; embedding text PDFs on CPU",
+      );
+      await processCpuPhase();
     }
   } else if (workKind === "cpu_folders") {
-    await processCpuFolderRebuild();
+    await processCpuPhase();
   }
 
   for (const folderPath of foldersToSoftDeleteLater) {

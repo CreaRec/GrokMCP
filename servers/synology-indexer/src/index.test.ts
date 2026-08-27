@@ -134,6 +134,25 @@ describe("shouldMarkDirty", () => {
     }
   });
 
+  it("does not mark non-image media dirty (skipped_media)", () => {
+    const existing = {
+      id: "audio-id",
+      contentHash: "same-hash",
+      hasEmbedding: false,
+      description: null,
+    };
+    for (const name of ["song.mp3", "notes.txt", "deck.pptx", "report.docx"] as const) {
+      expect(shouldMarkDirty(null, "new", name)).toEqual({
+        dirty: false,
+        reason: "skipped_media",
+      });
+      expect(shouldMarkDirty(existing, "same-hash", name)).toEqual({
+        dirty: false,
+        reason: "skipped_media",
+      });
+    }
+  });
+
   it("still marks receipt.pdf dirty when hash matches but embedding is missing", () => {
     const existing = {
       id: "receipt-id",
@@ -182,9 +201,12 @@ describe("getDirectParentFolderPath", () => {
 });
 
 describe("fileNeedsVision", () => {
-  it("requires vision for dirty non-8.3 files only", () => {
+  it("requires vision for dirty rasters and PDFs only", () => {
     expect(fileNeedsVision(true, "receipt.pdf")).toBe(true);
+    expect(fileNeedsVision(true, "photo.jpg")).toBe(true);
     expect(fileNeedsVision(true, "BKZZW3~2.PDF")).toBe(false);
+    expect(fileNeedsVision(true, "song.mp3")).toBe(false);
+    expect(fileNeedsVision(true, "notes.txt")).toBe(false);
     expect(fileNeedsVision(false, "receipt.pdf")).toBe(false);
   });
 });

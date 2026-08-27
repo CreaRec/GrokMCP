@@ -21,6 +21,8 @@ ENV TRANSFORMERS_CACHE=/app/.cache/transformers
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
   libgomp1 \
+  poppler-utils \
+  imagemagick \
   && rm -rf /var/lib/apt/lists/*
 
 COPY .npmrc package.json package-lock.json prisma.config.ts ./

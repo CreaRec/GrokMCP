@@ -1,10 +1,39 @@
-import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
+import { classifyMedia } from "./media.js";
+import { encodeRasterForVision, type ImageEncoder } from "./image-encode.js";
+import {
+  descriptionFromPdfText,
+  extractPdfText,
+  hasUsablePdfText,
+  labelFromPdfText,
+  rasterizePdfPages,
+  type PdfPageRasterizer,
+  type PdfTextExtractor,
+  PDF_VISION_MAX_PAGES,
+} from "./pdf.js";
 
 export interface VisionResult {
   label: string;
   description: string;
   redacted: boolean;
+}
+
+export type FileContentResult =
+  | { mode: "skip"; reason: string }
+  | { mode: "text"; label: string; description: string; redacted: boolean }
+  | { mode: "vision"; label: string; description: string; redacted: boolean };
+
+export interface PrepareFileDeps {
+  extractPdfText?: PdfTextExtractor;
+  rasterizePdfPages?: PdfPageRasterizer;
+  encodeImage?: ImageEncoder;
+  /** Injected for tests — when set, vision HTTP is not called; images still prepared. */
+  describeImages?: (
+    imagesBase64: string[],
+    ollamaBaseUrl: string,
+    model: string,
+    fileName: string,
+  ) => Promise<VisionResult>;
 }
 
 const PII_PATTERNS = [
@@ -32,14 +61,36 @@ function redactPii(text: string): { text: string; wasRedacted: boolean } {
   return { text: redacted, wasRedacted };
 }
 
-export async function describeWithVision(
+/**
+ * Prepare base64 JPEG frames for Ollama vision.
+ * Only raster paths or already-rasterized page buffers — never raw PDF/office bytes.
+ */
+export async function prepareVisionImageBase64(
   filePath: string,
+  encodeImage: ImageEncoder = encodeRasterForVision,
+): Promise<string[]> {
+  const kind = classifyMedia(filePath);
+  if (kind !== "raster") {
+    throw new Error(
+      `prepareVisionImageBase64 only accepts raster images, got ${kind} for ${basename(filePath)}`,
+    );
+  }
+  return [await encodeImage(filePath)];
+}
+
+/**
+ * Call Ollama /api/generate with pre-encoded raster image(s) only.
+ * Do not pass PDF or other file bytes here.
+ */
+export async function describeWithVision(
+  imagesBase64: string[],
   ollamaBaseUrl: string,
   model: string,
+  fileName: string = "image",
 ): Promise<VisionResult> {
-  const fileBuffer = await readFile(filePath);
-  const base64 = fileBuffer.toString("base64");
-  const fileName = basename(filePath);
+  if (imagesBase64.length === 0) {
+    throw new Error("describeWithVision requires at least one image");
+  }
 
   const prompt = `Describe this document or image. Provide:
 1. A short label (under 100 characters) suitable for display
@@ -61,12 +112,13 @@ DESCRIPTION: [detailed description]`;
     body: JSON.stringify({
       model,
       prompt,
-      images: [base64],
+      images: imagesBase64,
       stream: false,
     }),
   });
 
   if (!response.ok) {
+    // Do not include Ollama URL (privacy / #33).
     throw new Error(`Ollama API error: ${response.status} ${response.statusText}`);
   }
 
@@ -91,6 +143,60 @@ DESCRIPTION: [detailed description]`;
     description: descRedact.text,
     redacted: labelRedact.wasRedacted || descRedact.wasRedacted,
   };
+}
+
+/**
+ * Full per-file content pipeline:
+ * - skip non-images
+ * - raster → vision images (resized)
+ * - PDF → digital text + embed path when usable; else page-image vision fallback
+ */
+export async function describeFileContent(
+  filePath: string,
+  ollamaBaseUrl: string,
+  model: string,
+  deps: PrepareFileDeps = {},
+): Promise<FileContentResult> {
+  const fileName = basename(filePath);
+  const kind = classifyMedia(filePath);
+  const encodeImage = deps.encodeImage ?? encodeRasterForVision;
+  const extractText = deps.extractPdfText ?? extractPdfText;
+  const rasterize = deps.rasterizePdfPages ?? rasterizePdfPages;
+  const describeImages = deps.describeImages ?? describeWithVision;
+
+  if (kind === "skip") {
+    return { mode: "skip", reason: "unsupported_media" };
+  }
+
+  if (kind === "pdf") {
+    const text = await extractText(filePath);
+    if (hasUsablePdfText(text)) {
+      const labelRedact = redactPii(labelFromPdfText(text, fileName));
+      const descRedact = redactPii(descriptionFromPdfText(text));
+      return {
+        mode: "text",
+        label: labelRedact.text,
+        description: descRedact.text,
+        redacted: labelRedact.wasRedacted || descRedact.wasRedacted,
+      };
+    }
+
+    const pageBuffers = await rasterize(filePath, PDF_VISION_MAX_PAGES);
+    if (pageBuffers.length === 0) {
+      return { mode: "skip", reason: "pdf_empty" };
+    }
+    const images: string[] = [];
+    for (const buf of pageBuffers) {
+      images.push(await encodeImage(buf));
+    }
+    const vision = await describeImages(images, ollamaBaseUrl, model, fileName);
+    return { mode: "vision", ...vision };
+  }
+
+  // raster
+  const images = await prepareVisionImageBase64(filePath, encodeImage);
+  const vision = await describeImages(images, ollamaBaseUrl, model, fileName);
+  return { mode: "vision", ...vision };
 }
 
 export async function checkOllamaAvailable(baseUrl: string): Promise<boolean> {

@@ -14,8 +14,9 @@ describe("getDirectParentFolderPath", () => {
 });
 
 describe("fileNeedsVision", () => {
-  it("excludes 8.3 short names from vision queue", () => {
+  it("excludes 8.3 short names and non-images from vision queue", () => {
     expect(fileNeedsVision(true, "BKZZW3~2.PDF")).toBe(false);
+    expect(fileNeedsVision(true, "song.mp3")).toBe(false);
     expect(fileNeedsVision(true, "receipt.pdf")).toBe(true);
     expect(fileNeedsVision(false, "receipt.pdf")).toBe(false);
   });

@@ -1,3 +1,5 @@
+import { isContentIndexable } from "./media.js";
+
 export interface ExistingFileRow {
   id: string;
   contentHash: string | null;
@@ -7,7 +9,14 @@ export interface ExistingFileRow {
 
 export interface DirtyDecision {
   dirty: boolean;
-  reason: "new" | "hash_missing" | "hash_changed" | "incomplete" | "skipped_83" | "clean";
+  reason:
+    | "new"
+    | "hash_missing"
+    | "hash_changed"
+    | "incomplete"
+    | "skipped_83"
+    | "skipped_media"
+    | "clean";
 }
 
 /** Vision result is complete only when both embedding and description exist. */
@@ -34,6 +43,11 @@ export function shouldMarkDirty(
   // Temporary (#27): never queue 8.3 CIFS duplicates for vision/GPU.
   if (fileBasename !== undefined && isDos83ShortBasename(fileBasename)) {
     return { dirty: false, reason: "skipped_83" };
+  }
+
+  // Audio/office/text/video/etc.: never queue for vision or PDF pipelines.
+  if (fileBasename !== undefined && !isContentIndexable(fileBasename)) {
+    return { dirty: false, reason: "skipped_media" };
   }
 
   if (!existingRow) {
@@ -86,9 +100,16 @@ export function getDirectParentFolderPath(synoPath: string): string | null {
   return parents.length > 0 ? parents[parents.length - 1]! : null;
 }
 
-/** True when a dirty file should go through vision/GPU (8.3 names are excluded). */
+/**
+ * True when a dirty file should enter the content pipeline (raster vision or PDF
+ * text/scan). 8.3 names and non-indexable media (mp3, docx, txt, …) are excluded.
+ */
 export function fileNeedsVision(fileDirty: boolean, fileBasename: string): boolean {
-  return fileDirty && !isDos83ShortBasename(fileBasename);
+  return (
+    fileDirty &&
+    !isDos83ShortBasename(fileBasename) &&
+    isContentIndexable(fileBasename)
+  );
 }
 
 export interface AbortCheckResult {
