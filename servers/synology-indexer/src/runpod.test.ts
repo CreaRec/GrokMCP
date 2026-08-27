@@ -7,12 +7,33 @@ import {
   isRetryablePodStartError,
   getStartPodRetryDefaults,
   getOllamaUrlFromPod,
+  buildRunPodProxyOllamaUrl,
   summarizePodPortsSafe,
   DEFAULT_START_ATTEMPTS,
   DEFAULT_START_RETRY_MS,
+  DEFAULT_OLLAMA_PORTS_TIMEOUT_MS,
   type RunPodDeployConfig,
   type RunPodPodConfig,
 } from "./runpod.js";
+import type { LogAttributes } from "./telemetry.js";
+import { logInfo } from "./telemetry.js";
+
+vi.mock("./telemetry.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./telemetry.js")>();
+  return {
+    ...actual,
+    logInfo: vi.fn(actual.logInfo),
+    logWarn: vi.fn(actual.logWarn),
+    logErrorWithCause: vi.fn(actual.logErrorWithCause),
+  };
+});
+
+function sourceLogAttributes(): LogAttributes[] {
+  return vi
+    .mocked(logInfo)
+    .mock.calls.filter(([body]) => body === "runpod ollama url source")
+    .map(([, attributes]) => attributes ?? {});
+}
 
 const API_KEY = "rp_secret_key_do_not_log";
 const POD_ID = "test-pod-123";
@@ -29,7 +50,7 @@ function makeDeployConfig(overrides: Partial<RunPodDeployConfig> = {}): RunPodDe
     dataCenterId: null,
     podName: "synology-indexer-ollama",
     ollamaHealthyTimeoutMs: 180_000,
-    ollamaPortsTimeoutMs: 90_000,
+    ollamaPortsTimeoutMs: DEFAULT_OLLAMA_PORTS_TIMEOUT_MS,
     ...overrides,
   };
 }
@@ -255,6 +276,7 @@ describe("withGpuPod lifecycle", () => {
     vi.stubGlobal("fetch", vi.fn());
     vi.stubEnv("RUNPOD_START_RETRIES", "2");
     vi.stubEnv("RUNPOD_START_RETRY_MS", "0");
+    vi.mocked(logInfo).mockClear();
   });
 
   afterEach(() => {
@@ -399,6 +421,64 @@ describe("withGpuPod lifecycle", () => {
     expect(terminateBodies).toHaveLength(0);
   });
 
+  it("uses GraphQL-derived URL when ports publish privatePort mapping", async () => {
+    const fetchMock = vi.mocked(fetch);
+    const derivedHost = "http://10.0.0.5:23456";
+    const healthUrls: string[] = [];
+
+    fetchMock.mockImplementation(async (url, init) => {
+      const urlStr = String(url);
+      const body = typeof init?.body === "string" ? init.body : "";
+      if (body.includes("podTerminate")) {
+        return jsonResponse({ data: { podTerminate: null } });
+      }
+      if (body.includes("podFindAndDeployOnDemand")) {
+        return jsonResponse({
+          data: {
+            podFindAndDeployOnDemand: { id: "vxpmzql6za084k", desiredStatus: "RUNNING" },
+          },
+        });
+      }
+      if (body.includes("getPod")) {
+        return jsonResponse({
+          data: {
+            pod: {
+              id: "vxpmzql6za084k",
+              desiredStatus: "RUNNING",
+              runtime: {
+                ports: [{ ip: "10.0.0.5", publicPort: 23456, privatePort: 11434, type: "http" }],
+              },
+            },
+          },
+        });
+      }
+      if (urlStr.includes("/api/tags") || urlStr.includes("/api/pull")) {
+        healthUrls.push(urlStr);
+        return jsonResponse({ models: [{ name: "vision" }, { name: "embed" }] });
+      }
+      return jsonResponse({});
+    });
+
+    const fn = vi.fn(async (ollamaUrl: string) => {
+      expect(ollamaUrl).toBe(derivedHost);
+      return "ok";
+    });
+
+    await withGpuPod(makeDeployConfig(), null, "vision", "embed", fn, {
+      leaveRunning: false,
+    });
+
+    expect(fn).toHaveBeenCalledWith(derivedHost);
+    expect(healthUrls.some((u) => u.startsWith(derivedHost))).toBe(true);
+    const sourceLogs = sourceLogAttributes();
+    expect(sourceLogs).toEqual([{ source: "derived" }]);
+    for (const attrs of sourceLogs) {
+      for (const value of Object.values(attrs)) {
+        expect(["string", "number", "boolean"]).toContain(typeof value);
+      }
+    }
+  });
+
   it("with null override (runIndex ephemeral path) derives URL from new pod ports", async () => {
     const fetchMock = vi.mocked(fetch);
     const staleOverride = "https://y5m6f3oroycbs1-11434.proxy.runpod.net";
@@ -529,12 +609,15 @@ describe("withGpuPod lifecycle", () => {
     expect(terminateCalls).toBe(1);
   });
 
-  it("throws determine-URL error and terminates when RUNNING forever without ports", async () => {
+  it("falls back to HTTPS proxy when RUNNING forever without GraphQL ports", async () => {
     const fetchMock = vi.mocked(fetch);
     let terminateCalls = 0;
     const sleep = vi.fn(async () => {});
+    const proxyUrl = buildRunPodProxyOllamaUrl(POD_ID, 11434);
+    const healthUrls: string[] = [];
 
-    fetchMock.mockImplementation(async (_url, init) => {
+    fetchMock.mockImplementation(async (url, init) => {
+      const urlStr = String(url);
       const body = typeof init?.body === "string" ? init.body : "";
       if (body.includes("podTerminate")) {
         terminateCalls++;
@@ -558,29 +641,102 @@ describe("withGpuPod lifecycle", () => {
           },
         });
       }
+      if (urlStr.includes("/api/tags") || urlStr.includes("/api/pull")) {
+        healthUrls.push(urlStr);
+        return jsonResponse({ models: [{ name: "vision" }, { name: "embed" }] });
+      }
       return jsonResponse({});
     });
 
-    const fn = vi.fn(async () => "should-not-run");
+    const fn = vi.fn(async (ollamaUrl: string) => {
+      expect(ollamaUrl).toBe(proxyUrl);
+      expect(ollamaUrl.startsWith("https://")).toBe(true);
+      return "ok";
+    });
 
-    await expect(
-      withGpuPod(
-        makeDeployConfig({ ollamaPortsTimeoutMs: 30 }),
-        null,
-        "vision",
-        "embed",
-        fn,
-        { leaveRunning: false, sleep, portsPollIntervalMs: 10 },
-      ),
-    ).rejects.toThrow("Could not determine Ollama URL from pod ports");
+    await withGpuPod(
+      makeDeployConfig({ ollamaPortsTimeoutMs: 30 }),
+      null,
+      "vision",
+      "embed",
+      fn,
+      { leaveRunning: false, sleep, portsPollIntervalMs: 10 },
+    );
 
-    expect(fn).not.toHaveBeenCalled();
+    expect(fn).toHaveBeenCalledWith(proxyUrl);
+    expect(healthUrls.some((u) => u.startsWith(proxyUrl))).toBe(true);
     expect(terminateCalls).toBe(1);
     expect(sleep).toHaveBeenCalled();
+    const sourceLogs = sourceLogAttributes();
+    expect(sourceLogs).toEqual([{ source: "proxy_fallback" }]);
+    for (const attrs of sourceLogs) {
+      for (const value of Object.values(attrs)) {
+        expect(["string", "number", "boolean"]).toContain(typeof value);
+      }
+      // Never log URL / proxy host / ip as attributes — only the source scalar.
+      expect(Object.keys(attrs)).toEqual(["source"]);
+      expect(JSON.stringify(attrs)).not.toContain("proxy.runpod.net");
+      expect(JSON.stringify(attrs)).not.toContain(POD_ID);
+    }
+  });
+
+  it("falls back to proxy when ports exist but omit ollama privatePort", async () => {
+    const fetchMock = vi.mocked(fetch);
+    const sleep = vi.fn(async () => {});
+    const proxyUrl = buildRunPodProxyOllamaUrl("hkozxlbwkzbudu", 11434);
+
+    fetchMock.mockImplementation(async (url, init) => {
+      const urlStr = String(url);
+      const body = typeof init?.body === "string" ? init.body : "";
+      if (body.includes("podTerminate")) {
+        return jsonResponse({ data: { podTerminate: null } });
+      }
+      if (body.includes("podFindAndDeployOnDemand")) {
+        return jsonResponse({
+          data: {
+            podFindAndDeployOnDemand: { id: "hkozxlbwkzbudu", desiredStatus: "RUNNING" },
+          },
+        });
+      }
+      if (body.includes("getPod")) {
+        return jsonResponse({
+          data: {
+            pod: {
+              id: "hkozxlbwkzbudu",
+              desiredStatus: "RUNNING",
+              // Ports published, but not the Ollama privatePort (Secure Cloud HTTP case).
+              runtime: {
+                ports: [{ ip: "10.0.0.1", publicPort: 22, privatePort: 22, type: "tcp" }],
+              },
+            },
+          },
+        });
+      }
+      if (urlStr.includes("/api/tags") || urlStr.includes("/api/pull")) {
+        return jsonResponse({ models: [{ name: "vision" }, { name: "embed" }] });
+      }
+      return jsonResponse({});
+    });
+
+    const fn = vi.fn(async (ollamaUrl: string) => {
+      expect(ollamaUrl).toBe(proxyUrl);
+      return "ok";
+    });
+
+    await withGpuPod(
+      makeDeployConfig({ ollamaPortsTimeoutMs: 30 }),
+      null,
+      "vision",
+      "embed",
+      fn,
+      { leaveRunning: false, sleep, portsPollIntervalMs: 10 },
+    );
+
+    expect(fn).toHaveBeenCalledWith(proxyUrl);
   });
 });
 
-describe("getOllamaUrlFromPod / summarizePodPortsSafe", () => {
+describe("getOllamaUrlFromPod / buildRunPodProxyOllamaUrl / summarizePodPortsSafe", () => {
   it("matches privatePort for http or tcp types", () => {
     const podHttp = {
       id: POD_ID,
@@ -598,6 +754,13 @@ describe("getOllamaUrlFromPod / summarizePodPortsSafe", () => {
     };
     expect(getOllamaUrlFromPod(podHttp, 11434)).toBe("http://1.2.3.4:111");
     expect(getOllamaUrlFromPod(podTcp, 11434)).toBe("http://1.2.3.4:222");
+  });
+
+  it("buildRunPodProxyOllamaUrl uses https and podId-port host", () => {
+    expect(buildRunPodProxyOllamaUrl("hkozxlbwkzbudu", 11434)).toBe(
+      "https://hkozxlbwkzbudu-11434.proxy.runpod.net",
+    );
+    expect(buildRunPodProxyOllamaUrl("abc", 8080)).toBe("https://abc-8080.proxy.runpod.net");
   });
 
   it("summarizePodPortsSafe omits ips and is LogAttributes-compatible", () => {
@@ -619,6 +782,11 @@ describe("getOllamaUrlFromPod / summarizePodPortsSafe", () => {
     expect(JSON.stringify(summary)).not.toContain("another-secret");
     // LogAttributes only allows string | number | boolean
     for (const value of Object.values(summary)) {
+      expect(["string", "number", "boolean"]).toContain(typeof value);
+    }
+
+    const sourceAttrs: LogAttributes = { source: "proxy_fallback" };
+    for (const value of Object.values(sourceAttrs)) {
       expect(["string", "number", "boolean"]).toContain(typeof value);
     }
   });
