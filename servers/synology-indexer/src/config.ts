@@ -45,7 +45,8 @@ export function getConfig(): Config {
   const ollamaHealthyRaw = process.env.RUNPOD_OLLAMA_HEALTHY_TIMEOUT_MS ?? "180000";
   const parsedOllamaHealthy = parseInt(ollamaHealthyRaw, 10);
 
-  const ollamaPortsRaw = process.env.RUNPOD_OLLAMA_PORTS_TIMEOUT_MS ?? "90000";
+  // Short GraphQL ports poll; empty HTTP ports fall back to proxy.runpod.net.
+  const ollamaPortsRaw = process.env.RUNPOD_OLLAMA_PORTS_TIMEOUT_MS ?? "15000";
   const parsedOllamaPorts = parseInt(ollamaPortsRaw, 10);
 
   return {
@@ -73,7 +74,7 @@ export function getConfig(): Config {
     runpodOllamaHealthyTimeoutMs:
       Number.isFinite(parsedOllamaHealthy) && parsedOllamaHealthy > 0 ? parsedOllamaHealthy : 180_000,
     runpodOllamaPortsTimeoutMs:
-      Number.isFinite(parsedOllamaPorts) && parsedOllamaPorts > 0 ? parsedOllamaPorts : 90_000,
+      Number.isFinite(parsedOllamaPorts) && parsedOllamaPorts > 0 ? parsedOllamaPorts : 15_000,
     runpodLeaveRunning: process.env.RUNPOD_LEAVE_RUNNING === "1",
   };
 }
@@ -86,7 +87,8 @@ export function isRunPodGpuConfigured(config: Config): boolean {
 /**
  * Ollama URL override passed to withGpuPod.
  * Always null when ephemeral RunPod is configured — OLLAMA_BASE_URL must not pin a
- * stale sticky-pod proxy; the URL is derived from the created pod's ports instead.
+ * stale sticky-pod proxy; the URL is derived from the created pod's ports (or the
+ * RunPod HTTP proxy fallback) instead.
  * OLLAMA_BASE_URL remains valid only for the non-RunPod (direct Ollama) path.
  */
 export function ollamaUrlOverrideForGpuPod(config: Config): string | null {
