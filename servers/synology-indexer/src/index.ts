@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { basename } from "node:path";
-import { getConfig, parseIndexTime, type Config } from "./config.js";
+import { getConfig, isRunPodGpuConfigured, parseIndexTime, type Config } from "./config.js";
 import { getPrisma, disconnectPrisma, formatVectorForPg } from "./db.js";
 import { walkDirectory } from "./walker.js";
 import { hashFile } from "./hasher.js";
@@ -20,7 +20,7 @@ import {
   countDirtyFolders,
   rebuildDirtyFolders,
 } from "./folder-rebuild.js";
-import { withGpuPod, type RunPodConfig } from "./runpod.js";
+import { withGpuPod, type RunPodDeployConfig } from "./runpod.js";
 import { planIndexWork } from "./index-plan.js";
 import { createIndexDaemon, type IndexRunReason } from "./daemon.js";
 import {
@@ -415,15 +415,25 @@ export async function runIndex(
     }
   };
 
-  const hasRunPod = config.runpodApiKey && config.runpodPodId;
+  const hasRunPod = isRunPodGpuConfigured(config);
 
   if (workKind === "gpu_vision") {
     if (hasRunPod) {
-      logInfo("using RunPod GPU pod", { pod_id: config.runpodPodId! });
-      const runpodConfig: RunPodConfig = {
+      if (config.runpodPodId) {
+        logWarn("RUNPOD_POD_ID is deprecated and ignored; creating ephemeral pods per session");
+      }
+      logInfo("using RunPod ephemeral GPU pod");
+      const runpodConfig: RunPodDeployConfig = {
         apiKey: config.runpodApiKey!,
-        podId: config.runpodPodId!,
         ollamaPort: config.runpodOllamaPort,
+        templateId: config.runpodTemplateId,
+        imageName: config.runpodImage,
+        cloudType: config.runpodCloudType,
+        gpuTypeId: config.runpodGpuTypeId,
+        containerDiskInGb: config.runpodContainerDiskGb,
+        dataCenterId: config.runpodDataCenterId,
+        podName: "synology-indexer-ollama",
+        ollamaHealthyTimeoutMs: config.runpodOllamaHealthyTimeoutMs,
       };
 
       await withGpuPod(
@@ -490,7 +500,7 @@ async function main(): Promise<void> {
     index_daily_at: config.indexDailyAt,
     run_once: config.runOnce,
     ollama_configured: Boolean(config.ollamaBaseUrl),
-    runpod_configured: Boolean(config.runpodPodId),
+    runpod_configured: isRunPodGpuConfigured(config),
   });
 
   if (config.runOnce) {

@@ -11,8 +11,16 @@ export interface Config {
   dsmShareUser: string | null;
   dsmSharePassword: string | null;
   runpodApiKey: string | null;
+  /** @deprecated Ignored — pods are created ephemerally per GPU session. */
   runpodPodId: string | null;
+  runpodTemplateId: string | null;
+  runpodImage: string;
+  runpodCloudType: string;
+  runpodGpuTypeId: string;
+  runpodContainerDiskGb: number;
+  runpodDataCenterId: string | null;
   runpodOllamaPort: number;
+  runpodOllamaHealthyTimeoutMs: number;
   runpodLeaveRunning: boolean;
 }
 
@@ -30,6 +38,12 @@ export function getConfig(): Config {
   const runOnceStr = process.env.RUN_ONCE;
   const runOnce = runOnceStr === "1" || runOnceStr === "true";
 
+  const containerDiskRaw = process.env.RUNPOD_CONTAINER_DISK_GB ?? "80";
+  const parsedContainerDisk = parseInt(containerDiskRaw, 10);
+
+  const ollamaHealthyRaw = process.env.RUNPOD_OLLAMA_HEALTHY_TIMEOUT_MS ?? "180000";
+  const parsedOllamaHealthy = parseInt(ollamaHealthyRaw, 10);
+
   return {
     databaseUrl,
     mountRoot,
@@ -44,9 +58,23 @@ export function getConfig(): Config {
     dsmSharePassword: process.env.DSM_SHARE_PASSWORD ?? null,
     runpodApiKey: process.env.RUNPOD_API_KEY ?? null,
     runpodPodId: process.env.RUNPOD_POD_ID ?? null,
+    runpodTemplateId: process.env.RUNPOD_TEMPLATE_ID ?? null,
+    runpodImage: process.env.RUNPOD_IMAGE ?? "ollama/ollama",
+    runpodCloudType: process.env.RUNPOD_CLOUD_TYPE ?? "SECURE",
+    runpodGpuTypeId: process.env.RUNPOD_GPU_TYPE_ID ?? "NVIDIA GeForce RTX 4090",
+    runpodContainerDiskGb:
+      Number.isFinite(parsedContainerDisk) && parsedContainerDisk > 0 ? parsedContainerDisk : 80,
+    runpodDataCenterId: process.env.RUNPOD_DATA_CENTER_ID ?? null,
     runpodOllamaPort: parseInt(process.env.RUNPOD_OLLAMA_PORT ?? "11434", 10),
+    runpodOllamaHealthyTimeoutMs:
+      Number.isFinite(parsedOllamaHealthy) && parsedOllamaHealthy > 0 ? parsedOllamaHealthy : 180_000,
     runpodLeaveRunning: process.env.RUNPOD_LEAVE_RUNNING === "1",
   };
+}
+
+/** True when RunPod ephemeral GPU lifecycle should be used (API key + template or image). */
+export function isRunPodGpuConfigured(config: Config): boolean {
+  return Boolean(config.runpodApiKey && (config.runpodTemplateId || config.runpodImage));
 }
 
 export function parseIndexTime(timeStr: string): { hour: number; minute: number } {

@@ -54,7 +54,7 @@ describe("runIndex orchestration", () => {
   it("folder-only path does not call withGpuPod", async () => {
     vi.doMock("./runpod.js", () => ({
       withGpuPod,
-      startPod: vi.fn(),
+      createPod: vi.fn(),
     }));
     vi.doMock("./cpu-embedder.js", () => ({
       embedTextCpu,
