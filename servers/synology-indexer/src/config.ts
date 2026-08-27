@@ -77,6 +77,19 @@ export function isRunPodGpuConfigured(config: Config): boolean {
   return Boolean(config.runpodApiKey && (config.runpodTemplateId || config.runpodImage));
 }
 
+/**
+ * Ollama URL override passed to withGpuPod.
+ * Always null when ephemeral RunPod is configured — OLLAMA_BASE_URL must not pin a
+ * stale sticky-pod proxy; the URL is derived from the created pod's ports instead.
+ * OLLAMA_BASE_URL remains valid only for the non-RunPod (direct Ollama) path.
+ */
+export function ollamaUrlOverrideForGpuPod(config: Config): string | null {
+  if (isRunPodGpuConfigured(config)) {
+    return null;
+  }
+  return config.ollamaBaseUrl;
+}
+
 export function parseIndexTime(timeStr: string): { hour: number; minute: number } {
   const match = timeStr.match(/^(\d{1,2}):(\d{2})$/);
   if (!match) {

@@ -395,6 +395,61 @@ describe("withGpuPod lifecycle", () => {
     expect(fn).toHaveBeenCalled();
     expect(terminateBodies).toHaveLength(0);
   });
+
+  it("with null override (runIndex ephemeral path) derives URL from new pod ports", async () => {
+    const fetchMock = vi.mocked(fetch);
+    const staleOverride = "https://y5m6f3oroycbs1-11434.proxy.runpod.net";
+    const derivedHost = "http://10.0.0.5:23456";
+    const healthUrls: string[] = [];
+
+    fetchMock.mockImplementation(async (url, init) => {
+      const urlStr = String(url);
+      const body = typeof init?.body === "string" ? init.body : "";
+      if (body.includes("podTerminate")) {
+        return jsonResponse({ data: { podTerminate: null } });
+      }
+      if (body.includes("podFindAndDeployOnDemand")) {
+        return jsonResponse({
+          data: {
+            podFindAndDeployOnDemand: { id: "vxpmzql6za084k", desiredStatus: "RUNNING" },
+          },
+        });
+      }
+      if (body.includes("getPod")) {
+        return jsonResponse({
+          data: {
+            pod: {
+              id: "vxpmzql6za084k",
+              desiredStatus: "RUNNING",
+              runtime: {
+                ports: [{ ip: "10.0.0.5", publicPort: 23456, privatePort: 11434, type: "http" }],
+              },
+            },
+          },
+        });
+      }
+      if (urlStr.includes("/api/tags") || urlStr.includes("/api/pull")) {
+        healthUrls.push(urlStr);
+        return jsonResponse({ models: [{ name: "vision" }, { name: "embed" }] });
+      }
+      return jsonResponse({});
+    });
+
+    const fn = vi.fn(async (ollamaUrl: string) => {
+      expect(ollamaUrl).toBe(derivedHost);
+      expect(ollamaUrl).not.toBe(staleOverride);
+      return "ok";
+    });
+
+    // runIndex passes ollamaUrlOverrideForGpuPod(config) === null when RunPod is configured.
+    await withGpuPod(makeDeployConfig(), null, "vision", "embed", fn, {
+      leaveRunning: false,
+    });
+
+    expect(fn).toHaveBeenCalledWith(derivedHost);
+    expect(healthUrls.some((u) => u.startsWith(derivedHost))).toBe(true);
+    expect(healthUrls.some((u) => u.includes("y5m6f3oroycbs1"))).toBe(false);
+  });
 });
 
 describe("API key is never logged by createPod helpers", () => {

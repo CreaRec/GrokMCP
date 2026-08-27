@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 import { basename } from "node:path";
-import { getConfig, isRunPodGpuConfigured, parseIndexTime, type Config } from "./config.js";
+import {
+  getConfig,
+  isRunPodGpuConfigured,
+  ollamaUrlOverrideForGpuPod,
+  parseIndexTime,
+  type Config,
+} from "./config.js";
 import { getPrisma, disconnectPrisma, formatVectorForPg } from "./db.js";
 import { walkDirectory } from "./walker.js";
 import { hashFile } from "./hasher.js";
@@ -422,6 +428,11 @@ export async function runIndex(
       if (config.runpodPodId) {
         logWarn("RUNPOD_POD_ID is deprecated and ignored; creating ephemeral pods per session");
       }
+      if (config.ollamaBaseUrl) {
+        logWarn(
+          "OLLAMA_BASE_URL is ignored when RunPod ephemeral GPU is configured; deriving URL from pod ports",
+        );
+      }
       logInfo("using RunPod ephemeral GPU pod");
       const runpodConfig: RunPodDeployConfig = {
         apiKey: config.runpodApiKey!,
@@ -436,9 +447,10 @@ export async function runIndex(
         ollamaHealthyTimeoutMs: config.runpodOllamaHealthyTimeoutMs,
       };
 
+      // Never pass OLLAMA_BASE_URL into ephemeral RunPod — it may point at a terminated sticky pod.
       await withGpuPod(
         runpodConfig,
-        config.ollamaBaseUrl,
+        ollamaUrlOverrideForGpuPod(config),
         config.visionModel,
         config.embedModel,
         processVisionPhase,

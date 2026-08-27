@@ -409,7 +409,10 @@ export async function withGpuPod<T>(
       if (!ollamaUrl) {
         throw new Error("Could not determine Ollama URL from pod ports");
       }
-      logInfo("runpod derived ollama url");
+      // Log source only — never log the URL (may include host tokens / proxy ids).
+      logInfo("runpod ollama url source", { source: "derived" });
+    } else {
+      logInfo("runpod ollama url source", { source: "override" });
     }
 
     await waitForOllamaHealthy(ollamaUrl, deployConfig.ollamaHealthyTimeoutMs);
