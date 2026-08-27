@@ -6,6 +6,9 @@ const RUNPOD_API_BASE = "https://api.runpod.io/graphql";
 export const DEFAULT_START_ATTEMPTS = 6;
 export const DEFAULT_START_RETRY_MS = 120_000;
 export const DEFAULT_OLLAMA_HEALTHY_TIMEOUT_MS = 180_000;
+/** How long to wait for runtime.ports after desiredStatus becomes RUNNING. */
+export const DEFAULT_OLLAMA_PORTS_TIMEOUT_MS = 90_000;
+export const DEFAULT_OLLAMA_PORTS_POLL_MS = 2_000;
 
 /** Deploy-time configuration for ephemeral on-demand pods. */
 export interface RunPodDeployConfig {
@@ -19,6 +22,8 @@ export interface RunPodDeployConfig {
   dataCenterId: string | null;
   podName: string;
   ollamaHealthyTimeoutMs: number;
+  /** Wait for published ports after RUNNING (default 90s). */
+  ollamaPortsTimeoutMs: number;
 }
 
 /** Runtime reference to a specific pod instance. */
@@ -283,6 +288,10 @@ export async function getPodStatus(
   };
 }
 
+/**
+ * Derive Ollama base URL from published pod ports.
+ * Matches by privatePort only (http or tcp) — RunPod may label the mapping either way.
+ */
 export function getOllamaUrlFromPod(pod: PodInfo, ollamaPort: number): string | null {
   if (!pod.runtime?.ports) {
     return null;
@@ -294,6 +303,77 @@ export function getOllamaUrlFromPod(pod: PodInfo, ollamaPort: number): string | 
   }
 
   return `http://${ollamaPortInfo.ip}:${ollamaPortInfo.publicPort}`;
+}
+
+/** Safe port summary for logs — scalars only; never includes ip / proxy host tokens. */
+export function summarizePodPortsSafe(pod: PodInfo | null): {
+  port_count: number;
+  ports_summary: string;
+} {
+  const ports = pod?.runtime?.ports ?? [];
+  return {
+    port_count: ports.length,
+    ports_summary: ports
+      .map((p) => `${p.privatePort}/${p.type}->${p.publicPort}`)
+      .join(","),
+  };
+}
+
+export interface WaitForOllamaUrlOptions {
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/**
+ * After the pod is RUNNING, keep polling until runtime.ports publishes the Ollama mapping.
+ * Empty/null ports on the first RUNNING sample are not a hard failure.
+ */
+export async function waitForOllamaUrlFromPod(
+  config: RunPodPodConfig,
+  ollamaPort: number,
+  options: WaitForOllamaUrlOptions = {},
+): Promise<string> {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_OLLAMA_PORTS_TIMEOUT_MS;
+  const pollIntervalMs = Math.max(1, options.pollIntervalMs ?? DEFAULT_OLLAMA_PORTS_POLL_MS);
+  const sleep = options.sleep ?? defaultSleep;
+  const maxPolls = Math.max(1, Math.ceil(timeoutMs / pollIntervalMs));
+  let lastPod: PodInfo | null = null;
+
+  for (let attempt = 1; attempt <= maxPolls; attempt++) {
+    const { status, pod } = await getPodStatus(config);
+    lastPod = pod;
+
+    if (status === "TERMINATED") {
+      throw new Error(`Pod ${config.podId} is TERMINATED and cannot be started`);
+    }
+
+    if (pod) {
+      const url = getOllamaUrlFromPod(pod, ollamaPort);
+      if (url) {
+        logInfo("runpod ollama ports ready", { pod_id: config.podId });
+        return url;
+      }
+    }
+
+    if (attempt < maxPolls) {
+      logInfo("runpod waiting for ollama ports", {
+        pod_id: config.podId,
+        status,
+        attempt,
+        max_attempts: maxPolls,
+        ...summarizePodPortsSafe(pod),
+      });
+      await sleep(pollIntervalMs);
+    }
+  }
+
+  logWarn("runpod ollama ports timeout", {
+    pod_id: config.podId,
+    timeout_ms: timeoutMs,
+    ...summarizePodPortsSafe(lastPod),
+  });
+  throw new Error("Could not determine Ollama URL from pod ports");
 }
 
 export async function waitForPodRunning(
@@ -384,6 +464,10 @@ export interface GpuLifecycleOptions {
   leaveRunning?: boolean;
   onStart?: () => void;
   onStop?: () => void;
+  /** Injectable sleep for ports / wait loops (tests). */
+  sleep?: (ms: number) => Promise<void>;
+  /** Ports poll interval override (tests). */
+  portsPollIntervalMs?: number;
 }
 
 export async function withGpuPod<T>(
@@ -402,14 +486,19 @@ export async function withGpuPod<T>(
     podRef = await createPod(deployConfig);
     options?.onStart?.();
 
-    const pod = await waitForPodRunning(podRef);
+    // RUNNING can precede published ports — do not derive URL from this first sample alone.
+    await waitForPodRunning(podRef);
 
     if (!ollamaUrl) {
-      ollamaUrl = getOllamaUrlFromPod(pod, deployConfig.ollamaPort);
-      if (!ollamaUrl) {
-        throw new Error("Could not determine Ollama URL from pod ports");
-      }
-      logInfo("runpod derived ollama url");
+      ollamaUrl = await waitForOllamaUrlFromPod(podRef, deployConfig.ollamaPort, {
+        timeoutMs: deployConfig.ollamaPortsTimeoutMs,
+        pollIntervalMs: options?.portsPollIntervalMs,
+        sleep: options?.sleep,
+      });
+      // Log source only — never log the URL (may include host tokens / proxy ids).
+      logInfo("runpod ollama url source", { source: "derived" });
+    } else {
+      logInfo("runpod ollama url source", { source: "override" });
     }
 
     await waitForOllamaHealthy(ollamaUrl, deployConfig.ollamaHealthyTimeoutMs);
