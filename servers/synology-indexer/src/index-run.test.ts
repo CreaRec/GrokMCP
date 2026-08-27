@@ -31,6 +31,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     runpodDataCenterId: null,
     runpodOllamaPort: 11434,
     runpodOllamaHealthyTimeoutMs: 180_000,
+    runpodOllamaPortsTimeoutMs: 90_000,
     runpodLeaveRunning: false,
     ...overrides,
   };

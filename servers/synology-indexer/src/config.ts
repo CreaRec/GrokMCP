@@ -21,6 +21,7 @@ export interface Config {
   runpodDataCenterId: string | null;
   runpodOllamaPort: number;
   runpodOllamaHealthyTimeoutMs: number;
+  runpodOllamaPortsTimeoutMs: number;
   runpodLeaveRunning: boolean;
 }
 
@@ -43,6 +44,9 @@ export function getConfig(): Config {
 
   const ollamaHealthyRaw = process.env.RUNPOD_OLLAMA_HEALTHY_TIMEOUT_MS ?? "180000";
   const parsedOllamaHealthy = parseInt(ollamaHealthyRaw, 10);
+
+  const ollamaPortsRaw = process.env.RUNPOD_OLLAMA_PORTS_TIMEOUT_MS ?? "90000";
+  const parsedOllamaPorts = parseInt(ollamaPortsRaw, 10);
 
   return {
     databaseUrl,
@@ -68,6 +72,8 @@ export function getConfig(): Config {
     runpodOllamaPort: parseInt(process.env.RUNPOD_OLLAMA_PORT ?? "11434", 10),
     runpodOllamaHealthyTimeoutMs:
       Number.isFinite(parsedOllamaHealthy) && parsedOllamaHealthy > 0 ? parsedOllamaHealthy : 180_000,
+    runpodOllamaPortsTimeoutMs:
+      Number.isFinite(parsedOllamaPorts) && parsedOllamaPorts > 0 ? parsedOllamaPorts : 90_000,
     runpodLeaveRunning: process.env.RUNPOD_LEAVE_RUNNING === "1",
   };
 }

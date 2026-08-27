@@ -445,6 +445,7 @@ export async function runIndex(
         dataCenterId: config.runpodDataCenterId,
         podName: "synology-indexer-ollama",
         ollamaHealthyTimeoutMs: config.runpodOllamaHealthyTimeoutMs,
+        ollamaPortsTimeoutMs: config.runpodOllamaPortsTimeoutMs,
       };
 
       // Never pass OLLAMA_BASE_URL into ephemeral RunPod — it may point at a terminated sticky pod.
