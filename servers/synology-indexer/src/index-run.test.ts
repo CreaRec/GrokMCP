@@ -30,7 +30,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     runpodContainerDiskGb: 80,
     runpodDataCenterId: null,
     runpodOllamaPort: 11434,
-    runpodOllamaHealthyTimeoutMs: 180_000,
+    runpodOllamaHealthyTimeoutMs: 600_000,
     runpodOllamaPortsTimeoutMs: 15_000,
     runpodLeaveRunning: false,
     ...overrides,

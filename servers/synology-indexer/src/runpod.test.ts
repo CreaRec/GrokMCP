@@ -12,11 +12,13 @@ import {
   DEFAULT_START_ATTEMPTS,
   DEFAULT_START_RETRY_MS,
   DEFAULT_OLLAMA_PORTS_TIMEOUT_MS,
+  DEFAULT_OLLAMA_HEALTHY_TIMEOUT_MS,
+  waitForOllamaHealthy,
   type RunPodDeployConfig,
   type RunPodPodConfig,
 } from "./runpod.js";
 import type { LogAttributes } from "./telemetry.js";
-import { logInfo } from "./telemetry.js";
+import { logInfo, logError } from "./telemetry.js";
 
 vi.mock("./telemetry.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./telemetry.js")>();
@@ -24,6 +26,7 @@ vi.mock("./telemetry.js", async (importOriginal) => {
     ...actual,
     logInfo: vi.fn(actual.logInfo),
     logWarn: vi.fn(actual.logWarn),
+    logError: vi.fn(actual.logError),
     logErrorWithCause: vi.fn(actual.logErrorWithCause),
   };
 });
@@ -49,7 +52,7 @@ function makeDeployConfig(overrides: Partial<RunPodDeployConfig> = {}): RunPodDe
     containerDiskInGb: 80,
     dataCenterId: null,
     podName: "synology-indexer-ollama",
-    ollamaHealthyTimeoutMs: 180_000,
+    ollamaHealthyTimeoutMs: DEFAULT_OLLAMA_HEALTHY_TIMEOUT_MS,
     ollamaPortsTimeoutMs: DEFAULT_OLLAMA_PORTS_TIMEOUT_MS,
     ...overrides,
   };
@@ -788,6 +791,47 @@ describe("getOllamaUrlFromPod / buildRunPodProxyOllamaUrl / summarizePodPortsSaf
     const sourceAttrs: LogAttributes = { source: "proxy_fallback" };
     for (const value of Object.values(sourceAttrs)) {
       expect(["string", "number", "boolean"]).toContain(typeof value);
+    }
+  });
+});
+
+describe("waitForOllamaHealthy", () => {
+  beforeEach(() => {
+    vi.mocked(logError).mockClear();
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("DEFAULT_OLLAMA_HEALTHY_TIMEOUT_MS is 600s", () => {
+    expect(DEFAULT_OLLAMA_HEALTHY_TIMEOUT_MS).toBe(600_000);
+  });
+
+  it("on timeout logs timeout_ms only and omits ollama URL from error", async () => {
+    vi.useFakeTimers();
+    try {
+      const proxyUrl = "https://hkozxlbwkzbudu-11434.proxy.runpod.net";
+      vi.mocked(fetch).mockRejectedValue(new Error("connection refused"));
+
+      const healthyPromise = waitForOllamaHealthy(proxyUrl, 50, 10);
+      const rejection = expect(healthyPromise).rejects.toThrow(
+        "Timeout waiting for Ollama to be healthy",
+      );
+
+      await vi.advanceTimersByTimeAsync(60);
+      await rejection;
+
+      expect(vi.mocked(logError)).toHaveBeenCalledWith("Timeout waiting for Ollama to be healthy", {
+        timeout_ms: 50,
+      });
+      const errorLogAttrs = vi.mocked(logError).mock.calls[0]?.[1] ?? {};
+      expect(Object.keys(errorLogAttrs)).toEqual(["timeout_ms"]);
+      expect(JSON.stringify(errorLogAttrs)).not.toContain("proxy.runpod.net");
+      expect(JSON.stringify(errorLogAttrs)).not.toContain("hkozxlbwkzbudu");
+    } finally {
+      vi.useRealTimers();
     }
   });
 });
