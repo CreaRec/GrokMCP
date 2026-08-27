@@ -1,11 +1,12 @@
-import { logInfo, logErrorWithCause, logWarn } from "./telemetry.js";
+import { logInfo, logError, logErrorWithCause, logWarn } from "./telemetry.js";
 
 const RUNPOD_API_BASE = "https://api.runpod.io/graphql";
 
 /** Default: 6 attempts ~2 minutes apart ≈ 10–12 minutes total. */
 export const DEFAULT_START_ATTEMPTS = 6;
 export const DEFAULT_START_RETRY_MS = 120_000;
-export const DEFAULT_OLLAMA_HEALTHY_TIMEOUT_MS = 180_000;
+/** Cold ollama/ollama on a new Secure GPU can exceed 3 minutes before /api/tags responds. */
+export const DEFAULT_OLLAMA_HEALTHY_TIMEOUT_MS = 600_000;
 /**
  * Short poll for GraphQL runtime.ports after RUNNING.
  * Secure Cloud HTTP (`ports: "N/http"`) often never publishes ip/publicPort;
@@ -449,7 +450,8 @@ export async function waitForOllamaHealthy(
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
   }
 
-  throw new Error(`Timeout waiting for Ollama to be healthy at ${ollamaUrl}`);
+  logError("Timeout waiting for Ollama to be healthy", { timeout_ms: timeoutMs });
+  throw new Error("Timeout waiting for Ollama to be healthy");
 }
 
 export async function pullModelIfMissing(

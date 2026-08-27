@@ -42,7 +42,7 @@ export function getConfig(): Config {
   const containerDiskRaw = process.env.RUNPOD_CONTAINER_DISK_GB ?? "80";
   const parsedContainerDisk = parseInt(containerDiskRaw, 10);
 
-  const ollamaHealthyRaw = process.env.RUNPOD_OLLAMA_HEALTHY_TIMEOUT_MS ?? "180000";
+  const ollamaHealthyRaw = process.env.RUNPOD_OLLAMA_HEALTHY_TIMEOUT_MS ?? "600000";
   const parsedOllamaHealthy = parseInt(ollamaHealthyRaw, 10);
 
   // Short GraphQL ports poll; empty HTTP ports fall back to proxy.runpod.net.
@@ -72,7 +72,7 @@ export function getConfig(): Config {
     runpodDataCenterId: process.env.RUNPOD_DATA_CENTER_ID ?? null,
     runpodOllamaPort: parseInt(process.env.RUNPOD_OLLAMA_PORT ?? "11434", 10),
     runpodOllamaHealthyTimeoutMs:
-      Number.isFinite(parsedOllamaHealthy) && parsedOllamaHealthy > 0 ? parsedOllamaHealthy : 180_000,
+      Number.isFinite(parsedOllamaHealthy) && parsedOllamaHealthy > 0 ? parsedOllamaHealthy : 600_000,
     runpodOllamaPortsTimeoutMs:
       Number.isFinite(parsedOllamaPorts) && parsedOllamaPorts > 0 ? parsedOllamaPorts : 15_000,
     runpodLeaveRunning: process.env.RUNPOD_LEAVE_RUNNING === "1",
