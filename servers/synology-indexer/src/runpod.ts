@@ -305,19 +305,17 @@ export function getOllamaUrlFromPod(pod: PodInfo, ollamaPort: number): string | 
   return `http://${ollamaPortInfo.ip}:${ollamaPortInfo.publicPort}`;
 }
 
-/** Safe port summary for logs — never includes ip / proxy host tokens. */
+/** Safe port summary for logs — scalars only; never includes ip / proxy host tokens. */
 export function summarizePodPortsSafe(pod: PodInfo | null): {
   port_count: number;
-  ports: Array<{ privatePort: number; publicPort: number; type: string }>;
+  ports_summary: string;
 } {
   const ports = pod?.runtime?.ports ?? [];
   return {
     port_count: ports.length,
-    ports: ports.map((p) => ({
-      privatePort: p.privatePort,
-      publicPort: p.publicPort,
-      type: p.type,
-    })),
+    ports_summary: ports
+      .map((p) => `${p.privatePort}/${p.type}->${p.publicPort}`)
+      .join(","),
   };
 }
 

@@ -600,19 +600,27 @@ describe("getOllamaUrlFromPod / summarizePodPortsSafe", () => {
     expect(getOllamaUrlFromPod(podTcp, 11434)).toBe("http://1.2.3.4:222");
   });
 
-  it("summarizePodPortsSafe omits ips", () => {
+  it("summarizePodPortsSafe omits ips and is LogAttributes-compatible", () => {
     const summary = summarizePodPortsSafe({
       id: POD_ID,
       desiredStatus: "RUNNING",
       runtime: {
-        ports: [{ ip: "secret-proxy-host.example", publicPort: 12345, privatePort: 11434, type: "http" }],
+        ports: [
+          { ip: "secret-proxy-host.example", publicPort: 12345, privatePort: 11434, type: "http" },
+          { ip: "another-secret", publicPort: 2222, privatePort: 22, type: "tcp" },
+        ],
       },
     });
     expect(summary).toEqual({
-      port_count: 1,
-      ports: [{ privatePort: 11434, publicPort: 12345, type: "http" }],
+      port_count: 2,
+      ports_summary: "11434/http->12345,22/tcp->2222",
     });
     expect(JSON.stringify(summary)).not.toContain("secret-proxy-host");
+    expect(JSON.stringify(summary)).not.toContain("another-secret");
+    // LogAttributes only allows string | number | boolean
+    for (const value of Object.values(summary)) {
+      expect(["string", "number", "boolean"]).toContain(typeof value);
+    }
   });
 });
 
