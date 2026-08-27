@@ -17,6 +17,11 @@ RUN DATABASE_URL="postgresql://build:build@localhost:5432/build" npx prisma gene
 FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
+ENV TRANSFORMERS_CACHE=/app/.cache/transformers
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  libgomp1 \
+  && rm -rf /var/lib/apt/lists/*
 
 COPY .npmrc package.json package-lock.json prisma.config.ts ./
 COPY prisma/ ./prisma/
@@ -25,5 +30,6 @@ RUN --mount=type=secret,id=NODE_AUTH_TOKEN \
   DATABASE_URL="postgresql://build:build@localhost:5432/build" npx prisma generate && \
   npm cache clean --force
 COPY --from=builder /app/dist ./dist
+RUN mkdir -p /app/.cache/transformers && chown -R node:node /app/.cache
 USER node
 CMD ["node", "dist/index.js"]

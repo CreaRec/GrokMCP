@@ -16,6 +16,7 @@
     "@crearec/otel": "^0.0.3",
     "@prisma/adapter-pg": "^7.9.1",
     "@prisma/client": "^7.9.1",
+    "@xenova/transformers": "^2.17.2",
     "debug": "^4.4.3",
     "pg": "^8.23.0",
     "prisma": "^7.9.1"
