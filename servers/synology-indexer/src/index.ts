@@ -531,7 +531,7 @@ export async function runIndex(
       }
       if (config.ollamaBaseUrl) {
         logWarn(
-          "OLLAMA_BASE_URL is ignored when RunPod ephemeral GPU is configured; deriving URL from pod ports",
+          "OLLAMA_BASE_URL is ignored when RunPod ephemeral GPU is configured; using RunPod HTTP proxy for the created pod",
         );
       }
       logInfo("using RunPod ephemeral GPU pod");
@@ -546,7 +546,6 @@ export async function runIndex(
         dataCenterId: config.runpodDataCenterId,
         podName: "synology-indexer-ollama",
         ollamaHealthyTimeoutMs: config.runpodOllamaHealthyTimeoutMs,
-        ollamaPortsTimeoutMs: config.runpodOllamaPortsTimeoutMs,
       };
 
       // Never pass OLLAMA_BASE_URL into ephemeral RunPod — it may point at a terminated sticky pod.

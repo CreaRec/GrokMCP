@@ -6,12 +6,9 @@ import {
   buildDeployInput,
   isRetryablePodStartError,
   getStartPodRetryDefaults,
-  getOllamaUrlFromPod,
   buildRunPodProxyOllamaUrl,
-  summarizePodPortsSafe,
   DEFAULT_START_ATTEMPTS,
   DEFAULT_START_RETRY_MS,
-  DEFAULT_OLLAMA_PORTS_TIMEOUT_MS,
   DEFAULT_OLLAMA_HEALTHY_TIMEOUT_MS,
   waitForOllamaHealthy,
   type RunPodDeployConfig,
@@ -53,7 +50,6 @@ function makeDeployConfig(overrides: Partial<RunPodDeployConfig> = {}): RunPodDe
     dataCenterId: null,
     podName: "synology-indexer-ollama",
     ollamaHealthyTimeoutMs: DEFAULT_OLLAMA_HEALTHY_TIMEOUT_MS,
-    ollamaPortsTimeoutMs: DEFAULT_OLLAMA_PORTS_TIMEOUT_MS,
     ...overrides,
   };
 }
@@ -424,8 +420,10 @@ describe("withGpuPod lifecycle", () => {
     expect(terminateBodies).toHaveLength(0);
   });
 
-  it("uses GraphQL-derived URL when ports publish privatePort mapping", async () => {
+  it("uses RunPod HTTP proxy URL when GraphQL ports publish privatePort mapping", async () => {
     const fetchMock = vi.mocked(fetch);
+    const podId = "vxpmzql6za084k";
+    const proxyUrl = buildRunPodProxyOllamaUrl(podId, 11434);
     const derivedHost = "http://10.0.0.5:23456";
     const healthUrls: string[] = [];
 
@@ -438,7 +436,7 @@ describe("withGpuPod lifecycle", () => {
       if (body.includes("podFindAndDeployOnDemand")) {
         return jsonResponse({
           data: {
-            podFindAndDeployOnDemand: { id: "vxpmzql6za084k", desiredStatus: "RUNNING" },
+            podFindAndDeployOnDemand: { id: podId, desiredStatus: "RUNNING" },
           },
         });
       }
@@ -446,7 +444,7 @@ describe("withGpuPod lifecycle", () => {
         return jsonResponse({
           data: {
             pod: {
-              id: "vxpmzql6za084k",
+              id: podId,
               desiredStatus: "RUNNING",
               runtime: {
                 ports: [{ ip: "10.0.0.5", publicPort: 23456, privatePort: 11434, type: "http" }],
@@ -463,7 +461,8 @@ describe("withGpuPod lifecycle", () => {
     });
 
     const fn = vi.fn(async (ollamaUrl: string) => {
-      expect(ollamaUrl).toBe(derivedHost);
+      expect(ollamaUrl).toBe(proxyUrl);
+      expect(ollamaUrl).not.toBe(derivedHost);
       return "ok";
     });
 
@@ -471,10 +470,11 @@ describe("withGpuPod lifecycle", () => {
       leaveRunning: false,
     });
 
-    expect(fn).toHaveBeenCalledWith(derivedHost);
-    expect(healthUrls.some((u) => u.startsWith(derivedHost))).toBe(true);
+    expect(fn).toHaveBeenCalledWith(proxyUrl);
+    expect(healthUrls.some((u) => u.startsWith(proxyUrl))).toBe(true);
+    expect(healthUrls.some((u) => u.startsWith(derivedHost))).toBe(false);
     const sourceLogs = sourceLogAttributes();
-    expect(sourceLogs).toEqual([{ source: "derived" }]);
+    expect(sourceLogs).toEqual([{ source: "proxy" }]);
     for (const attrs of sourceLogs) {
       for (const value of Object.values(attrs)) {
         expect(["string", "number", "boolean"]).toContain(typeof value);
@@ -482,10 +482,11 @@ describe("withGpuPod lifecycle", () => {
     }
   });
 
-  it("with null override (runIndex ephemeral path) derives URL from new pod ports", async () => {
+  it("with null override (runIndex ephemeral path) uses proxy URL for the new pod", async () => {
     const fetchMock = vi.mocked(fetch);
+    const podId = "vxpmzql6za084k";
     const staleOverride = "https://y5m6f3oroycbs1-11434.proxy.runpod.net";
-    const derivedHost = "http://10.0.0.5:23456";
+    const proxyUrl = buildRunPodProxyOllamaUrl(podId, 11434);
     const healthUrls: string[] = [];
 
     fetchMock.mockImplementation(async (url, init) => {
@@ -497,7 +498,7 @@ describe("withGpuPod lifecycle", () => {
       if (body.includes("podFindAndDeployOnDemand")) {
         return jsonResponse({
           data: {
-            podFindAndDeployOnDemand: { id: "vxpmzql6za084k", desiredStatus: "RUNNING" },
+            podFindAndDeployOnDemand: { id: podId, desiredStatus: "RUNNING" },
           },
         });
       }
@@ -505,7 +506,7 @@ describe("withGpuPod lifecycle", () => {
         return jsonResponse({
           data: {
             pod: {
-              id: "vxpmzql6za084k",
+              id: podId,
               desiredStatus: "RUNNING",
               runtime: {
                 ports: [{ ip: "10.0.0.5", publicPort: 23456, privatePort: 11434, type: "http" }],
@@ -522,7 +523,7 @@ describe("withGpuPod lifecycle", () => {
     });
 
     const fn = vi.fn(async (ollamaUrl: string) => {
-      expect(ollamaUrl).toBe(derivedHost);
+      expect(ollamaUrl).toBe(proxyUrl);
       expect(ollamaUrl).not.toBe(staleOverride);
       return "ok";
     });
@@ -532,17 +533,17 @@ describe("withGpuPod lifecycle", () => {
       leaveRunning: false,
     });
 
-    expect(fn).toHaveBeenCalledWith(derivedHost);
-    expect(healthUrls.some((u) => u.startsWith(derivedHost))).toBe(true);
+    expect(fn).toHaveBeenCalledWith(proxyUrl);
+    expect(healthUrls.some((u) => u.startsWith(proxyUrl))).toBe(true);
     expect(healthUrls.some((u) => u.includes("y5m6f3oroycbs1"))).toBe(false);
   });
 
-  it("polls until ports publish after RUNNING with empty runtime.ports", async () => {
+  it("uses proxy immediately after RUNNING without waiting for GraphQL ports", async () => {
     const fetchMock = vi.mocked(fetch);
     let getPodCalls = 0;
     let terminateCalls = 0;
-    const derivedHost = "http://10.0.0.9:34567";
-    const sleep = vi.fn(async () => {});
+    const podId = "pxwc5peryssrjy";
+    const proxyUrl = buildRunPodProxyOllamaUrl(podId, 11434);
 
     fetchMock.mockImplementation(async (url, init) => {
       const urlStr = String(url);
@@ -554,33 +555,19 @@ describe("withGpuPod lifecycle", () => {
       if (body.includes("podFindAndDeployOnDemand")) {
         return jsonResponse({
           data: {
-            podFindAndDeployOnDemand: { id: "pxwc5peryssrjy", desiredStatus: "RUNNING" },
+            podFindAndDeployOnDemand: { id: podId, desiredStatus: "RUNNING" },
           },
         });
       }
       if (body.includes("getPod")) {
         getPodCalls++;
-        // First samples: RUNNING but ports not published yet (production failure mode).
-        if (getPodCalls <= 2) {
-          return jsonResponse({
-            data: {
-              pod: {
-                id: "pxwc5peryssrjy",
-                desiredStatus: "RUNNING",
-                runtime: getPodCalls === 1 ? null : { ports: [] },
-              },
-            },
-          });
-        }
+        // RUNNING but ports not published yet — production should still use proxy immediately.
         return jsonResponse({
           data: {
             pod: {
-              id: "pxwc5peryssrjy",
+              id: podId,
               desiredStatus: "RUNNING",
-              runtime: {
-                // tcp label still matches by privatePort
-                ports: [{ ip: "10.0.0.9", publicPort: 34567, privatePort: 11434, type: "tcp" }],
-              },
+              runtime: getPodCalls === 1 ? null : { ports: [] },
             },
           },
         });
@@ -592,30 +579,25 @@ describe("withGpuPod lifecycle", () => {
     });
 
     const fn = vi.fn(async (ollamaUrl: string) => {
-      expect(ollamaUrl).toBe(derivedHost);
-      throw new Error("vision failed after ports ready");
+      expect(ollamaUrl).toBe(proxyUrl);
+      throw new Error("vision failed after proxy ready");
     });
 
     await expect(
-      withGpuPod(
-        makeDeployConfig({ ollamaPortsTimeoutMs: 50 }),
-        null,
-        "vision",
-        "embed",
-        fn,
-        { leaveRunning: false, sleep, portsPollIntervalMs: 10 },
-      ),
-    ).rejects.toThrow("vision failed after ports ready");
+      withGpuPod(makeDeployConfig(), null, "vision", "embed", fn, {
+        leaveRunning: false,
+      }),
+    ).rejects.toThrow("vision failed after proxy ready");
 
-    expect(fn).toHaveBeenCalledWith(derivedHost);
-    expect(getPodCalls).toBeGreaterThanOrEqual(3);
+    expect(fn).toHaveBeenCalledWith(proxyUrl);
+    // getPod is only polled for RUNNING — not for GraphQL ports.
+    expect(getPodCalls).toBe(1);
     expect(terminateCalls).toBe(1);
   });
 
-  it("falls back to HTTPS proxy when RUNNING forever without GraphQL ports", async () => {
+  it("uses HTTPS proxy URL immediately after RUNNING without GraphQL ports", async () => {
     const fetchMock = vi.mocked(fetch);
     let terminateCalls = 0;
-    const sleep = vi.fn(async () => {});
     const proxyUrl = buildRunPodProxyOllamaUrl(POD_ID, 11434);
     const healthUrls: string[] = [];
 
@@ -657,21 +639,15 @@ describe("withGpuPod lifecycle", () => {
       return "ok";
     });
 
-    await withGpuPod(
-      makeDeployConfig({ ollamaPortsTimeoutMs: 30 }),
-      null,
-      "vision",
-      "embed",
-      fn,
-      { leaveRunning: false, sleep, portsPollIntervalMs: 10 },
-    );
+    await withGpuPod(makeDeployConfig(), null, "vision", "embed", fn, {
+      leaveRunning: false,
+    });
 
     expect(fn).toHaveBeenCalledWith(proxyUrl);
     expect(healthUrls.some((u) => u.startsWith(proxyUrl))).toBe(true);
     expect(terminateCalls).toBe(1);
-    expect(sleep).toHaveBeenCalled();
     const sourceLogs = sourceLogAttributes();
-    expect(sourceLogs).toEqual([{ source: "proxy_fallback" }]);
+    expect(sourceLogs).toEqual([{ source: "proxy" }]);
     for (const attrs of sourceLogs) {
       for (const value of Object.values(attrs)) {
         expect(["string", "number", "boolean"]).toContain(typeof value);
@@ -683,9 +659,8 @@ describe("withGpuPod lifecycle", () => {
     }
   });
 
-  it("falls back to proxy when ports exist but omit ollama privatePort", async () => {
+  it("uses proxy when GraphQL ports omit ollama privatePort", async () => {
     const fetchMock = vi.mocked(fetch);
-    const sleep = vi.fn(async () => {});
     const proxyUrl = buildRunPodProxyOllamaUrl("hkozxlbwkzbudu", 11434);
 
     fetchMock.mockImplementation(async (url, init) => {
@@ -726,72 +701,20 @@ describe("withGpuPod lifecycle", () => {
       return "ok";
     });
 
-    await withGpuPod(
-      makeDeployConfig({ ollamaPortsTimeoutMs: 30 }),
-      null,
-      "vision",
-      "embed",
-      fn,
-      { leaveRunning: false, sleep, portsPollIntervalMs: 10 },
-    );
+    await withGpuPod(makeDeployConfig(), null, "vision", "embed", fn, {
+      leaveRunning: false,
+    });
 
     expect(fn).toHaveBeenCalledWith(proxyUrl);
   });
 });
 
-describe("getOllamaUrlFromPod / buildRunPodProxyOllamaUrl / summarizePodPortsSafe", () => {
-  it("matches privatePort for http or tcp types", () => {
-    const podHttp = {
-      id: POD_ID,
-      desiredStatus: "RUNNING",
-      runtime: {
-        ports: [{ ip: "1.2.3.4", publicPort: 111, privatePort: 11434, type: "http" }],
-      },
-    };
-    const podTcp = {
-      id: POD_ID,
-      desiredStatus: "RUNNING",
-      runtime: {
-        ports: [{ ip: "1.2.3.4", publicPort: 222, privatePort: 11434, type: "tcp" }],
-      },
-    };
-    expect(getOllamaUrlFromPod(podHttp, 11434)).toBe("http://1.2.3.4:111");
-    expect(getOllamaUrlFromPod(podTcp, 11434)).toBe("http://1.2.3.4:222");
-  });
-
-  it("buildRunPodProxyOllamaUrl uses https and podId-port host", () => {
+describe("buildRunPodProxyOllamaUrl", () => {
+  it("uses https and podId-port host", () => {
     expect(buildRunPodProxyOllamaUrl("hkozxlbwkzbudu", 11434)).toBe(
       "https://hkozxlbwkzbudu-11434.proxy.runpod.net",
     );
     expect(buildRunPodProxyOllamaUrl("abc", 8080)).toBe("https://abc-8080.proxy.runpod.net");
-  });
-
-  it("summarizePodPortsSafe omits ips and is LogAttributes-compatible", () => {
-    const summary = summarizePodPortsSafe({
-      id: POD_ID,
-      desiredStatus: "RUNNING",
-      runtime: {
-        ports: [
-          { ip: "secret-proxy-host.example", publicPort: 12345, privatePort: 11434, type: "http" },
-          { ip: "another-secret", publicPort: 2222, privatePort: 22, type: "tcp" },
-        ],
-      },
-    });
-    expect(summary).toEqual({
-      port_count: 2,
-      ports_summary: "11434/http->12345,22/tcp->2222",
-    });
-    expect(JSON.stringify(summary)).not.toContain("secret-proxy-host");
-    expect(JSON.stringify(summary)).not.toContain("another-secret");
-    // LogAttributes only allows string | number | boolean
-    for (const value of Object.values(summary)) {
-      expect(["string", "number", "boolean"]).toContain(typeof value);
-    }
-
-    const sourceAttrs: LogAttributes = { source: "proxy_fallback" };
-    for (const value of Object.values(sourceAttrs)) {
-      expect(["string", "number", "boolean"]).toContain(typeof value);
-    }
   });
 });
 
