@@ -136,6 +136,10 @@ services:
       - OTEL_SERVICE_NAMESPACE=${OTEL_SERVICE_NAMESPACE:-mcp}
       - DEPLOY_ENV=${DEPLOY_ENV:-production}
       - OTEL_SERVICE_VERSION=${SYNOLOGY_INDEXER_OTEL_SERVICE_VERSION:-}
+    group_add:
+      # Host docker group GID — required to rw the bind-mounted socket (mode 660).
+      # Set DOCKER_GID in .env (stat -c %g /var/run/docker.sock or getent group docker).
+      - "${DOCKER_GID:-995}"
     volumes:
       - ${SYNOLOGY_MOUNT_PATH:-/mnt/synology/Documents}:/mnt/synology/Documents:ro
       # Ephemeral docling-serve lifecycle: indexer starts/stops the sidecar per index run.
