@@ -7,7 +7,8 @@ A monorepo of custom MCP (Model Context Protocol) servers for Grok Bot.
 ```
 GrokMCP/
 ├── servers/
-│   └── apple-calendar/   # Apple Calendar (iCloud CalDAV) MCP
+│   ├── apple-calendar/   # Apple Calendar (iCloud CalDAV) MCP
+│   └── utilities/        # CreaDashboard utility bills MCP
 ├── docker-compose.yml    # Production deployment
 ├── docs/
 │   └── deploy.md         # Deployment guide
@@ -39,6 +40,15 @@ iCloud CalDAV integration for listing, creating, updating, and deleting calendar
 Official [Grafana MCP server](https://grafana.com/docs/grafana/latest/developer-resources/mcp/) for querying dashboards, Prometheus metrics, Loki logs, and more.
 
 Uses the upstream Docker image `grafana/mcp-grafana` (no custom code in this repo). See **[docs/deploy.md](./docs/deploy.md)** for setup.
+
+### [Utilities](./servers/utilities/)
+
+Read-only MCP server for monthly electricity, water, and gas bills from the CreaDashboard REST API.
+
+**Tool:**
+- `utility_bills` — Latest vs previous billed month with cost/consumption deltas
+
+**Env:** `DASHBOARD_API_URL` (default in compose: `http://192.168.1.135:3080`), port **8795**
 
 ## Adding a New Server
 

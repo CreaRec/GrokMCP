@@ -151,6 +151,34 @@ services:
       - default
       - lgtm
 
+  utilities:
+    image: ${UTILITIES_IMAGE:-ghcr.io/crearec/grok-mcp-utilities}:${UTILITIES_IMAGE_TAG:-main}
+    container_name: grok-mcp-utilities
+    restart: unless-stopped
+    ports:
+      - "8795:8795"
+    env_file:
+      - .env
+    environment:
+      - PORT=8795
+      - HOST=0.0.0.0
+      - DASHBOARD_API_URL=${DASHBOARD_API_URL:-http://192.168.1.135:3080}
+      - USER_TIMEZONE=${USER_TIMEZONE:-America/Chicago}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://alloy:4318}
+      - OTEL_SERVICE_NAME=${UTILITIES_OTEL_SERVICE_NAME:-utilities}
+      - OTEL_SERVICE_NAMESPACE=${OTEL_SERVICE_NAMESPACE:-mcp}
+      - DEPLOY_ENV=${DEPLOY_ENV:-production}
+      - OTEL_SERVICE_VERSION=${UTILITIES_OTEL_SERVICE_VERSION:-}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8795/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - default
+      - lgtm
+
   # Docling is NOT started by `docker compose up -d` (profile + restart: "no").
   # The synology-indexer starts this container when a run has docling-routed dirty files,
   # then stops it in a finally block. First deploy: create without starting:
