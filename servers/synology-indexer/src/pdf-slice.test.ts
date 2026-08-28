@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { mkdtemp, rm, access } from "node:fs/promises";
+import { mkdtemp, rm, access, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -9,6 +9,12 @@ vi.mock("node:child_process", () => ({
   execFile: (...args: unknown[]) => execFileMock(...args),
 }));
 
+vi.mock("./telemetry.js", () => ({
+  logInfo: vi.fn(),
+  logErrorWithCause: vi.fn(),
+}));
+
+import { logInfo, logErrorWithCause } from "./telemetry.js";
 import {
   clampGistPageEnd,
   isPdfPath,
@@ -54,16 +60,28 @@ describe("clampGistPageEnd", () => {
 describe("slicePdfToGist / preparePdfGistForDocling", () => {
   beforeEach(() => {
     execFileMock.mockReset();
+    vi.mocked(logInfo).mockReset();
+    vi.mocked(logErrorWithCause).mockReset();
   });
 
-  function mockExecSuccess(stdoutByCmd: (cmd: string, args: string[]) => string = () => "") {
+  function mockExecSuccess(
+    stdoutByCmd: (cmd: string, args: string[]) => string = () => "",
+    opts: { writeDest?: boolean } = {},
+  ) {
+    const writeDest = opts.writeDest ?? false;
     execFileMock.mockImplementation(
       (
         cmd: string,
         args: string[],
         cb: (err: Error | null, stdout: string, stderr: string) => void,
       ) => {
-        cb(null, stdoutByCmd(cmd, args), "");
+        void (async () => {
+          if (writeDest && args.includes("--pages")) {
+            const dest = args[args.length - 1];
+            await writeFile(dest, Buffer.alloc(128, 0x25));
+          }
+          cb(null, stdoutByCmd(cmd, args), "");
+        })();
         return {};
       },
     );
@@ -94,9 +112,10 @@ describe("slicePdfToGist / preparePdfGistForDocling", () => {
       sliced: false,
     });
     expect(execFileMock).not.toHaveBeenCalled();
+    expect(logInfo).not.toHaveBeenCalled();
   });
 
-  it("skips slice when PDF already has ≤ N pages", async () => {
+  it("skips slice when PDF already has ≤ N pages and logs skip", async () => {
     mockExecSuccess((_cmd, args) => (args.includes("--show-npages") ? "3\n" : ""));
 
     const result = await preparePdfGistForDocling("/mnt/synology/Documents/short.pdf", 5);
@@ -108,10 +127,18 @@ describe("slicePdfToGist / preparePdfGistForDocling", () => {
     const [cmd, args] = execFileMock.mock.calls[0] as [string, string[]];
     expect(cmd).toBe("qpdf");
     expect(args).toEqual(["--show-npages", "/mnt/synology/Documents/short.pdf"]);
+
+    expect(logInfo).toHaveBeenCalledWith("pdf gist skipped", {
+      source: "short.pdf",
+      reason: "already_short",
+      page_count: 3,
+    });
   });
 
-  it("slices long PDFs with qpdf 1..N and cleans temp on cleanupPdfGistTemp", async () => {
-    mockExecSuccess((_cmd, args) => (args.includes("--show-npages") ? "42\n" : ""));
+  it("slices long PDFs with qpdf 1..N, logs dest + bytes, cleans temp on cleanup", async () => {
+    mockExecSuccess((_cmd, args) => (args.includes("--show-npages") ? "42\n" : ""), {
+      writeDest: true,
+    });
 
     const result = await preparePdfGistForDocling(
       "/mnt/synology/Documents/Full time Offer - Stoke Space.pdf",
@@ -135,11 +162,19 @@ describe("slicePdfToGist / preparePdfGistForDocling", () => {
       result.filePath,
     ]);
 
+    expect(logInfo).toHaveBeenCalledWith("pdf gist sliced", {
+      source: "Full time Offer - Stoke Space.pdf",
+      dest: result.filePath,
+      gist_bytes: 128,
+      gist_pages_end: 5,
+      sliced: true,
+    });
+
     await cleanupPdfGistTemp(result.tempDir!);
     await expect(access(result.tempDir!)).rejects.toThrow();
   });
 
-  it("deletes temp dir when qpdf slice fails", async () => {
+  it("logs error then deletes temp dir when qpdf slice fails", async () => {
     let sliceAttempted = false;
     execFileMock.mockImplementation(
       (
@@ -160,6 +195,18 @@ describe("slicePdfToGist / preparePdfGistForDocling", () => {
     const parentBefore = await mkdtemp(join(tmpdir(), "pdf-gist-fail-"));
     await expect(preparePdfGistForDocling("/mnt/synology/Documents/bad.pdf", 5)).rejects.toThrow();
     expect(sliceAttempted).toBe(true);
+    expect(logErrorWithCause).toHaveBeenCalledWith(
+      "pdf gist slice failed",
+      expect.any(Error),
+      expect.objectContaining({
+        source: "bad.pdf",
+        gist_pages_end: 5,
+      }),
+    );
+    expect(logInfo).not.toHaveBeenCalledWith(
+      "pdf gist sliced",
+      expect.anything(),
+    );
     await rm(parentBefore, { recursive: true, force: true });
   });
 
