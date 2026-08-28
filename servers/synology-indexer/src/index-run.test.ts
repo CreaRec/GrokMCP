@@ -32,7 +32,6 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     runpodDataCenterId: null,
     runpodOllamaPort: 11434,
     runpodOllamaHealthyTimeoutMs: 600_000,
-    runpodOllamaPortsTimeoutMs: 15_000,
     runpodLeaveRunning: false,
     doclingServeUrl: "http://docling-serve:5001",
     ...overrides,
