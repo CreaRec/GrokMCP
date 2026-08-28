@@ -26,24 +26,65 @@ interface DockerApiResponse {
   body: string;
 }
 
+export type DockerSocketAccessResult =
+  | { accessible: true }
+  | { accessible: false; reason: "missing" }
+  | { accessible: false; reason: "permission_denied" };
+
 export interface DoclingSidecarDeps {
   dockerRequest?: (method: string, path: string) => Promise<DockerApiResponse>;
   fetchHealth?: (url: string) => Promise<Response>;
   sleep?: (ms: number) => Promise<void>;
-  socketAccessible?: (path: string) => Promise<boolean>;
+  checkSocketAccess?: (path: string) => Promise<DockerSocketAccessResult>;
 }
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function defaultSocketAccessible(socketPath: string): Promise<boolean> {
+/** Check whether the Docker socket exists and is readable/writable. */
+export async function checkDockerSocketAccess(
+  socketPath: string,
+): Promise<DockerSocketAccessResult> {
+  try {
+    await access(socketPath, constants.F_OK);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      return { accessible: false, reason: "missing" };
+    }
+    return { accessible: false, reason: "missing" };
+  }
+
   try {
     await access(socketPath, constants.R_OK | constants.W_OK);
-    return true;
-  } catch {
-    return false;
+    return { accessible: true };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "EACCES" || code === "EPERM") {
+      return { accessible: false, reason: "permission_denied" };
+    }
+    return { accessible: false, reason: "permission_denied" };
   }
+}
+
+function dockerSocketUnavailableError(
+  socketPath: string,
+  containerName: string,
+  reason: "missing" | "permission_denied",
+): Error {
+  const prefix =
+    `Docker socket unavailable at ${socketPath}; cannot start Docling sidecar ${containerName}.`;
+  if (reason === "missing") {
+    return new Error(
+      `${prefix} Mount /var/run/docker.sock into synology-indexer (see docker-compose.yml).`,
+    );
+  }
+  return new Error(
+    `${prefix} Socket is mounted but not readable/writable (EACCES). ` +
+      "Add the host docker group to synology-indexer via group_add and set DOCKER_GID in .env " +
+      "(host: stat -c %g /var/run/docker.sock or getent group docker; see .env.example).",
+  );
 }
 
 function createDockerRequest(socketPath: string) {
@@ -113,11 +154,13 @@ export async function startDoclingContainer(
   config: DoclingSidecarConfig,
   deps: DoclingSidecarDeps = {},
 ): Promise<void> {
-  const socketAccessible = deps.socketAccessible ?? defaultSocketAccessible;
-  if (!(await socketAccessible(config.dockerSocketPath))) {
-    throw new Error(
-      `Docker socket unavailable at ${config.dockerSocketPath}; cannot start Docling sidecar ${config.containerName}. ` +
-        "Mount /var/run/docker.sock into synology-indexer (see docker-compose.yml).",
+  const checkSocketAccess = deps.checkSocketAccess ?? checkDockerSocketAccess;
+  const socketAccess = await checkSocketAccess(config.dockerSocketPath);
+  if (!socketAccess.accessible) {
+    throw dockerSocketUnavailableError(
+      config.dockerSocketPath,
+      config.containerName,
+      socketAccess.reason,
     );
   }
 

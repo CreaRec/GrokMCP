@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { access } from "node:fs/promises";
 import {
   withDoclingSidecar,
   startDoclingContainer,
@@ -6,11 +7,20 @@ import {
   waitForDoclingHealthy,
   inspectDoclingContainer,
   indexRunNeedsDocling,
+  checkDockerSocketAccess,
   DEFAULT_DOCLING_HEALTHY_TIMEOUT_MS,
   type DoclingSidecarConfig,
   type DoclingSidecarDeps,
 } from "./docling-sidecar.js";
 import { logInfo, logError } from "./telemetry.js";
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    access: vi.fn(actual.access),
+  };
+});
 
 vi.mock("./telemetry.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./telemetry.js")>();
@@ -71,20 +81,65 @@ describe("inspectDoclingContainer", () => {
   });
 });
 
+describe("checkDockerSocketAccess", () => {
+  beforeEach(() => {
+    vi.mocked(access).mockReset();
+  });
+
+  it("reports accessible when read/write succeeds", async () => {
+    vi.mocked(access).mockResolvedValue(undefined);
+
+    await expect(checkDockerSocketAccess("/var/run/docker.sock")).resolves.toEqual({
+      accessible: true,
+    });
+  });
+
+  it("reports missing when the socket path does not exist", async () => {
+    vi.mocked(access).mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+
+    await expect(checkDockerSocketAccess("/var/run/docker.sock")).resolves.toEqual({
+      accessible: false,
+      reason: "missing",
+    });
+  });
+
+  it("reports permission_denied when the socket exists but is not rw", async () => {
+    vi.mocked(access)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(Object.assign(new Error("EACCES"), { code: "EACCES" }));
+
+    await expect(checkDockerSocketAccess("/var/run/docker.sock")).resolves.toEqual({
+      accessible: false,
+      reason: "permission_denied",
+    });
+  });
+});
+
 describe("startDoclingContainer", () => {
-  it("fails fast when docker socket is unavailable", async () => {
+  it("fails fast when docker socket is missing", async () => {
     await expect(
       startDoclingContainer(makeConfig(), {
-        socketAccessible: async () => false,
+        checkSocketAccess: async () => ({ accessible: false, reason: "missing" }),
       }),
-    ).rejects.toThrow("Docker socket unavailable");
+    ).rejects.toThrow("Mount /var/run/docker.sock");
+  });
+
+  it("mentions group_add and DOCKER_GID when socket exists but access is denied", async () => {
+    await expect(
+      startDoclingContainer(makeConfig(), {
+        checkSocketAccess: async () => ({
+          accessible: false,
+          reason: "permission_denied",
+        }),
+      }),
+    ).rejects.toThrow(/group_add.*DOCKER_GID/s);
   });
 
   it("fails clearly when container does not exist", async () => {
     const dockerRequest = vi.fn().mockResolvedValue({ statusCode: 404, body: "" });
     await expect(
       startDoclingContainer(makeConfig(), {
-        socketAccessible: async () => true,
+        checkSocketAccess: async () => ({ accessible: true }),
         dockerRequest,
       }),
     ).rejects.toThrow("not found");
@@ -98,7 +153,7 @@ describe("startDoclingContainer", () => {
       .mockResolvedValueOnce({ statusCode: 204, body: "" });
 
     await startDoclingContainer(makeConfig(), {
-      socketAccessible: async () => true,
+      checkSocketAccess: async () => ({ accessible: true }),
       dockerRequest,
     });
 
@@ -118,7 +173,7 @@ describe("startDoclingContainer", () => {
     });
 
     await startDoclingContainer(makeConfig(), {
-      socketAccessible: async () => true,
+      checkSocketAccess: async () => ({ accessible: true }),
       dockerRequest,
     });
 
@@ -175,7 +230,7 @@ describe("withDoclingSidecar lifecycle", () => {
   beforeEach(() => {
     vi.mocked(logInfo).mockClear();
     deps = {
-      socketAccessible: async () => true,
+      checkSocketAccess: async () => ({ accessible: true }),
       dockerRequest: vi
         .fn()
         .mockResolvedValueOnce({ statusCode: 200, body: stoppedInspectBody() })
