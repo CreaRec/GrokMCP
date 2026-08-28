@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libheif1 \
   libheif-examples \
   imagemagick \
+  qpdf \
   && rm -rf /var/lib/apt/lists/*
 
 COPY .npmrc package.json package-lock.json prisma.config.ts ./
