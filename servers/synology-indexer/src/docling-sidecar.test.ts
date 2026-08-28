@@ -8,6 +8,8 @@ import {
   inspectDoclingContainer,
   indexRunNeedsDocling,
   checkDockerSocketAccess,
+  dockerContainerId,
+  dockerContainerResourcePath,
   DEFAULT_DOCLING_HEALTHY_TIMEOUT_MS,
   type DoclingSidecarConfig,
   type DoclingSidecarDeps,
@@ -64,7 +66,34 @@ describe("indexRunNeedsDocling", () => {
   });
 });
 
+describe("dockerContainerResourcePath", () => {
+  it("uses the Engine {id} without a leading slash (no %2F)", () => {
+    expect(dockerContainerId(CONTAINER)).toBe(CONTAINER);
+    expect(dockerContainerId(`/${CONTAINER}`)).toBe(CONTAINER);
+    expect(dockerContainerResourcePath(CONTAINER, "/json")).toBe(
+      `/containers/${CONTAINER}/json`,
+    );
+    expect(dockerContainerResourcePath(`/${CONTAINER}`, "json")).toBe(
+      `/containers/${CONTAINER}/json`,
+    );
+    expect(dockerContainerResourcePath(CONTAINER, "/json")).not.toContain("%2F");
+  });
+});
+
 describe("inspectDoclingContainer", () => {
+  it("inspects via /containers/<name>/json without encoding a leading slash", async () => {
+    const dockerRequest = vi.fn().mockResolvedValue({
+      statusCode: 200,
+      body: runningInspectBody(),
+    });
+    await inspectDoclingContainer(makeConfig(), { dockerRequest });
+    expect(dockerRequest).toHaveBeenCalledWith(
+      "GET",
+      `/containers/${CONTAINER}/json`,
+    );
+    expect(String(dockerRequest.mock.calls[0]?.[1])).not.toContain("%2F");
+  });
+
   it("reports missing container on 404", async () => {
     const dockerRequest = vi.fn().mockResolvedValue({ statusCode: 404, body: "" });
     const result = await inspectDoclingContainer(makeConfig(), { dockerRequest });
@@ -78,6 +107,13 @@ describe("inspectDoclingContainer", () => {
     });
     const result = await inspectDoclingContainer(makeConfig(), { dockerRequest });
     expect(result).toEqual({ exists: true, running: true });
+  });
+
+  it("treats leftover 301 as a path bug", async () => {
+    const dockerRequest = vi.fn().mockResolvedValue({ statusCode: 301, body: "" });
+    await expect(inspectDoclingContainer(makeConfig(), { dockerRequest })).rejects.toThrow(
+      /HTTP 301.*unexpected redirect/,
+    );
   });
 });
 
@@ -159,7 +195,10 @@ describe("startDoclingContainer", () => {
 
     expect(dockerRequest).toHaveBeenCalledTimes(2);
     expect(dockerRequest.mock.calls[1]?.[0]).toBe("POST");
-    expect(String(dockerRequest.mock.calls[1]?.[1])).toContain("/start");
+    expect(String(dockerRequest.mock.calls[1]?.[1])).toBe(
+      `/containers/${CONTAINER}/start`,
+    );
+    expect(String(dockerRequest.mock.calls[1]?.[1])).not.toContain("%2F");
     expect(vi.mocked(logInfo)).toHaveBeenCalledWith(
       "docling sidecar starting",
       expect.objectContaining({ container: CONTAINER }),
