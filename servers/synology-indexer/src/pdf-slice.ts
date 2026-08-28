@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 import { tmpdir } from "node:os";
+import { logErrorWithCause, logInfo } from "./telemetry.js";
 
 /** Default last page (inclusive) when endPage is missing/invalid — keep in sync with docling-client. */
 export const DEFAULT_PDF_GIST_PAGE_END = 5;
@@ -80,6 +81,7 @@ export async function preparePdfGistForDocling(
     return { filePath: srcPath, tempDir: null, sliced: false };
   }
 
+  const source = basename(srcPath);
   const end = clampGistPageEnd(endPage);
   let pageCount: number;
   try {
@@ -90,19 +92,38 @@ export async function preparePdfGistForDocling(
   }
 
   if (pageCount <= end) {
+    logInfo("pdf gist skipped", {
+      source,
+      reason: "already_short",
+      page_count: pageCount,
+    });
     return { filePath: srcPath, tempDir: null, sliced: false };
   }
 
   const tempDir = await mkdtemp(join(tmpdir(), "synology-pdf-gist-"));
-  const stem = basename(srcPath).replace(/\.pdf$/i, "") || "document";
+  const stem = source.replace(/\.pdf$/i, "") || "document";
   const destPath = join(tempDir, `${stem}.gist-1-${end}.pdf`);
 
   try {
     await slicePdfToGist(srcPath, destPath, end);
   } catch (err) {
+    logErrorWithCause("pdf gist slice failed", err, {
+      source,
+      dest: destPath,
+      gist_pages_end: end,
+    });
     await cleanupPdfGistTemp(tempDir);
     throw err;
   }
+
+  const { size } = await stat(destPath);
+  logInfo("pdf gist sliced", {
+    source,
+    dest: destPath,
+    gist_bytes: size,
+    gist_pages_end: end,
+    sliced: true,
+  });
 
   return { filePath: destPath, tempDir, sliced: true };
 }
