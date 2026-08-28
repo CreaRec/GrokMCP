@@ -34,6 +34,10 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     runpodOllamaHealthyTimeoutMs: 600_000,
     runpodLeaveRunning: false,
     doclingServeUrl: "http://docling-serve:5001",
+    doclingContainerName: "grok-mcp-docling-serve",
+    doclingHealthyTimeoutMs: 300_000,
+    doclingLeaveRunning: false,
+    dockerSocketPath: "/var/run/docker.sock",
     ...overrides,
   };
 }
