@@ -1,15 +1,19 @@
-export type IndexWorkKind = "none" | "gpu_vision" | "cpu_folders";
+export type IndexWorkKind = "none" | "gpu_vision" | "cpu_embed" | "cpu_folders";
 
-/** Decide whether to skip, start RunPod for vision, or rebuild folders on CPU only. */
+/** Decide whether to skip, start RunPod for qwen, CPU-embed text files, or rebuild folders only. */
 export function planIndexWork(
-  visionFileCount: number,
+  qwenFileCount: number,
+  textEmbedFileCount: number,
   dirtyFolderCount: number,
 ): IndexWorkKind {
-  if (visionFileCount === 0 && dirtyFolderCount === 0) {
+  if (qwenFileCount === 0 && textEmbedFileCount === 0 && dirtyFolderCount === 0) {
     return "none";
   }
-  if (visionFileCount > 0) {
+  if (qwenFileCount > 0) {
     return "gpu_vision";
+  }
+  if (textEmbedFileCount > 0) {
+    return "cpu_embed";
   }
   return "cpu_folders";
 }

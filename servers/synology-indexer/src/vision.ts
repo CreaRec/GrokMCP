@@ -32,47 +32,7 @@ function redactPii(text: string): { text: string; wasRedacted: boolean } {
   return { text: redacted, wasRedacted };
 }
 
-export async function describeWithVision(
-  filePath: string,
-  ollamaBaseUrl: string,
-  model: string,
-): Promise<VisionResult> {
-  const fileBuffer = await readFile(filePath);
-  const base64 = fileBuffer.toString("base64");
-  const fileName = basename(filePath);
-
-  const prompt = `Describe this document or image. Provide:
-1. A short label (under 100 characters) suitable for display
-2. A detailed description (2-3 sentences) of the content
-
-IMPORTANT: Do NOT include any:
-- Passport numbers
-- Social Security Numbers (SSN)
-- Bank account numbers
-- Driver's license numbers
-
-Format your response as:
-LABEL: [short label]
-DESCRIPTION: [detailed description]`;
-
-  const response = await fetch(`${ollamaBaseUrl}/api/generate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model,
-      prompt,
-      images: [base64],
-      stream: false,
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Ollama API error: ${response.status} ${response.statusText}`);
-  }
-
-  const result = (await response.json()) as { response: string };
-  const text = result.response;
-
+function parseVisionResponse(text: string, fileName: string): VisionResult {
   const labelMatch = text.match(/LABEL:\s*(.+?)(?:\n|DESCRIPTION:|$)/i);
   const descMatch = text.match(/DESCRIPTION:\s*(.+?)$/is);
 
@@ -92,6 +52,94 @@ DESCRIPTION: [detailed description]`;
     redacted: labelRedact.wasRedacted || descRedact.wasRedacted,
   };
 }
+
+const PII_EXCLUSION = `IMPORTANT: Do NOT include any:
+- Passport numbers
+- Social Security Numbers (SSN)
+- Bank account numbers
+- Driver's license numbers`;
+
+const RESPONSE_FORMAT = `Format your response as:
+LABEL: [short label]
+DESCRIPTION: [detailed description]`;
+
+async function callOllamaGenerate(
+  ollamaBaseUrl: string,
+  model: string,
+  prompt: string,
+  images?: string[],
+): Promise<string> {
+  const body: Record<string, unknown> = {
+    model,
+    prompt,
+    stream: false,
+  };
+  if (images !== undefined) {
+    body.images = images;
+  }
+
+  const response = await fetch(`${ollamaBaseUrl}/api/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Vision model request failed: HTTP ${response.status}`);
+  }
+
+  const result = (await response.json()) as { response: string };
+  return result.response;
+}
+
+/** Describe a raster image via qwen vision (images[] path). */
+export async function describeWithVisionImage(
+  filePath: string,
+  ollamaBaseUrl: string,
+  model: string,
+): Promise<VisionResult> {
+  const fileBuffer = await readFile(filePath);
+  const base64 = fileBuffer.toString("base64");
+  const fileName = basename(filePath);
+
+  const prompt = `Describe this image. Provide:
+1. A short label (under 100 characters) suitable for display
+2. A detailed description (2-3 sentences) of the content
+
+${PII_EXCLUSION}
+
+${RESPONSE_FORMAT}`;
+
+  const text = await callOllamaGenerate(ollamaBaseUrl, model, prompt, [base64]);
+  return parseVisionResponse(text, fileName);
+}
+
+/** Summarize Docling markdown via qwen as plain text (never images[]). */
+export async function describeFromDocumentText(
+  documentMarkdown: string,
+  fileName: string,
+  ollamaBaseUrl: string,
+  model: string,
+): Promise<VisionResult> {
+  const prompt = `You are describing a document. The document content has been extracted as markdown text below.
+
+Provide:
+1. A short label (under 100 characters) suitable for display
+2. A detailed description (2-3 sentences) summarizing the content
+
+${PII_EXCLUSION}
+
+${RESPONSE_FORMAT}
+
+--- DOCUMENT ---
+${documentMarkdown}`;
+
+  const text = await callOllamaGenerate(ollamaBaseUrl, model, prompt);
+  return parseVisionResponse(text, fileName);
+}
+
+/** @deprecated Use describeWithVisionImage — kept for test imports during migration. */
+export const describeWithVision = describeWithVisionImage;
 
 export async function checkOllamaAvailable(baseUrl: string): Promise<boolean> {
   try {

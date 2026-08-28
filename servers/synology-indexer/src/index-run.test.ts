@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { planIndexWork } from "./index-plan.js";
 import { isRunPodGpuConfigured, ollamaUrlOverrideForGpuPod, type Config } from "./config.js";
+import { classifyFileRoute, routeNeedsQwen } from "./file-route.js";
 
 const withGpuPod = vi.fn();
 
@@ -33,6 +34,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     runpodOllamaHealthyTimeoutMs: 600_000,
     runpodOllamaPortsTimeoutMs: 15_000,
     runpodLeaveRunning: false,
+    doclingServeUrl: "http://docling-serve:5001",
     ...overrides,
   };
 }
@@ -43,12 +45,22 @@ describe("runIndex GPU vs CPU paths", () => {
   });
 
   it("folder-only dirty work uses cpu_folders plan and skips withGpuPod", () => {
-    expect(planIndexWork(0, 2)).toBe("cpu_folders");
+    expect(planIndexWork(0, 0, 2)).toBe("cpu_folders");
     expect(withGpuPod).not.toHaveBeenCalled();
   });
 
-  it("file-dirty work uses gpu_vision plan", () => {
-    expect(planIndexWork(2, 3)).toBe("gpu_vision");
+  it("text-only dirty work uses cpu_embed plan without GPU", () => {
+    expect(planIndexWork(0, 3, 0)).toBe("cpu_embed");
+    expect(withGpuPod).not.toHaveBeenCalled();
+  });
+
+  it("qwen-routed files use gpu_vision plan", () => {
+    const files = ["a.pdf", "b.jpg", "c.heic"];
+    const qwenCount = files.filter((name) =>
+      routeNeedsQwen(classifyFileRoute(name)),
+    ).length;
+    expect(qwenCount).toBe(3);
+    expect(planIndexWork(qwenCount, 0, 0)).toBe("gpu_vision");
   });
 
   it("gpu_vision + RunPod ignores OLLAMA_BASE_URL (stale sticky-pod proxy)", () => {
@@ -60,8 +72,7 @@ describe("runIndex GPU vs CPU paths", () => {
     });
 
     expect(isRunPodGpuConfigured(config)).toBe(true);
-    expect(planIndexWork(1, 0)).toBe("gpu_vision");
-    // Same value runIndex passes to withGpuPod after the fix.
+    expect(planIndexWork(1, 0, 0)).toBe("gpu_vision");
     expect(ollamaUrlOverrideForGpuPod(config)).toBeNull();
     expect(ollamaUrlOverrideForGpuPod(config)).not.toBe(staleProxy);
   });
