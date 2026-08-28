@@ -6,6 +6,7 @@ Production runs as a Docker Compose stack. Images come from GitHub Container Reg
 |-------|---------|
 | `ghcr.io/crearec/grok-mcp-apple-calendar` | `apple-calendar` |
 | `grafana/mcp-grafana` (Docker Hub) | `grafana-mcp` |
+| `ghcr.io/crearec/grok-mcp-utilities` | `utilities` |
 | `pgvector/pgvector:0.8.6-pg16` (Docker Hub) | `synology-db` |
 
 Deploy directory: `/home/crearec/grok-mcp`
@@ -16,6 +17,7 @@ Deploy directory: `/home/crearec/grok-mcp`
 2. Actions runs tests and builds changed images.
 3. **Path filters** decide what publishes:
    - `servers/apple-calendar/**` → push `grok-mcp-apple-calendar` (`:main` + `:sha-<short>`)
+   - `servers/utilities/**` → push `grok-mcp-utilities` (`:main` + `:sha-<short>`)
    - `docker-compose.yml` alone → redeploy without rebuilding images
 4. Actions copies `docker-compose.yml` to the server, exports **only** the image tag published in that run (`IMAGE_TAG`), then `docker compose pull && docker compose up -d`.
 5. After a successful image publish, `ghcr_cleanup` keeps the **10** newest `sha-*` tags per package, always preserves `:main`, and deletes untagged/orphaned manifests.
@@ -80,6 +82,29 @@ To create the service account token:
 2. Click **Add service account**, name it (e.g., `mcp-reader`), set role to **Viewer**
 3. Click **Add service account token**, copy the `glsa_...` token
 4. Paste the token as `GRAFANA_SERVICE_ACCOUNT_TOKEN` in `/home/crearec/grok-mcp/.env`
+
+#### Utilities MCP
+
+The `utilities` service reads monthly electricity, water, and gas bills from the existing CreaDashboard REST API on the LAN. It does **not** scrape utility portals or reimplement dashboard sync — it only `GET`s `{DASHBOARD_API_URL}/api/utilities`.
+
+Add these variables to `.env`:
+
+```sh
+# CreaDashboard base URL (no trailing path)
+DASHBOARD_API_URL=http://192.168.1.135:3080
+
+# Optional image/tag overrides (defaults in docker-compose.yml)
+# UTILITIES_IMAGE=ghcr.io/crearec/grok-mcp-utilities
+# UTILITIES_IMAGE_TAG=main
+```
+
+The container exposes port **8795**. Health check:
+
+```sh
+curl -sS http://127.0.0.1:8795/health
+```
+
+**Tool:** `utility_bills` — returns latest vs previous billed month for electricity, water, and gas (cost + consumption deltas, `latest_unbilled` when the newest month has no bill yet).
 
 #### Synology DB
 
@@ -156,6 +181,9 @@ Add the MCP servers with URLs:
     },
     "grafana": {
       "url": "http://<DEPLOY_HOST>:8793/mcp"
+    },
+    "utilities": {
+      "url": "http://<DEPLOY_HOST>:8795/mcp"
     }
   }
 }
@@ -171,6 +199,9 @@ Or behind an nginx reverse proxy:
     },
     "grafana": {
       "url": "https://crearec.app/mcp/grafana"
+    },
+    "utilities": {
+      "url": "https://crearec.app/mcp/utilities"
     }
   }
 }
@@ -199,6 +230,34 @@ location = /mcp/grafana {
     proxy_set_header X-Forwarded-Proto $scheme;
 }
 ```
+
+#### Reverse proxy note (Utilities MCP)
+
+The `utilities` container listens on port **8795** with endpoint path `/mcp`. Configure nginx to forward:
+
+- `https://crearec.app/mcp/utilities` → `http://127.0.0.1:8795/mcp`
+
+Create `/etc/nginx/snippets/grok-mcp-utilities.conf` and include it from `/etc/nginx/sites-available/default`:
+
+```nginx
+# /etc/nginx/snippets/grok-mcp-utilities.conf
+# Utilities MCP (streamable-http transport)
+
+location = /mcp/utilities {
+    proxy_pass http://127.0.0.1:8795/mcp;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+After merge, on the Debian host:
+
+1. Add `DASHBOARD_API_URL=http://192.168.1.135:3080` to `/home/crearec/grok-mcp/.env` (if not already set).
+2. Add the nginx snippet above and reload nginx.
+3. Let CI deploy the new `utilities` service, or run `docker compose pull && docker compose up -d utilities`.
 
 ## Day-to-day operations
 
