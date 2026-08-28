@@ -45,48 +45,62 @@ const sampleUtilities: UtilityData[] = [
   },
 ];
 
-const sampleUtilitiesObject: Record<string, Omit<UtilityData, "type"> & { type: string }> = {
+const liveCreaDashboardUtilities = {
   electricity: {
     type: "electricity",
-    label: "Electricity",
+    label: "Электричество",
     unit: "kWh",
     currency: "USD",
     connected: true,
-    currentConsumption: 890,
-    currentCost: 145.32,
+    currentConsumption: 0,
+    currentCost: 184.42,
     readings: [
-      { month: "2026-07", consumption: 890, cost: 145.32 },
-      { month: "2026-06", consumption: 820, cost: 132.1 },
-      { month: "2026-05", consumption: 760, cost: 118.5 },
+      { month: "2025-12-01", consumption: 302, cost: 0 },
+      { month: "2026-01-01", consumption: 416, cost: 0 },
+      { month: "2026-03-01", consumption: 224, cost: 0 },
+      { month: "2026-04-01", consumption: 81, cost: 14.13 },
+      { month: "2026-05-01", consumption: 512, cost: 43.86 },
+      { month: "2026-06-01", consumption: 841, cost: 132.27 },
+      { month: "2026-07-01", consumption: 1183, cost: 166.59 },
+      { month: "2026-08-01", consumption: 0, cost: 184.42 },
     ],
   },
   water: {
     type: "water",
-    label: "Water",
+    label: "Вода",
     unit: "gal",
     currency: "USD",
     connected: true,
-    currentConsumption: 4200,
-    currentCost: 58.4,
+    currentConsumption: 19240.8,
+    currentCost: 281.83,
     readings: [
-      { month: "2026-07", consumption: 4200, cost: 58.4 },
-      { month: "2026-06", consumption: 3900, cost: 52.1 },
+      { month: "2026-03-01", consumption: 533.6, cost: 0 },
+      { month: "2026-04-01", consumption: 8409.2, cost: 209.43 },
+      { month: "2026-05-01", consumption: 6099.600000000001, cost: 235.43 },
+      { month: "2026-06-01", consumption: 18672.3, cost: 216.29 },
+      { month: "2026-07-01", consumption: 14801.4, cost: 374.48 },
+      { month: "2026-08-01", consumption: 19240.8, cost: 281.83 },
     ],
   },
   gas: {
     type: "gas",
-    label: "Gas",
-    unit: "therms",
+    label: "Газ",
+    unit: "CCF",
     currency: "USD",
-    connected: false,
-    currentConsumption: 12,
-    currentCost: 24.5,
+    connected: true,
+    currentConsumption: 0,
+    currentCost: 51.85,
     readings: [
-      { month: "2026-07", consumption: 12, cost: 24.5 },
-      { month: "2026-06", consumption: 8, cost: 18.0 },
+      { month: "2026-03-01", consumption: 0, cost: 46.17 },
+      { month: "2026-04-01", consumption: 10, cost: 46.17 },
+      { month: "2026-05-01", consumption: 7, cost: 41.75 },
+      { month: "2026-06-01", consumption: 7, cost: 50.14 },
+      { month: "2026-07-01", consumption: 6, cost: 50.14 },
+      { month: "2026-08-01", consumption: 6, cost: 51.78 },
+      { month: "2026-09-01", consumption: 0, cost: 51.85 },
     ],
   },
-};
+} as const;
 
 describe("utility-bills", () => {
   it("formats month labels in America/Chicago", () => {
@@ -117,6 +131,48 @@ describe("utility-bills", () => {
     expect(result.utilities.water?.comparison.latest?.month_label).toBe("July 2026");
     expect(result.utilities.gas?.connected).toBe(false);
     expect(result.utilities.electricity?.history).toHaveLength(2);
+  });
+
+  it("builds billed-month comparison from live CreaDashboard object payload", () => {
+    const utilities = Object.values(liveCreaDashboardUtilities) as UtilityData[];
+
+    const result = buildUtilityBillsResponse(utilities, {
+      months: 2,
+      timeZone: "America/Chicago",
+      fetchedAt: new Date("2026-09-01T12:00:00.000Z"),
+    });
+
+    expect(result.utilities.electricity?.latest_unbilled).toBe(false);
+    expect(result.utilities.electricity?.comparison.latest).toMatchObject({
+      month: "2026-08-01",
+      cost: 184.42,
+    });
+    expect(result.utilities.electricity?.comparison.previous).toMatchObject({
+      month: "2026-07-01",
+      cost: 166.59,
+    });
+
+    expect(result.utilities.water?.comparison.latest).toMatchObject({
+      month: "2026-08-01",
+      cost: 281.83,
+    });
+    expect(result.utilities.water?.comparison.previous).toMatchObject({
+      month: "2026-07-01",
+      cost: 374.48,
+    });
+
+    expect(result.utilities.gas?.comparison.latest).toMatchObject({
+      month: "2026-09-01",
+      cost: 51.85,
+    });
+    expect(result.utilities.gas?.comparison.previous).toMatchObject({
+      month: "2026-08-01",
+      cost: 51.78,
+    });
+
+    expect(result.utilities.electricity?.history.every((entry) => entry.cost > 0)).toBe(
+      true,
+    );
   });
 
   it("flags missing latest bill when newest month has zero cost", () => {
@@ -176,9 +232,9 @@ describe("fetchUtilities", () => {
     expect(data).toHaveLength(3);
   });
 
-  it("fetches and parses object-keyed /api/utilities payload", async () => {
+  it("fetches and parses live object-keyed /api/utilities payload", async () => {
     const fetchImpl = vi.fn(async () =>
-      Response.json(sampleUtilitiesObject, {
+      Response.json(liveCreaDashboardUtilities, {
         status: 200,
         headers: { "content-type": "application/json" },
       }),
@@ -199,19 +255,16 @@ describe("fetchUtilities", () => {
     const result = buildUtilityBillsResponse(data, {
       months: 2,
       timeZone: "America/Chicago",
-      fetchedAt: new Date("2026-08-01T12:00:00.000Z"),
+      fetchedAt: new Date("2026-09-01T12:00:00.000Z"),
     });
 
-    expect(result.utilities.electricity?.comparison.latest?.cost).toBe(145.32);
-    expect(result.utilities.electricity?.comparison.previous?.cost).toBe(132.1);
-    expect(result.utilities.electricity?.comparison.delta).toEqual({
-      cost_absolute: 13.22,
-      cost_percent: 10.01,
-      consumption_absolute: 70,
-    });
-    expect(result.utilities.water?.comparison.latest?.month_label).toBe("July 2026");
-    expect(result.utilities.gas?.connected).toBe(false);
-    expect(result.utilities.electricity?.history).toHaveLength(2);
+    expect(result.utilities.electricity?.comparison.latest?.cost).toBe(184.42);
+    expect(result.utilities.electricity?.comparison.previous?.cost).toBe(166.59);
+    expect(result.utilities.water?.comparison.latest?.cost).toBe(281.83);
+    expect(result.utilities.water?.comparison.previous?.cost).toBe(374.48);
+    expect(result.utilities.gas?.comparison.latest?.cost).toBe(51.85);
+    expect(result.utilities.gas?.comparison.previous?.cost).toBe(51.78);
+    expect(result.utilities.gas?.connected).toBe(true);
   });
 
   it("uses object key as type when utility entry omits type", async () => {
