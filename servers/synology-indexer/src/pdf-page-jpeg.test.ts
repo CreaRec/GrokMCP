@@ -1,7 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { mkdtemp, rm, writeFile, access } from "node:fs/promises";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { writeFile, access } from "node:fs/promises";
 
 const execFileMock = vi.fn();
 
