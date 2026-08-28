@@ -124,6 +124,7 @@ services:
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-}
       - VISION_MODEL=${VISION_MODEL:-qwen2.5vl:7b}
       - EMBED_MODEL=${EMBED_MODEL:-mxbai-embed-large}
+      - DOCLING_SERVE_URL=${DOCLING_SERVE_URL:-http://docling-serve:5001}
       - DSM_HOST=${DSM_HOST:-}
       - DSM_SHARE_USER=${DSM_SHARE_USER:-}
       - DSM_SHARE_PASSWORD=${DSM_SHARE_PASSWORD:-}
@@ -137,9 +138,22 @@ services:
     depends_on:
       synology-db:
         condition: service_healthy
+      docling-serve:
+        condition: service_started
     networks:
       - default
       - lgtm
+
+  docling-serve:
+    image: ${DOCLING_SERVE_IMAGE:-ghcr.io/docling-project/docling-serve-cpu}:${DOCLING_SERVE_IMAGE_TAG:-latest}
+    container_name: grok-mcp-docling-serve
+    restart: unless-stopped
+    environment:
+      - DOCLING_SERVE_ENABLE_UI=0
+    volumes:
+      - ${SYNOLOGY_MOUNT_PATH:-/mnt/synology/Documents}:/mnt/synology/Documents:ro
+    networks:
+      - default
 
 volumes:
   synology-db-data:

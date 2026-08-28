@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { basename } from "node:path";
+import { readFile } from "node:fs/promises";
 import {
   getConfig,
   isRunPodGpuConfigured,
@@ -15,10 +16,13 @@ import {
   getDirectParentFolderPath,
   shouldAbortSoftDelete,
   isDos83ShortBasename,
-  fileNeedsVision,
   type ExistingFileRow,
 } from "./dirty.js";
-import { describeWithVision, checkOllamaAvailable } from "./vision.js";
+import {
+  describeWithVisionImage,
+  describeFromDocumentText,
+  checkOllamaAvailable,
+} from "./vision.js";
 import { embedText } from "./embedder.js";
 import { embedTextCpu } from "./cpu-embedder.js";
 import {
@@ -37,6 +41,14 @@ import {
   logError,
   logErrorWithCause,
 } from "./telemetry.js";
+import {
+  classifyFileRoute,
+  routeNeedsQwen,
+  routeLogLabel,
+  type FileIndexRoute,
+} from "./file-route.js";
+import { convertFileToMarkdown } from "./docling-client.js";
+import { convertHeicToJpeg, cleanupHeicTemp } from "./heic-convert.js";
 
 export interface IndexStats {
   seen: number;
@@ -50,6 +62,51 @@ export interface IndexStats {
   undeleted: number;
   hardDeleted: number;
   aborted: boolean;
+}
+
+function absolutePathForFile(config: Config, synoPath: string): string {
+  return `${config.mountRoot}${synoPath.slice(synoPath.indexOf("/", 1))}`;
+}
+
+interface RoutedDirtyFile {
+  id: string;
+  synoPath: string;
+  route: FileIndexRoute;
+}
+
+async function describeRoutedFile(
+  file: RoutedDirtyFile,
+  absolutePath: string,
+  config: Config,
+  ollamaUrl: string,
+): Promise<{ label: string; description: string; redacted: boolean }> {
+  const fileName = basename(file.synoPath);
+
+  switch (file.route) {
+    case "docling": {
+      if (!config.doclingServeUrl) {
+        throw new Error("Docling is not configured (DOCLING_SERVE_URL)");
+      }
+      const markdown = await convertFileToMarkdown(absolutePath, config.doclingServeUrl);
+      return describeFromDocumentText(markdown, fileName, ollamaUrl, config.visionModel);
+    }
+    case "qwen-image":
+      return describeWithVisionImage(absolutePath, ollamaUrl, config.visionModel);
+    case "qwen-text": {
+      const text = await readFile(absolutePath, "utf-8");
+      return describeFromDocumentText(text, fileName, ollamaUrl, config.visionModel);
+    }
+    case "heic": {
+      const converted = await convertHeicToJpeg(absolutePath);
+      try {
+        return await describeWithVisionImage(converted.jpegPath, ollamaUrl, config.visionModel);
+      } finally {
+        await cleanupHeicTemp(converted.tempDir);
+      }
+    }
+    default:
+      throw new Error(`Unexpected qwen route: ${file.route}`);
+  }
 }
 
 export async function runIndex(
@@ -334,13 +391,30 @@ export async function runIndex(
     select: { id: true, synoPath: true },
   });
 
-  const visionQueue = remainingDirtyFiles.filter((file) =>
-    fileNeedsVision(true, basename(file.synoPath)),
-  );
+  const routedFiles: RoutedDirtyFile[] = remainingDirtyFiles.map((file) => ({
+    ...file,
+    route: classifyFileRoute(basename(file.synoPath)),
+  }));
+
+  for (const file of routedFiles) {
+    if (file.route !== "skip") {
+      continue;
+    }
+    logInfo("clearing skip-type file without vision", {
+      syno_path: file.synoPath,
+      route: routeLogLabel(file.route),
+    });
+    await db.file.update({
+      where: { id: file.id },
+      data: { dirty: false },
+    });
+  }
+
+  const qwenQueue = routedFiles.filter((file) => routeNeedsQwen(file.route));
 
   const dirtyFolderCount = await countDirtyFolders(db);
 
-  const workKind = planIndexWork(visionQueue.length, dirtyFolderCount);
+  const workKind = planIndexWork(qwenQueue.length, dirtyFolderCount);
 
   if (workKind === "none") {
     logInfo("nothing dirty; skipping embed/vision phase");
@@ -349,41 +423,68 @@ export async function runIndex(
     return stats;
   }
 
+  const upsertIndexedFile = async (params: {
+    fileId: string;
+    label: string;
+    description: string;
+    embedding: number[];
+    embedModel: string;
+    redacted: boolean;
+    route: FileIndexRoute;
+    synoPath: string;
+  }): Promise<void> => {
+    await db.$executeRaw`
+      UPDATE files
+      SET
+        label = ${params.label},
+        description = ${params.description},
+        embedding = ${formatVectorForPg(params.embedding)}::vector,
+        embed_model = ${params.embedModel},
+        indexed_at = ${now},
+        redacted = ${params.redacted},
+        dirty = false
+      WHERE id = ${params.fileId}::uuid
+    `;
+    stats.processed++;
+    logInfo("file indexed", {
+      syno_path: params.synoPath,
+      route: routeLogLabel(params.route),
+    });
+  };
+
+  const processQwenFile = async (
+    file: RoutedDirtyFile,
+    ollamaUrl: string,
+    embedFn: (text: string) => Promise<{ embedding: number[]; model: string }>,
+  ): Promise<void> => {
+    const absolutePath = absolutePathForFile(config, file.synoPath);
+    const vision = await describeRoutedFile(file, absolutePath, config, ollamaUrl);
+    const embed = await embedFn(vision.description);
+    await upsertIndexedFile({
+      fileId: file.id,
+      label: vision.label,
+      description: vision.description,
+      embedding: embed.embedding,
+      embedModel: embed.model,
+      redacted: vision.redacted,
+      route: file.route,
+      synoPath: file.synoPath,
+    });
+  };
+
   const processVisionPhase = async (ollamaUrl: string): Promise<void> => {
-    logInfo("vision phase started", { dirty_files: visionQueue.length });
+    logInfo("qwen phase started", { qwen_files: qwenQueue.length });
 
-    for (const file of visionQueue) {
+    const gpuEmbed = (text: string) => embedText(text, ollamaUrl, config.embedModel);
+
+    for (const file of qwenQueue) {
       try {
-        const absolutePath = `${config.mountRoot}${file.synoPath.slice(file.synoPath.indexOf("/", 1))}`;
-
-        const vision = await describeWithVision(
-          absolutePath,
-          ollamaUrl,
-          config.visionModel,
-        );
-
-        const embed = await embedText(
-          vision.description,
-          ollamaUrl,
-          config.embedModel,
-        );
-
-        await db.$executeRaw`
-          UPDATE files
-          SET
-            label = ${vision.label},
-            description = ${vision.description},
-            embedding = ${formatVectorForPg(embed.embedding)}::vector,
-            embed_model = ${embed.model},
-            indexed_at = ${now},
-            redacted = ${vision.redacted},
-            dirty = false
-          WHERE id = ${file.id}::uuid
-        `;
-
-        stats.processed++;
+        await processQwenFile(file, ollamaUrl, gpuEmbed);
       } catch (err) {
-        logErrorWithCause("vision/embedding failed", err, { syno_path: file.synoPath });
+        logErrorWithCause("qwen/embedding failed", err, {
+          syno_path: file.synoPath,
+          route: routeLogLabel(file.route),
+        });
         stats.errors++;
       }
     }

@@ -20,7 +20,7 @@ export async function embedText(
   });
 
   if (!response.ok) {
-    throw new Error(`Ollama embedding API error: ${response.status} ${response.statusText}`);
+    throw new Error(`Embedding model request failed: HTTP ${response.status}`);
   }
 
   const result = (await response.json()) as { embedding: number[] };

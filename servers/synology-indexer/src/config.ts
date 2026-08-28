@@ -23,6 +23,7 @@ export interface Config {
   runpodOllamaHealthyTimeoutMs: number;
   runpodOllamaPortsTimeoutMs: number;
   runpodLeaveRunning: boolean;
+  doclingServeUrl: string | null;
 }
 
 export function getConfig(): Config {
@@ -76,6 +77,7 @@ export function getConfig(): Config {
     runpodOllamaPortsTimeoutMs:
       Number.isFinite(parsedOllamaPorts) && parsedOllamaPorts > 0 ? parsedOllamaPorts : 15_000,
     runpodLeaveRunning: process.env.RUNPOD_LEAVE_RUNNING === "1",
+    doclingServeUrl: process.env.DOCLING_SERVE_URL ?? null,
   };
 }
 
