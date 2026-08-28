@@ -11,7 +11,7 @@ import {
 } from "./config.js";
 import { getPrisma, disconnectPrisma, formatVectorForPg } from "./db.js";
 import { walkDirectory } from "./walker.js";
-import { hashFile } from "./hasher.js";
+import { hashFile, canReuseContentHash } from "./hasher.js";
 import {
   shouldMarkDirty,
   getDirectParentFolderPath,
@@ -211,23 +211,24 @@ export async function runIndex(
     }
   }
 
+  let hashSkipped = 0;
   for (const file of walkResult.files) {
     seenFilePaths.add(file.synoPath);
     try {
-      const hash = await hashFile(file.absolutePath);
-      stats.hashed++;
       const fileBasename = basename(file.synoPath);
 
       const existingRows = await db.$queryRaw<
         Array<{
           id: string;
           content_hash: string | null;
+          bytes: bigint | null;
+          mtime: Date | null;
           has_embedding: boolean;
           description: string | null;
           deleted_at: Date | null;
         }>
       >`
-        SELECT id, content_hash, (embedding IS NOT NULL) as has_embedding, description, deleted_at
+        SELECT id, content_hash, bytes, mtime, (embedding IS NOT NULL) as has_embedding, description, deleted_at
         FROM files
         WHERE syno_path = ${file.synoPath}
         LIMIT 1
@@ -242,6 +243,28 @@ export async function runIndex(
             deletedAt: existingRow.deleted_at,
           }
         : null;
+
+      // Skip SHA-256 when stored content_hash + bytes + mtime still match the walk.
+      // shouldMarkDirty still runs so incomplete vision stays dirty / GPU-queued.
+      let hash: string;
+      if (
+        canReuseContentHash(
+          existingRow
+            ? {
+                contentHash: existingRow.content_hash,
+                bytes: existingRow.bytes,
+                mtime: existingRow.mtime,
+              }
+            : null,
+          { bytes: file.bytes, mtime: file.mtime },
+        )
+      ) {
+        hash = existingRow!.content_hash!;
+        hashSkipped++;
+      } else {
+        hash = await hashFile(file.absolutePath);
+        stats.hashed++;
+      }
 
       if (existing) {
         const wasDeleted = existing.deletedAt !== null;
@@ -306,7 +329,11 @@ export async function runIndex(
     }
   }
 
-  logInfo("hash phase complete", { hashed: stats.hashed, dirty: stats.dirty });
+  logInfo("hash phase complete", {
+    hashed: stats.hashed,
+    hash_skipped: hashSkipped,
+    dirty: stats.dirty,
+  });
 
   const previousNonDeletedCount = await db.$queryRaw<Array<{ count: bigint }>>`
     SELECT COUNT(*) as count FROM files WHERE deleted_at IS NULL
