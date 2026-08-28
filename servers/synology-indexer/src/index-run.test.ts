@@ -37,6 +37,12 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     doclingContainerName: "grok-mcp-docling-serve",
     doclingHealthyTimeoutMs: 300_000,
     doclingLeaveRunning: false,
+    doclingConvertTimeoutMs: 90_000,
+    doclingDocumentTimeoutSec: 90,
+    doclingPageRangeEnd: 5,
+    textHeadBytes: 65_536,
+    qwenDocumentChars: 32_768,
+    maxDescriptionChars: 500,
     dockerSocketPath: "/var/run/docker.sock",
     ...overrides,
   };

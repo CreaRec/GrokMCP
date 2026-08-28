@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { basename } from "node:path";
-import { readFile } from "node:fs/promises";
 import {
   getConfig,
   isRunPodGpuConfigured,
@@ -23,6 +22,7 @@ import {
 import {
   describeWithVisionImage,
   describeFromDocumentText,
+  describeLimitsFromConfig,
   checkOllamaAvailable,
 } from "./vision.js";
 import { embedText } from "./embedder.js";
@@ -49,7 +49,8 @@ import {
   routeLogLabel,
   type FileIndexRoute,
 } from "./file-route.js";
-import { convertFileToMarkdown } from "./docling-client.js";
+import { convertFileToMarkdown, doclingGistPageRange } from "./docling-client.js";
+import { readTextFileHead } from "./file-head.js";
 import {
   withDoclingSidecar,
 } from "./docling-sidecar.js";
@@ -86,20 +87,40 @@ async function describeRoutedFile(
   ollamaUrl: string,
 ): Promise<{ label: string; description: string; redacted: boolean }> {
   const fileName = basename(file.synoPath);
+  const describeOpts = {
+    ...describeLimitsFromConfig(config),
+    source: file.route === "qwen-text" ? ("qwen-text" as const) : ("docling" as const),
+  };
 
   switch (file.route) {
     case "docling": {
       if (!config.doclingServeUrl) {
         throw new Error("Docling is not configured (DOCLING_SERVE_URL)");
       }
-      const markdown = await convertFileToMarkdown(absolutePath, config.doclingServeUrl);
-      return describeFromDocumentText(markdown, fileName, ollamaUrl, config.visionModel);
+      const markdown = await convertFileToMarkdown(absolutePath, config.doclingServeUrl, {
+        pageRange: doclingGistPageRange(config.doclingPageRangeEnd),
+        convertTimeoutMs: config.doclingConvertTimeoutMs,
+        documentTimeoutSec: config.doclingDocumentTimeoutSec,
+      });
+      return describeFromDocumentText(
+        markdown,
+        fileName,
+        ollamaUrl,
+        config.visionModel,
+        describeOpts,
+      );
     }
     case "qwen-image":
       return describeWithVisionImage(absolutePath, ollamaUrl, config.visionModel);
     case "qwen-text": {
-      const text = await readFile(absolutePath, "utf-8");
-      return describeFromDocumentText(text, fileName, ollamaUrl, config.visionModel);
+      const { text } = await readTextFileHead(absolutePath, config.textHeadBytes);
+      return describeFromDocumentText(
+        text,
+        fileName,
+        ollamaUrl,
+        config.visionModel,
+        describeOpts,
+      );
     }
     case "heic": {
       const converted = await convertHeicToJpeg(absolutePath);
