@@ -87,33 +87,95 @@ function dockerSocketUnavailableError(
   );
 }
 
-function createDockerRequest(socketPath: string) {
-  return (method: string, path: string): Promise<DockerApiResponse> =>
-    new Promise((resolve, reject) => {
-      const req = httpRequest(
-        {
-          socketPath,
-          path: `/${DOCKER_API_VERSION}${path}`,
-          method,
-          headers: { "Content-Type": "application/json" },
-        },
-        (res) => {
-          let body = "";
-          res.on("data", (chunk: string) => {
-            body += chunk;
-          });
-          res.on("end", () => {
-            resolve({ statusCode: res.statusCode ?? 0, body });
-          });
-        },
-      );
-      req.on("error", reject);
-      req.end();
-    });
+function locationOnSameSocket(location: string): string | undefined {
+  if (location.startsWith("/")) {
+    return location;
+  }
+  try {
+    const url = new URL(location);
+    return `${url.pathname}${url.search}`;
+  } catch {
+    return undefined;
+  }
 }
 
-function encodeContainerName(name: string): string {
-  return encodeURIComponent(name.startsWith("/") ? name : `/${name}`);
+function dockerHttpRequest(
+  socketPath: string,
+  method: string,
+  fullPath: string,
+): Promise<DockerApiResponse & { location?: string }> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      {
+        socketPath,
+        path: fullPath,
+        method,
+        headers: { "Content-Type": "application/json" },
+      },
+      (res) => {
+        let body = "";
+        res.on("data", (chunk: string) => {
+          body += chunk;
+        });
+        res.on("end", () => {
+          const rawLocation = res.headers.location;
+          const location = Array.isArray(rawLocation) ? rawLocation[0] : rawLocation;
+          resolve({
+            statusCode: res.statusCode ?? 0,
+            body,
+            location,
+          });
+        });
+      },
+    );
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+function createDockerRequest(socketPath: string) {
+  return async (method: string, path: string): Promise<DockerApiResponse> => {
+    let response = await dockerHttpRequest(
+      socketPath,
+      method,
+      `/${DOCKER_API_VERSION}${path}`,
+    );
+    // node:http on a unix socket does not follow redirects. Docker Engine 301s
+    // `{id}` values that include a leading slash (`%2Fname`) to the unslashed name.
+    if (
+      (response.statusCode === 301 || response.statusCode === 302) &&
+      response.location
+    ) {
+      const nextPath = locationOnSameSocket(response.location);
+      if (nextPath) {
+        response = await dockerHttpRequest(socketPath, method, nextPath);
+      }
+    }
+    return { statusCode: response.statusCode, body: response.body };
+  };
+}
+
+/**
+ * Docker Engine `{id}` for container name/id.
+ * Do not prefix `/` — Engine 301s `/containers/%2Fname/...` and node:http
+ * over a unix socket does not follow that redirect.
+ */
+export function dockerContainerId(name: string): string {
+  const id = name.replace(/^\/+/, "");
+  return encodeURIComponent(id);
+}
+
+/** Path after `/v1.41`, e.g. `/containers/grok-mcp-docling-serve/json`. */
+export function dockerContainerResourcePath(name: string, resource: string): string {
+  const suffix = resource.startsWith("/") ? resource : `/${resource}`;
+  return `/containers/${dockerContainerId(name)}${suffix}`;
+}
+
+function unexpectedRedirectError(action: string, name: string, statusCode: number): Error {
+  return new Error(
+    `Docker ${action} failed for ${name}: HTTP ${statusCode} ` +
+      "(unexpected redirect; container id must not be encoded with a leading slash)",
+  );
 }
 
 /** True when dirty work includes docling-routed files. */
@@ -134,11 +196,16 @@ export async function inspectDoclingContainer(
 ): Promise<{ exists: boolean; running: boolean }> {
   const dockerRequest =
     deps.dockerRequest ?? createDockerRequest(config.dockerSocketPath);
-  const encoded = encodeContainerName(config.containerName);
 
-  const response = await dockerRequest("GET", `/containers/${encoded}/json`);
+  const response = await dockerRequest(
+    "GET",
+    dockerContainerResourcePath(config.containerName, "/json"),
+  );
   if (response.statusCode === 404) {
     return { exists: false, running: false };
+  }
+  if (response.statusCode === 301 || response.statusCode === 302) {
+    throw unexpectedRedirectError("inspect", config.containerName, response.statusCode);
   }
   if (response.statusCode !== 200) {
     throw new Error(
@@ -166,7 +233,6 @@ export async function startDoclingContainer(
 
   const dockerRequest =
     deps.dockerRequest ?? createDockerRequest(config.dockerSocketPath);
-  const encoded = encodeContainerName(config.containerName);
 
   const inspect = await inspectDoclingContainer(config, deps);
   if (!inspect.exists) {
@@ -182,7 +248,13 @@ export async function startDoclingContainer(
   }
 
   logInfo("docling sidecar starting", { container: config.containerName });
-  const response = await dockerRequest("POST", `/containers/${encoded}/start`);
+  const response = await dockerRequest(
+    "POST",
+    dockerContainerResourcePath(config.containerName, "/start"),
+  );
+  if (response.statusCode === 301 || response.statusCode === 302) {
+    throw unexpectedRedirectError("start", config.containerName, response.statusCode);
+  }
   if (response.statusCode !== 204 && response.statusCode !== 304) {
     throw new Error(
       `Docker start failed for ${config.containerName}: HTTP ${response.statusCode}`,
@@ -196,7 +268,6 @@ export async function stopDoclingContainer(
 ): Promise<void> {
   const dockerRequest =
     deps.dockerRequest ?? createDockerRequest(config.dockerSocketPath);
-  const encoded = encodeContainerName(config.containerName);
 
   const inspect = await inspectDoclingContainer(config, deps);
   if (!inspect.exists) {
@@ -212,7 +283,13 @@ export async function stopDoclingContainer(
   }
 
   logInfo("docling sidecar stopping", { container: config.containerName });
-  const response = await dockerRequest("POST", `/containers/${encoded}/stop?t=30`);
+  const response = await dockerRequest(
+    "POST",
+    `${dockerContainerResourcePath(config.containerName, "/stop")}?t=30`,
+  );
+  if (response.statusCode === 301 || response.statusCode === 302) {
+    throw unexpectedRedirectError("stop", config.containerName, response.statusCode);
+  }
   if (response.statusCode !== 204 && response.statusCode !== 304) {
     throw new Error(
       `Docker stop failed for ${config.containerName}: HTTP ${response.statusCode}`,
