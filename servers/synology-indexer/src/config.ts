@@ -23,6 +23,10 @@ export interface Config {
   runpodOllamaHealthyTimeoutMs: number;
   runpodLeaveRunning: boolean;
   doclingServeUrl: string | null;
+  doclingContainerName: string;
+  doclingHealthyTimeoutMs: number;
+  doclingLeaveRunning: boolean;
+  dockerSocketPath: string;
 }
 
 export function getConfig(): Config {
@@ -44,6 +48,9 @@ export function getConfig(): Config {
 
   const ollamaHealthyRaw = process.env.RUNPOD_OLLAMA_HEALTHY_TIMEOUT_MS ?? "600000";
   const parsedOllamaHealthy = parseInt(ollamaHealthyRaw, 10);
+
+  const doclingHealthyRaw = process.env.DOCLING_HEALTHY_TIMEOUT_MS ?? "300000";
+  const parsedDoclingHealthy = parseInt(doclingHealthyRaw, 10);
 
   return {
     databaseUrl,
@@ -71,6 +78,40 @@ export function getConfig(): Config {
       Number.isFinite(parsedOllamaHealthy) && parsedOllamaHealthy > 0 ? parsedOllamaHealthy : 600_000,
     runpodLeaveRunning: process.env.RUNPOD_LEAVE_RUNNING === "1",
     doclingServeUrl: process.env.DOCLING_SERVE_URL ?? null,
+    doclingContainerName: process.env.DOCLING_CONTAINER_NAME ?? "grok-mcp-docling-serve",
+    doclingHealthyTimeoutMs:
+      Number.isFinite(parsedDoclingHealthy) && parsedDoclingHealthy > 0
+        ? parsedDoclingHealthy
+        : 300_000,
+    doclingLeaveRunning: process.env.DOCLING_LEAVE_RUNNING === "1",
+    dockerSocketPath: process.env.DOCKER_HOST?.startsWith("unix://")
+      ? process.env.DOCKER_HOST.slice("unix://".length)
+      : (process.env.DOCKER_SOCKET_PATH ?? "/var/run/docker.sock"),
+  };
+}
+
+/** True when ephemeral docling-serve lifecycle can be managed via Docker. */
+export function isDoclingSidecarConfigured(config: Config): boolean {
+  return Boolean(config.doclingServeUrl && config.dockerSocketPath);
+}
+
+export function doclingSidecarConfigFrom(config: Config): {
+  containerName: string;
+  doclingServeUrl: string;
+  dockerSocketPath: string;
+  healthyTimeoutMs: number;
+} {
+  if (!config.doclingServeUrl) {
+    throw new Error("Docling is not configured (DOCLING_SERVE_URL)");
+  }
+  if (!config.dockerSocketPath) {
+    throw new Error("Docker socket is not configured (DOCKER_SOCKET_PATH)");
+  }
+  return {
+    containerName: config.doclingContainerName,
+    doclingServeUrl: config.doclingServeUrl,
+    dockerSocketPath: config.dockerSocketPath,
+    healthyTimeoutMs: config.doclingHealthyTimeoutMs,
   };
 }
 

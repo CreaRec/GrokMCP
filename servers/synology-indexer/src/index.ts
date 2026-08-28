@@ -4,6 +4,8 @@ import { readFile } from "node:fs/promises";
 import {
   getConfig,
   isRunPodGpuConfigured,
+  isDoclingSidecarConfigured,
+  doclingSidecarConfigFrom,
   ollamaUrlOverrideForGpuPod,
   parseIndexTime,
   type Config,
@@ -48,6 +50,9 @@ import {
   type FileIndexRoute,
 } from "./file-route.js";
 import { convertFileToMarkdown } from "./docling-client.js";
+import {
+  withDoclingSidecar,
+} from "./docling-sidecar.js";
 import { convertHeicToJpeg, cleanupHeicTemp } from "./heic-convert.js";
 
 export interface IndexStats {
@@ -473,19 +478,64 @@ export async function runIndex(
   };
 
   const processVisionPhase = async (ollamaUrl: string): Promise<void> => {
-    logInfo("qwen phase started", { qwen_files: qwenQueue.length });
+    const doclingFiles = qwenQueue.filter((file) => file.route === "docling");
+    const nonDoclingFiles = qwenQueue.filter((file) => file.route !== "docling");
 
     const gpuEmbed = (text: string) => embedText(text, ollamaUrl, config.embedModel);
 
-    for (const file of qwenQueue) {
-      try {
-        await processQwenFile(file, ollamaUrl, gpuEmbed);
-      } catch (err) {
-        logErrorWithCause("qwen/embedding failed", err, {
+    const processFiles = async (files: RoutedDirtyFile[]): Promise<void> => {
+      if (files.length === 0) {
+        return;
+      }
+
+      logInfo("qwen phase batch started", { qwen_files: files.length });
+
+      for (const file of files) {
+        try {
+          await processQwenFile(file, ollamaUrl, gpuEmbed);
+        } catch (err) {
+          logErrorWithCause("qwen/embedding failed", err, {
+            syno_path: file.synoPath,
+            route: routeLogLabel(file.route),
+          });
+          stats.errors++;
+        }
+      }
+    };
+
+    const failDoclingFiles = (err: unknown, message: string): void => {
+      for (const file of doclingFiles) {
+        logErrorWithCause(message, err, {
           syno_path: file.synoPath,
           route: routeLogLabel(file.route),
         });
         stats.errors++;
+      }
+    };
+
+    logInfo("qwen phase started", {
+      qwen_files: qwenQueue.length,
+      docling_files: doclingFiles.length,
+    });
+
+    await processFiles(nonDoclingFiles);
+
+    if (doclingFiles.length > 0) {
+      if (!isDoclingSidecarConfigured(config)) {
+        failDoclingFiles(
+          new Error("DOCLING_SERVE_URL and Docker socket access are required for docling routes"),
+          "docling sidecar unavailable",
+        );
+      } else {
+        try {
+          await withDoclingSidecar(
+            doclingSidecarConfigFrom(config),
+            () => processFiles(doclingFiles),
+            { leaveRunning: config.doclingLeaveRunning },
+          );
+        } catch (err) {
+          failDoclingFiles(err, "docling sidecar lifecycle failed");
+        }
       }
     }
 
@@ -614,6 +664,7 @@ async function main(): Promise<void> {
     run_once: config.runOnce,
     ollama_configured: Boolean(config.ollamaBaseUrl),
     runpod_configured: isRunPodGpuConfigured(config),
+    docling_sidecar_configured: isDoclingSidecarConfigured(config),
   });
 
   if (config.runOnce) {

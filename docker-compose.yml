@@ -124,6 +124,10 @@ services:
       - VISION_MODEL=${VISION_MODEL:-qwen2.5vl:7b}
       - EMBED_MODEL=${EMBED_MODEL:-mxbai-embed-large}
       - DOCLING_SERVE_URL=${DOCLING_SERVE_URL:-http://docling-serve:5001}
+      - DOCLING_CONTAINER_NAME=${DOCLING_CONTAINER_NAME:-grok-mcp-docling-serve}
+      - DOCLING_HEALTHY_TIMEOUT_MS=${DOCLING_HEALTHY_TIMEOUT_MS:-300000}
+      - DOCLING_LEAVE_RUNNING=${DOCLING_LEAVE_RUNNING:-}
+      - DOCKER_SOCKET_PATH=${DOCKER_SOCKET_PATH:-/var/run/docker.sock}
       - DSM_HOST=${DSM_HOST:-}
       - DSM_SHARE_USER=${DSM_SHARE_USER:-}
       - DSM_SHARE_PASSWORD=${DSM_SHARE_PASSWORD:-}
@@ -134,23 +138,34 @@ services:
       - OTEL_SERVICE_VERSION=${SYNOLOGY_INDEXER_OTEL_SERVICE_VERSION:-}
     volumes:
       - ${SYNOLOGY_MOUNT_PATH:-/mnt/synology/Documents}:/mnt/synology/Documents:ro
+      # Ephemeral docling-serve lifecycle: indexer starts/stops the sidecar per index run.
+      - ${DOCKER_SOCKET_PATH:-/var/run/docker.sock}:/var/run/docker.sock
     depends_on:
       synology-db:
         condition: service_healthy
-      docling-serve:
-        condition: service_started
     networks:
       - default
       - lgtm
 
+  # Docling is NOT started by `docker compose up -d` (profile + restart: "no").
+  # The synology-indexer starts this container when a run has docling-routed dirty files,
+  # then stops it in a finally block. First deploy: create without starting:
+  #   docker compose --profile docling up --no-start docling-serve
   docling-serve:
+    profiles: ["docling"]
     image: ${DOCLING_SERVE_IMAGE:-ghcr.io/docling-project/docling-serve-cpu}:${DOCLING_SERVE_IMAGE_TAG:-latest}
     container_name: grok-mcp-docling-serve
-    restart: unless-stopped
+    restart: "no"
     environment:
       - DOCLING_SERVE_ENABLE_UI=0
     volumes:
       - ${SYNOLOGY_MOUNT_PATH:-/mnt/synology/Documents}:/mnt/synology/Documents:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5001/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 120s
     networks:
       - default
 

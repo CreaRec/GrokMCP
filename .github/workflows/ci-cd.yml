@@ -410,6 +410,8 @@ jobs:
 
           docker compose pull
           docker compose up -d
+          # Create docling sidecar container without starting it (ephemeral lifecycle).
+          docker compose --profile docling up --no-start docling-serve
           docker compose ps
           if [ '${APPLE_CALENDAR_CHANGED}' = 'true' ]; then
             docker compose logs --tail=30 apple-calendar || true
