@@ -27,6 +27,47 @@ function normalizeBaseUrl(url: string): string {
   return url.replace(/\/+$/, "");
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isUtilityDataValue(value: unknown): value is Record<string, unknown> {
+  return isPlainObject(value) && typeof value.label === "string";
+}
+
+function normalizeUtilityEntry(
+  key: string,
+  value: Record<string, unknown>,
+): UtilityData {
+  const type =
+    typeof value.type === "string" && value.type.length > 0 ? value.type : key;
+  return { ...(value as unknown as UtilityData), type };
+}
+
+function parseUtilitiesPayload(body: unknown, url: string): UtilityData[] {
+  if (body === null || typeof body !== "object") {
+    throw new Error(
+      `CreaDashboard API returned unexpected payload from ${url} (expected an array or object of utilities)`,
+    );
+  }
+
+  if (Array.isArray(body)) {
+    return body as UtilityData[];
+  }
+
+  const utilities: UtilityData[] = [];
+  for (const [key, value] of Object.entries(body)) {
+    if (!isUtilityDataValue(value)) {
+      throw new Error(
+        `CreaDashboard API returned unexpected payload from ${url} (invalid utility entry for "${key}")`,
+      );
+    }
+    utilities.push(normalizeUtilityEntry(key, value));
+  }
+
+  return utilities;
+}
+
 export async function fetchUtilities(
   options: FetchUtilitiesOptions,
 ): Promise<UtilityData[]> {
@@ -69,9 +110,5 @@ export async function fetchUtilities(
     throw new Error(`CreaDashboard API returned invalid JSON from ${url}`);
   }
 
-  if (!Array.isArray(body)) {
-    throw new Error(`CreaDashboard API returned unexpected payload from ${url}`);
-  }
-
-  return body as UtilityData[];
+  return parseUtilitiesPayload(body, url);
 }
