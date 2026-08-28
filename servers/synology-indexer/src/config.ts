@@ -4,6 +4,12 @@ export interface Config {
   indexDailyAt: string;
   timezone: string;
   runOnce: boolean;
+  /** Bytes read from plain-text files for qwen gist. */
+  textHeadBytes: number;
+  /** Max document excerpt characters sent to qwen. */
+  qwenDocumentChars: number;
+  /** Max DESCRIPTION length before mxbai embed. */
+  maxDescriptionChars: number;
   ollamaBaseUrl: string | null;
   visionModel: string;
   embedModel: string;
@@ -26,6 +32,12 @@ export interface Config {
   doclingContainerName: string;
   doclingHealthyTimeoutMs: number;
   doclingLeaveRunning: boolean;
+  /** Client-side timeout for Docling /v1/convert/file (ms). */
+  doclingConvertTimeoutMs: number;
+  /** Docling document_timeout form field (seconds). */
+  doclingDocumentTimeoutSec: number;
+  /** Last page (inclusive, 1-based) for Docling page_range gist on every docling file. */
+  doclingPageRangeEnd: number;
   dockerSocketPath: string;
 }
 
@@ -52,12 +64,36 @@ export function getConfig(): Config {
   const doclingHealthyRaw = process.env.DOCLING_HEALTHY_TIMEOUT_MS ?? "300000";
   const parsedDoclingHealthy = parseInt(doclingHealthyRaw, 10);
 
+  const textHeadRaw = process.env.INDEX_TEXT_HEAD_BYTES ?? "65536";
+  const parsedTextHead = parseInt(textHeadRaw, 10);
+
+  const qwenDocRaw = process.env.INDEX_QWEN_DOCUMENT_CHARS ?? "32768";
+  const parsedQwenDoc = parseInt(qwenDocRaw, 10);
+
+  const maxDescRaw = process.env.INDEX_MAX_DESCRIPTION_CHARS ?? "500";
+  const parsedMaxDesc = parseInt(maxDescRaw, 10);
+
+  const doclingConvertRaw = process.env.DOCLING_CONVERT_TIMEOUT_MS ?? "90000";
+  const parsedDoclingConvert = parseInt(doclingConvertRaw, 10);
+
+  const doclingDocTimeoutRaw = process.env.DOCLING_DOCUMENT_TIMEOUT_SEC ?? "90";
+  const parsedDoclingDocTimeout = parseInt(doclingDocTimeoutRaw, 10);
+
+  const doclingPageEndRaw = process.env.DOCLING_PAGE_RANGE_END ?? "5";
+  const parsedDoclingPageEnd = parseInt(doclingPageEndRaw, 10);
+
   return {
     databaseUrl,
     mountRoot,
     indexDailyAt: process.env.INDEX_DAILY_AT ?? "21:00",
     timezone: process.env.TZ ?? "America/Chicago",
     runOnce,
+    textHeadBytes:
+      Number.isFinite(parsedTextHead) && parsedTextHead > 0 ? parsedTextHead : 65_536,
+    qwenDocumentChars:
+      Number.isFinite(parsedQwenDoc) && parsedQwenDoc > 0 ? parsedQwenDoc : 32_768,
+    maxDescriptionChars:
+      Number.isFinite(parsedMaxDesc) && parsedMaxDesc > 0 ? parsedMaxDesc : 500,
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL ?? null,
     visionModel: process.env.VISION_MODEL ?? "qwen2.5vl:7b",
     embedModel: process.env.EMBED_MODEL ?? "mxbai-embed-large",
@@ -84,6 +120,18 @@ export function getConfig(): Config {
         ? parsedDoclingHealthy
         : 300_000,
     doclingLeaveRunning: process.env.DOCLING_LEAVE_RUNNING === "1",
+    doclingConvertTimeoutMs:
+      Number.isFinite(parsedDoclingConvert) && parsedDoclingConvert > 0
+        ? parsedDoclingConvert
+        : 90_000,
+    doclingDocumentTimeoutSec:
+      Number.isFinite(parsedDoclingDocTimeout) && parsedDoclingDocTimeout > 0
+        ? parsedDoclingDocTimeout
+        : 90,
+    doclingPageRangeEnd:
+      Number.isFinite(parsedDoclingPageEnd) && parsedDoclingPageEnd > 0
+        ? parsedDoclingPageEnd
+        : 5,
     dockerSocketPath: process.env.DOCKER_HOST?.startsWith("unix://")
       ? process.env.DOCKER_HOST.slice("unix://".length)
       : (process.env.DOCKER_SOCKET_PATH ?? "/var/run/docker.sock"),
