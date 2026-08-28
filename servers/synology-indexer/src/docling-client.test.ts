@@ -1,10 +1,21 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const openAsBlobMock = vi.fn();
+const preparePdfGistForDoclingMock = vi.fn();
+const cleanupPdfGistTempMock = vi.fn();
 
 vi.mock("node:fs", () => ({
   openAsBlob: (...args: unknown[]) => openAsBlobMock(...args),
 }));
+
+vi.mock("./pdf-slice.js", async () => {
+  const actual = await vi.importActual<typeof import("./pdf-slice.js")>("./pdf-slice.js");
+  return {
+    ...actual,
+    preparePdfGistForDocling: (...args: unknown[]) => preparePdfGistForDoclingMock(...args),
+    cleanupPdfGistTemp: (...args: unknown[]) => cleanupPdfGistTempMock(...args),
+  };
+});
 
 import {
   convertFileToMarkdown,
@@ -27,6 +38,14 @@ describe("convertFileToMarkdown", () => {
     fetchMock.mockReset();
     openAsBlobMock.mockReset();
     openAsBlobMock.mockResolvedValue(new Blob(["pdf-bytes"]));
+    preparePdfGistForDoclingMock.mockReset();
+    cleanupPdfGistTempMock.mockReset();
+    cleanupPdfGistTempMock.mockResolvedValue(undefined);
+    preparePdfGistForDoclingMock.mockResolvedValue({
+      filePath: "/mnt/synology/Documents/report.pdf",
+      tempDir: null,
+      sliced: false,
+    });
   });
 
   afterEach(() => {
@@ -56,10 +75,59 @@ describe("convertFileToMarkdown", () => {
 
     const form = init.body as FormData;
     expect(form.getAll("page_range")).toEqual(["1", "5"]);
+    expect(preparePdfGistForDoclingMock).toHaveBeenCalledWith(
+      "/mnt/synology/Documents/report.pdf",
+      5,
+    );
     expect(openAsBlobMock).toHaveBeenCalledWith("/mnt/synology/Documents/report.pdf");
   });
 
-  it("sends page_range 1-5 for office and html formats too", async () => {
+  it("uploads sliced temp PDF path for long PDFs and cleans temp even on success", async () => {
+    preparePdfGistForDoclingMock.mockResolvedValue({
+      filePath: "/tmp/synology-pdf-gist-xyz/report.gist-1-5.pdf",
+      tempDir: "/tmp/synology-pdf-gist-xyz",
+      sliced: true,
+    });
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        document: { md_content: "# Offer" },
+      }),
+    });
+
+    await convertFileToMarkdown(
+      "/mnt/synology/Documents/Full time Offer - Stoke Space.pdf",
+      "http://docling:5001",
+      { pageRange: [1, 5] },
+    );
+
+    expect(openAsBlobMock).toHaveBeenCalledWith(
+      "/tmp/synology-pdf-gist-xyz/report.gist-1-5.pdf",
+    );
+    expect(cleanupPdfGistTempMock).toHaveBeenCalledWith("/tmp/synology-pdf-gist-xyz");
+    const form = (fetchMock.mock.calls[0] as [string, RequestInit])[1].body as FormData;
+    expect(form.getAll("page_range")).toEqual(["1", "5"]);
+  });
+
+  it("cleans temp PDF gist when Docling convert fails", async () => {
+    preparePdfGistForDoclingMock.mockResolvedValue({
+      filePath: "/tmp/synology-pdf-gist-fail/x.gist-1-5.pdf",
+      tempDir: "/tmp/synology-pdf-gist-fail",
+      sliced: true,
+    });
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 504,
+    });
+
+    await expect(
+      convertFileToMarkdown("/mnt/synology/Documents/huge.pdf", "http://docling:5001"),
+    ).rejects.toThrow("HTTP 504");
+
+    expect(cleanupPdfGistTempMock).toHaveBeenCalledWith("/tmp/synology-pdf-gist-fail");
+  });
+
+  it("does not prepare PDF gist for office/html — whole-file + page_range only", async () => {
     fetchMock.mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -73,11 +141,15 @@ describe("convertFileToMarkdown", () => {
       "/mnt/synology/site/page.html",
     ]) {
       fetchMock.mockClear();
+      preparePdfGistForDoclingMock.mockClear();
+      openAsBlobMock.mockClear();
       await convertFileToMarkdown(path, "http://docling:5001", {
         convertTimeoutMs: 90_000,
         documentTimeoutSec: 90,
       });
 
+      expect(preparePdfGistForDoclingMock).not.toHaveBeenCalled();
+      expect(openAsBlobMock).toHaveBeenCalledWith(path);
       const form = (fetchMock.mock.calls[0] as [string, RequestInit])[1].body as FormData;
       expect(form.getAll("page_range")).toEqual(["1", "5"]);
       expect(form.get("document_timeout")).toBe("90");
