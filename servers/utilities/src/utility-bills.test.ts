@@ -100,7 +100,7 @@ const liveCreaDashboardUtilities = {
       { month: "2026-09-01", consumption: 0, cost: 51.85 },
     ],
   },
-} as const;
+};
 
 describe("utility-bills", () => {
   it("formats month labels in America/Chicago", () => {
