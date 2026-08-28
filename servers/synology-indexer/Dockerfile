@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libheif-examples \
   imagemagick \
   qpdf \
+  poppler-utils \
   && rm -rf /var/lib/apt/lists/*
 
 COPY .npmrc package.json package-lock.json prisma.config.ts ./

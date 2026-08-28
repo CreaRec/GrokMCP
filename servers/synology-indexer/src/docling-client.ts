@@ -34,6 +34,44 @@ export function doclingGistPageRange(
   return [1, end];
 }
 
+/** HTTP statuses that indicate Docling was overloaded or timed out server-side. */
+export const DOCLING_HEAVY_HTTP_STATUSES = new Set([504, 524]);
+
+/**
+ * True when Docling failed because the document was too heavy (client timeout or 504/524).
+ * Other errors (empty markdown, 4xx, sidecar down) must not trigger PDF fallbacks.
+ */
+export function isDoclingHeavyFailure(err: unknown): boolean {
+  if (!(err instanceof Error)) {
+    return false;
+  }
+  const message = err.message;
+  if (message.includes("Docling conversion timed out after")) {
+    return true;
+  }
+  for (const status of DOCLING_HEAVY_HTTP_STATUSES) {
+    if (message === `Docling conversion failed: HTTP ${status}`) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function doclingHeavyFailureReason(err: unknown): string {
+  if (!(err instanceof Error)) {
+    return "unknown";
+  }
+  const message = err.message;
+  if (message.includes("Docling conversion timed out after")) {
+    return "client_timeout";
+  }
+  const httpMatch = /^Docling conversion failed: HTTP (\d+)$/.exec(message);
+  if (httpMatch) {
+    return `http_${httpMatch[1]}`;
+  }
+  return "unknown";
+}
+
 function appendPageRange(form: FormData, pageRange: [number, number]): void {
   // Docling expects two separate page_range fields (start, end), not "1,5".
   form.append("page_range", String(pageRange[0]));

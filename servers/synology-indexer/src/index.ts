@@ -50,6 +50,8 @@ import {
   type FileIndexRoute,
 } from "./file-route.js";
 import { convertFileToMarkdown, doclingGistPageRange } from "./docling-client.js";
+import { describeDoclingPdfWithFallback } from "./docling-pdf-describe.js";
+import { isPdfPath } from "./pdf-slice.js";
 import { readTextFileHead } from "./file-head.js";
 import {
   withDoclingSidecar,
@@ -96,6 +98,15 @@ async function describeRoutedFile(
     case "docling": {
       if (!config.doclingServeUrl) {
         throw new Error("Docling is not configured (DOCLING_SERVE_URL)");
+      }
+      if (isPdfPath(absolutePath)) {
+        return describeDoclingPdfWithFallback(
+          absolutePath,
+          fileName,
+          config,
+          ollamaUrl,
+          describeOpts,
+        );
       }
       const markdown = await convertFileToMarkdown(absolutePath, config.doclingServeUrl, {
         pageRange: doclingGistPageRange(config.doclingPageRangeEnd),
