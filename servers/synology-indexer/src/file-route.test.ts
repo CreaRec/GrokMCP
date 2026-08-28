@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { classifyFileRoute, getFileExtension, routeNeedsQwen } from "./file-route.js";
+import { classifyFileRoute, getFileExtension, routeNeedsQwen, routeLogLabel } from "./file-route.js";
 
 describe("classifyFileRoute", () => {
   describe("docling documents (~203 production files)", () => {
@@ -26,12 +26,12 @@ describe("classifyFileRoute", () => {
     });
   });
 
-  describe("plain text embed (~36 production files)", () => {
+  describe("plain text via qwen (~36 production files)", () => {
     const text = ["txt", "sql", "js", "json", "md", "xml", "conf", "css", "properties", "sh"] as const;
 
     for (const ext of text) {
-      it(`routes .${ext} via text-embed`, () => {
-        expect(classifyFileRoute(`notes.${ext}`)).toBe("text-embed");
+      it(`routes .${ext} via qwen-text`, () => {
+        expect(classifyFileRoute(`notes.${ext}`)).toBe("qwen-text");
       });
     }
   });
@@ -77,15 +77,25 @@ describe("classifyFileRoute", () => {
 });
 
 describe("routeNeedsQwen", () => {
-  it("is true for docling, qwen-image, and heic", () => {
+  it("is true for docling, qwen-text, qwen-image, and heic", () => {
     expect(routeNeedsQwen("docling")).toBe(true);
+    expect(routeNeedsQwen("qwen-text")).toBe(true);
     expect(routeNeedsQwen("qwen-image")).toBe(true);
     expect(routeNeedsQwen("heic")).toBe(true);
   });
 
-  it("is false for text-embed and skip", () => {
-    expect(routeNeedsQwen("text-embed")).toBe(false);
+  it("is false for skip", () => {
     expect(routeNeedsQwen("skip")).toBe(false);
+  });
+});
+
+describe("routeLogLabel", () => {
+  it("maps routes to honest OTEL labels", () => {
+    expect(routeLogLabel("docling")).toBe("docling");
+    expect(routeLogLabel("qwen-text")).toBe("qwen-text");
+    expect(routeLogLabel("qwen-image")).toBe("qwen-image");
+    expect(routeLogLabel("heic")).toBe("qwen-image");
+    expect(routeLogLabel("skip")).toBe("skip");
   });
 });
 

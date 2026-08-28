@@ -1,5 +1,5 @@
 /** How a dirty file is indexed before embedding (one vector per file). */
-export type FileIndexRoute = "docling" | "qwen-image" | "heic" | "text-embed" | "skip";
+export type FileIndexRoute = "docling" | "qwen-text" | "qwen-image" | "heic" | "skip";
 
 const DOCLING_EXTENSIONS = new Set([
   "pdf",
@@ -11,9 +11,7 @@ const DOCLING_EXTENSIONS = new Set([
   "csv",
 ]);
 
-const IMAGE_EXTENSIONS = new Set(["jpg", "jpeg", "png"]);
-
-const TEXT_EMBED_EXTENSIONS = new Set([
+const QWEN_TEXT_EXTENSIONS = new Set([
   "txt",
   "sql",
   "js",
@@ -25,6 +23,8 @@ const TEXT_EMBED_EXTENSIONS = new Set([
   "properties",
   "sh",
 ]);
+
+const IMAGE_EXTENSIONS = new Set(["jpg", "jpeg", "png"]);
 
 const SKIP_EXTENSIONS = new Set([
   "mp3",
@@ -69,8 +69,8 @@ export function classifyFileRoute(fileBasename: string): FileIndexRoute {
   if (ext !== null && IMAGE_EXTENSIONS.has(ext)) {
     return "qwen-image";
   }
-  if (ext !== null && TEXT_EMBED_EXTENSIONS.has(ext)) {
-    return "text-embed";
+  if (ext !== null && QWEN_TEXT_EXTENSIONS.has(ext)) {
+    return "qwen-text";
   }
   if (ext === null || SKIP_EXTENSIONS.has(ext)) {
     return "skip";
@@ -80,9 +80,14 @@ export function classifyFileRoute(fileBasename: string): FileIndexRoute {
   return "skip";
 }
 
-/** True when the route needs a GPU qwen session (Docling docs, raster images, HEIC). */
+/** True when the route needs a GPU qwen session. */
 export function routeNeedsQwen(route: FileIndexRoute): boolean {
-  return route === "docling" || route === "qwen-image" || route === "heic";
+  return (
+    route === "docling" ||
+    route === "qwen-text" ||
+    route === "qwen-image" ||
+    route === "heic"
+  );
 }
 
 /** OTEL-friendly route label for logs. */
@@ -90,12 +95,12 @@ export function routeLogLabel(route: FileIndexRoute): string {
   switch (route) {
     case "docling":
       return "docling";
+    case "qwen-text":
+      return "qwen-text";
     case "qwen-image":
       return "qwen-image";
     case "heic":
       return "qwen-image";
-    case "text-embed":
-      return "text-embed";
     case "skip":
       return "skip";
   }

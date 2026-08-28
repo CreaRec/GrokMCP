@@ -92,6 +92,10 @@ async function describeRoutedFile(
     }
     case "qwen-image":
       return describeWithVisionImage(absolutePath, ollamaUrl, config.visionModel);
+    case "qwen-text": {
+      const text = await readFile(absolutePath, "utf-8");
+      return describeFromDocumentText(text, fileName, ollamaUrl, config.visionModel);
+    }
     case "heic": {
       const converted = await convertHeicToJpeg(absolutePath);
       try {
@@ -103,17 +107,6 @@ async function describeRoutedFile(
     default:
       throw new Error(`Unexpected qwen route: ${file.route}`);
   }
-}
-
-async function embedPlainTextFile(absolutePath: string, fileName: string): Promise<{
-  label: string;
-  description: string;
-}> {
-  const text = await readFile(absolutePath, "utf-8");
-  return {
-    label: fileName.length > 100 ? fileName.slice(0, 97) + "..." : fileName,
-    description: text,
-  };
 }
 
 export async function runIndex(
@@ -418,11 +411,10 @@ export async function runIndex(
   }
 
   const qwenQueue = routedFiles.filter((file) => routeNeedsQwen(file.route));
-  const textEmbedQueue = routedFiles.filter((file) => file.route === "text-embed");
 
   const dirtyFolderCount = await countDirtyFolders(db);
 
-  const workKind = planIndexWork(qwenQueue.length, textEmbedQueue.length, dirtyFolderCount);
+  const workKind = planIndexWork(qwenQueue.length, dirtyFolderCount);
 
   if (workKind === "none") {
     logInfo("nothing dirty; skipping embed/vision phase");
@@ -480,31 +472,8 @@ export async function runIndex(
     });
   };
 
-  const processTextEmbedFile = async (
-    file: RoutedDirtyFile,
-    embedFn: (text: string) => Promise<{ embedding: number[]; model: string }>,
-  ): Promise<void> => {
-    const absolutePath = absolutePathForFile(config, file.synoPath);
-    const fileName = basename(file.synoPath);
-    const content = await embedPlainTextFile(absolutePath, fileName);
-    const embed = await embedFn(content.description);
-    await upsertIndexedFile({
-      fileId: file.id,
-      label: content.label,
-      description: content.description,
-      embedding: embed.embedding,
-      embedModel: embed.model,
-      redacted: false,
-      route: file.route,
-      synoPath: file.synoPath,
-    });
-  };
-
   const processVisionPhase = async (ollamaUrl: string): Promise<void> => {
-    logInfo("qwen phase started", {
-      qwen_files: qwenQueue.length,
-      text_embed_files: textEmbedQueue.length,
-    });
+    logInfo("qwen phase started", { qwen_files: qwenQueue.length });
 
     const gpuEmbed = (text: string) => embedText(text, ollamaUrl, config.embedModel);
 
@@ -513,18 +482,6 @@ export async function runIndex(
         await processQwenFile(file, ollamaUrl, gpuEmbed);
       } catch (err) {
         logErrorWithCause("qwen/embedding failed", err, {
-          syno_path: file.synoPath,
-          route: routeLogLabel(file.route),
-        });
-        stats.errors++;
-      }
-    }
-
-    for (const file of textEmbedQueue) {
-      try {
-        await processTextEmbedFile(file, gpuEmbed);
-      } catch (err) {
-        logErrorWithCause("text-embed failed", err, {
           syno_path: file.synoPath,
           route: routeLogLabel(file.route),
         });
@@ -543,37 +500,6 @@ export async function runIndex(
         );
       } catch (err) {
         logErrorWithCause("folder rebuild failed", err);
-        stats.errors++;
-      }
-    }
-  };
-
-  const processCpuTextEmbedPhase = async (): Promise<void> => {
-    logInfo("CPU text-embed phase started", { text_embed_files: textEmbedQueue.length });
-
-    for (const file of textEmbedQueue) {
-      try {
-        await processTextEmbedFile(file, (text) => embedTextCpu(text));
-      } catch (err) {
-        logErrorWithCause("CPU text-embed failed", err, {
-          syno_path: file.synoPath,
-          route: routeLogLabel(file.route),
-        });
-        stats.errors++;
-      }
-    }
-
-    const folderCount = await countDirtyFolders(db);
-    if (folderCount > 0) {
-      logInfo("rebuilding dirty folders on CPU embedder", { count: folderCount });
-      try {
-        stats.foldersRebuilt += await rebuildDirtyFolders(
-          db,
-          (text) => embedTextCpu(text),
-          now,
-        );
-      } catch (err) {
-        logErrorWithCause("CPU folder rebuild failed", err);
         stats.errors++;
       }
     }
@@ -642,8 +568,6 @@ export async function runIndex(
     } else {
       logWarn("no RunPod or Ollama configured; skipping vision phase for dirty files");
     }
-  } else if (workKind === "cpu_embed") {
-    await processCpuTextEmbedPhase();
   } else if (workKind === "cpu_folders") {
     await processCpuFolderRebuild();
   }
