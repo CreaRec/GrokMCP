@@ -17,6 +17,7 @@ import {
   getDirectParentFolderPath,
   shouldAbortSoftDelete,
   isDos83ShortBasename,
+  isNotSupportedRoute,
   type ExistingFileRow,
 } from "./dirty.js";
 import {
@@ -63,6 +64,8 @@ export interface IndexStats {
   hashed: number;
   dirty: number;
   skipped: number;
+  /** Files classified as always-skip and persisted as notSupported this run. */
+  notSupported: number;
   processed: number;
   foldersRebuilt: number;
   errors: number;
@@ -155,6 +158,7 @@ export async function runIndex(
     hashed: 0,
     dirty: 0,
     skipped: 0,
+    notSupported: 0,
     processed: 0,
     foldersRebuilt: 0,
     errors: 0,
@@ -227,6 +231,7 @@ export async function runIndex(
     seenFilePaths.add(file.synoPath);
     try {
       const fileBasename = basename(file.synoPath);
+      const alwaysSkip = isNotSupportedRoute(fileBasename);
 
       const existingRows = await db.$queryRaw<
         Array<{
@@ -237,9 +242,11 @@ export async function runIndex(
           has_embedding: boolean;
           description: string | null;
           deleted_at: Date | null;
+          not_supported: boolean;
         }>
       >`
-        SELECT id, content_hash, bytes, mtime, (embedding IS NOT NULL) as has_embedding, description, deleted_at
+        SELECT id, content_hash, bytes, mtime, (embedding IS NOT NULL) as has_embedding,
+               description, deleted_at, not_supported
         FROM files
         WHERE syno_path = ${file.synoPath}
         LIMIT 1
@@ -251,9 +258,61 @@ export async function runIndex(
             contentHash: existingRow.content_hash,
             hasEmbedding: existingRow.has_embedding,
             description: existingRow.description,
+            notSupported: existingRow.not_supported,
             deletedAt: existingRow.deleted_at,
           }
         : null;
+
+      // Always-skip: mark notSupported once, never hash/dirty/GPU/folder-dirty for them.
+      if (alwaysSkip) {
+        if (existing) {
+          const wasDeleted = existing.deletedAt !== null;
+          await db.file.update({
+            where: { id: existing.id },
+            data: {
+              lastSeenAt: now,
+              bytes: file.bytes,
+              mtime: file.mtime,
+              dirty: false,
+              notSupported: true,
+              deletedAt: null,
+            },
+          });
+          if (wasDeleted) {
+            stats.undeleted++;
+            logInfo("undeleted file", { syno_path: file.synoPath, not_supported: true });
+          } else if (!existing.notSupported) {
+            logInfo("marked file notSupported", {
+              syno_path: file.synoPath,
+              route: routeLogLabel("skip"),
+            });
+          }
+        } else {
+          const parentPath = getDirectParentFolderPath(file.synoPath);
+          const folder = parentPath
+            ? await db.folder.findFirst({ where: { synoPath: parentPath } })
+            : null;
+          await db.file.create({
+            data: {
+              synoPath: file.synoPath,
+              kind: file.kind,
+              bytes: file.bytes,
+              mtime: file.mtime,
+              label: fileBasename,
+              lastSeenAt: now,
+              dirty: false,
+              notSupported: true,
+              folderId: folder?.id,
+            },
+          });
+          logInfo("marked file notSupported", {
+            syno_path: file.synoPath,
+            route: routeLogLabel("skip"),
+          });
+        }
+        stats.notSupported++;
+        continue;
+      }
 
       // Skip SHA-256 when stored content_hash + bytes + mtime still match the walk.
       // shouldMarkDirty still runs so incomplete vision stays dirty / GPU-queued.
@@ -277,6 +336,9 @@ export async function runIndex(
         stats.hashed++;
       }
 
+      // Route became supported: clear notSupported so incomplete vision can dirty again.
+      const clearNotSupported = existing?.notSupported === true;
+
       if (existing) {
         const wasDeleted = existing.deletedAt !== null;
         const decision = shouldMarkDirty(existing, hash, fileBasename);
@@ -289,9 +351,18 @@ export async function runIndex(
             bytes: file.bytes,
             mtime: file.mtime,
             dirty: decision.dirty,
+            notSupported: false,
             deletedAt: null,
           },
         });
+
+        if (clearNotSupported) {
+          logInfo("cleared notSupported; route now supported", {
+            syno_path: file.synoPath,
+            dirty: decision.dirty,
+            reason: decision.reason,
+          });
+        }
 
         if (wasDeleted) {
           stats.undeleted++;
@@ -323,6 +394,7 @@ export async function runIndex(
             contentHash: hash,
             lastSeenAt: now,
             dirty: decision.dirty,
+            notSupported: false,
             folderId: folder?.id,
           },
         });
@@ -344,6 +416,7 @@ export async function runIndex(
     hashed: stats.hashed,
     hash_skipped: hashSkipped,
     dirty: stats.dirty,
+    not_supported: stats.notSupported,
   });
 
   const previousNonDeletedCount = await db.$queryRaw<Array<{ count: bigint }>>`
@@ -470,7 +543,7 @@ export async function runIndex(
     });
     await db.file.update({
       where: { id: file.id },
-      data: { dirty: false },
+      data: { dirty: false, notSupported: true },
     });
   }
 

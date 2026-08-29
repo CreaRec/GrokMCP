@@ -35,6 +35,7 @@ model File {
   contentHash    String?   @map("content_hash") // SHA-256 hex of file bytes, written by indexer/backfill
   lastSeenAt     DateTime? @map("last_seen_at") @db.Timestamptz // this scan saw the path
   dirty          Boolean   @default(false)                      // needs LLM/embed work
+  notSupported   Boolean   @default(false) @map("not_supported") // always-skip route; ignore on later runs
   deletedAt      DateTime? @map("deleted_at") @db.Timestamptz   // soft-delete timestamp; hard-delete after 30 days
 
   folder Folder? @relation(fields: [folderId], references: [id])

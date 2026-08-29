@@ -1,13 +1,24 @@
+import { classifyFileRoute } from "./file-route.js";
+
 export interface ExistingFileRow {
   id: string;
   contentHash: string | null;
   hasEmbedding: boolean;
   description: string | null;
+  /** Persisted always-skip marker; cleared when route becomes supported. */
+  notSupported?: boolean;
 }
 
 export interface DirtyDecision {
   dirty: boolean;
-  reason: "new" | "hash_missing" | "hash_changed" | "incomplete" | "skipped_83" | "clean";
+  reason:
+    | "new"
+    | "hash_missing"
+    | "hash_changed"
+    | "incomplete"
+    | "skipped_83"
+    | "not_supported"
+    | "clean";
 }
 
 /** Vision result is complete only when both embedding and description exist. */
@@ -26,6 +37,11 @@ export function isDos83ShortBasename(name: string): boolean {
   return /^[^./\\]{1,6}~[0-9A-Za-z]{1,2}\.[^./\\]{1,3}$/.test(base);
 }
 
+/** True when classifyFileRoute would always skip this basename (mp3/wav/unknown binary/…). */
+export function isNotSupportedRoute(fileBasename: string): boolean {
+  return classifyFileRoute(fileBasename) === "skip";
+}
+
 export function shouldMarkDirty(
   existingRow: ExistingFileRow | null,
   newHash: string,
@@ -34,6 +50,11 @@ export function shouldMarkDirty(
   // Temporary (#27): never queue 8.3 CIFS duplicates for vision/GPU.
   if (fileBasename !== undefined && isDos83ShortBasename(fileBasename)) {
     return { dirty: false, reason: "skipped_83" };
+  }
+
+  // Always-skip types: never dirty for incomplete vision; persist as notSupported in the run.
+  if (fileBasename !== undefined && isNotSupportedRoute(fileBasename)) {
+    return { dirty: false, reason: "not_supported" };
   }
 
   if (!existingRow) {
@@ -86,9 +107,9 @@ export function getDirectParentFolderPath(synoPath: string): string | null {
   return parents.length > 0 ? parents[parents.length - 1]! : null;
 }
 
-/** True when a dirty file should go through vision/GPU (8.3 names are excluded). */
+/** True when a dirty file should go through vision/GPU (8.3 names and always-skip are excluded). */
 export function fileNeedsVision(fileDirty: boolean, fileBasename: string): boolean {
-  return fileDirty && !isDos83ShortBasename(fileBasename);
+  return fileDirty && !isDos83ShortBasename(fileBasename) && !isNotSupportedRoute(fileBasename);
 }
 
 export interface AbortCheckResult {
@@ -123,12 +144,13 @@ export function isEligibleForHardDelete(deletedAt: Date | null, now: Date): bool
 export function shouldUndelete(
   existing: ExistingFileRow & { deletedAt: Date | null },
   newHash: string,
+  fileBasename?: string,
 ): { undelete: boolean; dirty: boolean; reason: string } {
   if (!existing.deletedAt) {
-    const decision = shouldMarkDirty(existing, newHash);
+    const decision = shouldMarkDirty(existing, newHash, fileBasename);
     return { undelete: false, dirty: decision.dirty, reason: decision.reason };
   }
 
-  const decision = shouldMarkDirty(existing, newHash);
+  const decision = shouldMarkDirty(existing, newHash, fileBasename);
   return { undelete: true, dirty: decision.dirty, reason: `undeleted_${decision.reason}` };
 }
