@@ -675,11 +675,17 @@ export async function runIndex(
     if (folderCount > 0) {
       logInfo("rebuilding dirty folders on GPU Ollama session", { count: folderCount });
       try {
-        stats.foldersRebuilt += await rebuildDirtyFolders(
+        const result = await rebuildDirtyFolders(
           db,
           (text) => embedText(text, ollamaUrl, config.embedModel),
           now,
         );
+        stats.foldersRebuilt += result.rebuilt;
+        stats.errors += result.failed;
+        logInfo("dirty folder rebuild finished", {
+          rebuilt: result.rebuilt,
+          failed: result.failed,
+        });
       } catch (err) {
         logErrorWithCause("folder rebuild failed", err);
         stats.errors++;
@@ -693,11 +699,17 @@ export async function runIndex(
 
     logInfo("rebuilding dirty folders on CPU embedder", { count: folderCount });
     try {
-      stats.foldersRebuilt += await rebuildDirtyFolders(
+      const result = await rebuildDirtyFolders(
         db,
         (text) => embedTextCpu(text),
         now,
       );
+      stats.foldersRebuilt += result.rebuilt;
+      stats.errors += result.failed;
+      logInfo("CPU dirty folder rebuild finished", {
+        rebuilt: result.rebuilt,
+        failed: result.failed,
+      });
     } catch (err) {
       logErrorWithCause("CPU folder rebuild failed", err);
       stats.errors++;
