@@ -1,6 +1,6 @@
 services:
   apple-calendar:
-    image: ${IMAGE:-ghcr.io/crearec/grok-mcp-apple-calendar}:${IMAGE_TAG:-main}
+    image: ${IMAGE:-ghcr.io/crearec/grok-mcp-apple-calendar}:main
     container_name: grok-mcp-apple-calendar
     restart: unless-stopped
     ports:
@@ -65,7 +65,7 @@ services:
       - default
 
   synology-mcp:
-    image: ${SYNOLOGY_IMAGE:-ghcr.io/crearec/grok-mcp-synology}:${SYNOLOGY_IMAGE_TAG:-main}
+    image: ${SYNOLOGY_IMAGE:-ghcr.io/crearec/grok-mcp-synology}:main
     container_name: grok-mcp-synology
     restart: unless-stopped
     ports:
@@ -98,7 +98,7 @@ services:
       - lgtm
 
   synology-indexer:
-    image: ${SYNOLOGY_INDEXER_IMAGE:-ghcr.io/crearec/grok-mcp-synology-indexer}:${SYNOLOGY_INDEXER_IMAGE_TAG:-main}
+    image: ${SYNOLOGY_INDEXER_IMAGE:-ghcr.io/crearec/grok-mcp-synology-indexer}:main
     container_name: grok-mcp-synology-indexer
     restart: unless-stopped
     env_file:
@@ -152,7 +152,7 @@ services:
       - lgtm
 
   utilities:
-    image: ${UTILITIES_IMAGE:-ghcr.io/crearec/grok-mcp-utilities}:${UTILITIES_IMAGE_TAG:-main}
+    image: ${UTILITIES_IMAGE:-ghcr.io/crearec/grok-mcp-utilities}:main
     container_name: grok-mcp-utilities
     restart: unless-stopped
     ports:
