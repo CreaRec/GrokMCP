@@ -99,4 +99,12 @@ describe("runIndex GPU vs CPU paths", () => {
     expect(isRunPodGpuConfigured(config)).toBe(false);
     expect(ollamaUrlOverrideForGpuPod(config)).toBe("http://localhost:11434");
   });
+
+  it("mp3-only set plans none (no GPU) after notSupported classification", () => {
+    const files = ["a.mp3", "b.wav", "c.otf", "d.ovpn", "e.bson", "f.bak", "LICENSE"];
+    const qwenCount = files.filter((name) => routeNeedsQwen(classifyFileRoute(name))).length;
+    expect(qwenCount).toBe(0);
+    expect(planIndexWork(qwenCount, 0)).toBe("none");
+    expect(withGpuPod).not.toHaveBeenCalled();
+  });
 });

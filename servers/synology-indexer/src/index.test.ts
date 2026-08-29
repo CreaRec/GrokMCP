@@ -9,10 +9,13 @@ import {
   isEligibleForHardDelete,
   shouldUndelete,
   isDos83ShortBasename,
+  isNotSupportedRoute,
 } from "./dirty.js";
 import { generateFolderSummary } from "./folder-summarizer.js";
 import { mountPathToSynoPath } from "./walker.js";
 import { parseIndexTime } from "./config.js";
+import { classifyFileRoute, routeNeedsQwen } from "./file-route.js";
+import { planIndexWork } from "./index-plan.js";
 
 describe("isDos83ShortBasename", () => {
   it("detects issue #27 CIFS short names", () => {
@@ -144,6 +147,70 @@ describe("shouldMarkDirty", () => {
     const result = shouldMarkDirty(existing, "receipt-hash", "receipt.pdf");
     expect(result.dirty).toBe(true);
     expect(result.reason).toBe("incomplete");
+  });
+});
+
+describe("notSupported always-skip files", () => {
+  const incomplete = {
+    id: "skip-id",
+    contentHash: "same-hash",
+    hasEmbedding: false,
+    description: null,
+    notSupported: false,
+  };
+
+  it("first-time skip is not dirty (reason not_supported)", () => {
+    expect(isNotSupportedRoute("track.mp3")).toBe(true);
+    const result = shouldMarkDirty(null, "any-hash", "track.mp3");
+    expect(result.dirty).toBe(false);
+    expect(result.reason).toBe("not_supported");
+  });
+
+  it("second run still ignores incomplete vision for skip types", () => {
+    const alreadyMarked = { ...incomplete, notSupported: true };
+    const result = shouldMarkDirty(alreadyMarked, "same-hash", "track.mp3");
+    expect(result.dirty).toBe(false);
+    expect(result.reason).toBe("not_supported");
+  });
+
+  it("does not re-dirty wav/otf/ovpn/bson/bak or extensionless names", () => {
+    for (const name of ["a.wav", "font.otf", "vpn.ovpn", "data.bson", "old.bak", "Makefile"] as const) {
+      const result = shouldMarkDirty(incomplete, "same-hash", name);
+      expect(result.dirty).toBe(false);
+      expect(result.reason).toBe("not_supported");
+    }
+  });
+
+  it("skip file does not need vision / GPU even if dirty flag were set", () => {
+    expect(fileNeedsVision(true, "track.mp3")).toBe(false);
+    expect(routeNeedsQwen(classifyFileRoute("track.mp3"))).toBe(false);
+    expect(planIndexWork(0, 0)).toBe("none");
+  });
+
+  it("later-supported type can become dirty again after route change", () => {
+    // Previously persisted as notSupported while named track.mp3; path/route now supported.
+    const wasNotSupported = {
+      id: "was-skip",
+      contentHash: "same-hash",
+      hasEmbedding: false,
+      description: null,
+      notSupported: true,
+    };
+    expect(isNotSupportedRoute("track.pdf")).toBe(false);
+    const result = shouldMarkDirty(wasNotSupported, "same-hash", "track.pdf");
+    expect(result.dirty).toBe(true);
+    expect(result.reason).toBe("incomplete");
+  });
+
+  it("does not kick folder rebuild solely because of notSupported children", () => {
+    const dirtyIds = new Set<string>();
+    expect(shouldRebuildFolder(dirtyIds, ["mp3-1", "mp3-2"])).toBe(false);
+  });
+
+  it("8.3 short names stay on skipped_83 even when extension would also skip", () => {
+    const result = shouldMarkDirty(incomplete, "same-hash", "SONG12~1.MP3");
+    expect(result.dirty).toBe(false);
+    expect(result.reason).toBe("skipped_83");
   });
 });
 

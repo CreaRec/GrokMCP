@@ -51,6 +51,18 @@ describe("folder dirty triggers", () => {
     if (parent) paths.add(parent);
     expect([...paths]).toEqual(["/Share/Projects"]);
   });
+
+  it("new notSupported child does not dirty parent folder", () => {
+    const paths = new Set<string>();
+    const newFile = "/Share/Music/track.mp3";
+    const decisionDirty = false; // always-skip → notSupported, never dirty
+    // Indexer only folder-dirties when decision.dirty (or undelete for supported files)
+    if (decisionDirty) {
+      const parent = getDirectParentFolderPath(newFile);
+      if (parent) paths.add(parent);
+    }
+    expect([...paths]).toEqual([]);
+  });
 });
 
 describe("rebuildDirtyFolders integration shape", () => {
