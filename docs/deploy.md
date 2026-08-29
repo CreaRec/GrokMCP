@@ -19,10 +19,10 @@ Deploy directory: `/home/crearec/grok-mcp`
    - `servers/apple-calendar/**` → push `grok-mcp-apple-calendar` (`:main` + `:sha-<short>`)
    - `servers/utilities/**` → push `grok-mcp-utilities` (`:main` + `:sha-<short>`)
    - `docker-compose.yml` alone → redeploy without rebuilding images
-4. Actions copies `docker-compose.yml` to the server, exports **only** the image tag published in that run (`IMAGE_TAG`), then `docker compose pull && docker compose up -d`.
+4. Actions copies `docker-compose.yml` to the server, then runs `docker compose pull && docker compose up -d`. Compose pins every grok-mcp service to the floating `:main` tag (no `*_IMAGE_TAG` / SHA pins). Pull refreshes digests for all services; a utilities-only (or calendar-only) publish cannot roll another service back to a stale `sha-*` left in `.env`.
 5. After a successful image publish, `ghcr_cleanup` keeps the **10** newest `sha-*` tags per package, always preserves `:main`, and deletes untagged/orphaned manifests.
 
-App secrets stay on the server in `.env`. CI never mutates `.env` and never commits secrets.
+App secrets stay on the server in `.env`. CI never mutates `.env` and never commits secrets. Debian `.env` should **not** set `IMAGE_TAG`, `SYNOLOGY_IMAGE_TAG`, `SYNOLOGY_INDEXER_IMAGE_TAG`, or `UTILITIES_IMAGE_TAG` — drop those lines if present; compose ignores them.
 
 ## One-time server bootstrap
 
@@ -48,14 +48,13 @@ cd /home/crearec/grok-mcp
 Create `.env` (never commit it). Copy from the repo `.env.example` and fill in real values:
 
 ```sh
-IMAGE=ghcr.io/crearec/grok-mcp-apple-calendar
-IMAGE_TAG=main
-
 ICLOUD_CALDAV_USERNAME=your-icloud-email@icloud.com
 ICLOUD_CALDAV_PASSWORD=xxxx-xxxx-xxxx-xxxx
 ICLOUD_CALDAV_CALENDAR_URL=https://caldav.icloud.com/YOUR_USER_ID/calendars/YOUR_CALENDAR/
 USER_TIMEZONE=America/Chicago
 ```
+
+Do **not** add `IMAGE_TAG` / `*_IMAGE_TAG` lines. Images are `ghcr.io/crearec/grok-mcp-<service>:main` in compose.
 
 `PORT` and `HOST` have defaults in the container and are not required in `.env`.
 
@@ -93,9 +92,8 @@ Add these variables to `.env`:
 # CreaDashboard base URL (no trailing path)
 DASHBOARD_API_URL=http://192.168.1.135:3080
 
-# Optional image/tag overrides (defaults in docker-compose.yml)
+# Optional registry path override only (tag is always :main in compose)
 # UTILITIES_IMAGE=ghcr.io/crearec/grok-mcp-utilities
-# UTILITIES_IMAGE_TAG=main
 ```
 
 The container exposes port **8795**. Health check:

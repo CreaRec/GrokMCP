@@ -458,10 +458,6 @@ jobs:
         env:
           SSH_USER: ${{ secrets.DEPLOY_USER }}
           SERVER_HOST: ${{ secrets.DEPLOY_HOST }}
-          APPLE_CALENDAR_IMAGE_TAG_NEW: ${{ needs.publish-apple-calendar.outputs.image_tag }}
-          SYNOLOGY_IMAGE_TAG_NEW: ${{ needs.publish-synology.outputs.image_tag }}
-          SYNOLOGY_INDEXER_IMAGE_TAG_NEW: ${{ needs.publish-synology-indexer.outputs.image_tag }}
-          UTILITIES_IMAGE_TAG_NEW: ${{ needs.publish-utilities.outputs.image_tag }}
           APPLE_CALENDAR_CHANGED: ${{ needs.changes.outputs.apple-calendar }}
           SYNOLOGY_CHANGED: ${{ needs.changes.outputs.synology }}
           SYNOLOGY_INDEXER_CHANGED: ${{ needs.changes.outputs.synology-indexer }}
@@ -486,24 +482,13 @@ jobs:
           cd '${DEPLOY_DIR}'
 
           if [ ! -f .env ]; then
-            echo "ERROR: ${DEPLOY_DIR}/.env is missing. Create it from .env.example (app secrets + IMAGE)." >&2
+            echo "ERROR: ${DEPLOY_DIR}/.env is missing. Create it from .env.example (app secrets)." >&2
             exit 1
           fi
 
-          # Export tag only for images published in this run; leave others from .env.
-          if [ '${APPLE_CALENDAR_CHANGED}' = 'true' ] && [ -n '${APPLE_CALENDAR_IMAGE_TAG_NEW}' ]; then
-            export IMAGE_TAG='${APPLE_CALENDAR_IMAGE_TAG_NEW}'
-          fi
-          if [ '${SYNOLOGY_CHANGED}' = 'true' ] && [ -n '${SYNOLOGY_IMAGE_TAG_NEW}' ]; then
-            export SYNOLOGY_IMAGE_TAG='${SYNOLOGY_IMAGE_TAG_NEW}'
-          fi
-          if [ '${SYNOLOGY_INDEXER_CHANGED}' = 'true' ] && [ -n '${SYNOLOGY_INDEXER_IMAGE_TAG_NEW}' ]; then
-            export SYNOLOGY_INDEXER_IMAGE_TAG='${SYNOLOGY_INDEXER_IMAGE_TAG_NEW}'
-          fi
-          if [ '${UTILITIES_CHANGED}' = 'true' ] && [ -n '${UTILITIES_IMAGE_TAG_NEW}' ]; then
-            export UTILITIES_IMAGE_TAG='${UTILITIES_IMAGE_TAG_NEW}'
-          fi
-
+          # Always pull floating :main for every service (no SHA pins / .env IMAGE_TAG).
+          # A utilities-only publish updates utilities:main; other services stay on their
+          # current :main digests and cannot roll back to a stale sha-* from .env.
           docker compose pull
           docker compose up -d
           # Create docling sidecar container without starting it (ephemeral lifecycle).
