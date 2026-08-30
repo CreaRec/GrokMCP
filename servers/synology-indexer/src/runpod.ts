@@ -380,7 +380,8 @@ export async function pullModelIfMissing(
   const pullResponse = await fetch(`${ollamaUrl}/api/pull`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: modelName, stream: false }),
+    // Current Ollama expects `model`; older builds still read `name`.
+    body: JSON.stringify({ model: modelName, name: modelName, stream: false }),
   });
 
   if (!pullResponse.ok) {
