@@ -11,6 +11,7 @@ import {
   DEFAULT_START_RETRY_MS,
   DEFAULT_OLLAMA_HEALTHY_TIMEOUT_MS,
   waitForOllamaHealthy,
+  pullModelIfMissing,
   type RunPodDeployConfig,
   type RunPodPodConfig,
 } from "./runpod.js";
@@ -87,9 +88,37 @@ describe("isRetryablePodStartError", () => {
     expect(isRetryablePodStartError(new Error("zero gpu stock"))).toBe(true);
   });
 
+  it("retries generic RunPod GraphQL 500 / try-again-later messages", () => {
+    expect(
+      isRetryablePodStartError(
+        new Error(
+          "RunPod GraphQL error: Something went wrong. Please try again later or contact support.",
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      isRetryablePodStartError(new Error("RunPod GraphQL error: please try again later")),
+    ).toBe(true);
+  });
+
+  it("retries transient HTTP 429/5xx from RunPod API", () => {
+    expect(isRetryablePodStartError(new Error("RunPod API error: 500 Internal Server Error"))).toBe(
+      true,
+    );
+    expect(isRetryablePodStartError(new Error("RunPod API error: 502 Bad Gateway"))).toBe(true);
+    expect(isRetryablePodStartError(new Error("RunPod API error: 503 Service Unavailable"))).toBe(
+      true,
+    );
+    expect(isRetryablePodStartError(new Error("RunPod API error: 504 Gateway Timeout"))).toBe(true);
+    expect(isRetryablePodStartError(new Error("RunPod API error: 429 Too Many Requests"))).toBe(
+      true,
+    );
+  });
+
   it("does not retry auth / 401", () => {
     expect(isRetryablePodStartError(new Error("RunPod API error: 401 Unauthorized"))).toBe(false);
     expect(isRetryablePodStartError(new Error("authentication failed"))).toBe(false);
+    expect(isRetryablePodStartError(new Error("unauthorized"))).toBe(false);
   });
 
   it("does not retry TERMINATED", () => {
@@ -715,6 +744,45 @@ describe("buildRunPodProxyOllamaUrl", () => {
       "https://hkozxlbwkzbudu-11434.proxy.runpod.net",
     );
     expect(buildRunPodProxyOllamaUrl("abc", 8080)).toBe("https://abc-8080.proxy.runpod.net");
+  });
+});
+
+describe("pullModelIfMissing", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("POST /api/pull JSON includes model equal to the vision model name", async () => {
+    const visionModel = "qwen2.5vl:7b";
+    const fetchMock = vi.mocked(fetch);
+    const pullBodies: unknown[] = [];
+
+    fetchMock.mockImplementation(async (url, init) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/api/tags")) {
+        return jsonResponse({ models: [] });
+      }
+      if (urlStr.includes("/api/pull")) {
+        pullBodies.push(JSON.parse(String(init?.body ?? "{}")));
+        return jsonResponse({});
+      }
+      return jsonResponse({});
+    });
+
+    await pullModelIfMissing("https://example-pod-11434.proxy.runpod.net", visionModel);
+
+    expect(pullBodies).toHaveLength(1);
+    expect(pullBodies[0]).toMatchObject({
+      model: visionModel,
+      name: visionModel,
+      stream: false,
+    });
   });
 });
 

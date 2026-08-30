@@ -66,7 +66,8 @@ export function getStartPodRetryDefaults(
 }
 
 /**
- * Retry only GPU capacity / fleet stock class errors on pod create.
+ * Retry GPU capacity / fleet stock errors and transient RunPod API failures
+ * (generic GraphQL 500s, HTTP 429/5xx) on pod create.
  * Never retry auth (401) or TERMINATED pods.
  */
 export function isRetryablePodStartError(err: unknown): boolean {
@@ -92,7 +93,16 @@ export function isRetryablePodStartError(err: unknown): boolean {
     lower.includes("no instances available") ||
     lower.includes("zero gpu") ||
     (lower.includes("insufficient") && lower.includes("gpu")) ||
-    (lower.includes("capacity") && lower.includes("gpu"))
+    (lower.includes("capacity") && lower.includes("gpu")) ||
+    // RunPod often wraps real backend failures as this generic GraphQL message.
+    lower.includes("something went wrong") ||
+    lower.includes("please try again later") ||
+    // HTTP status from graphqlRequest: `RunPod API error: <status> ...`
+    lower.includes("runpod api error: 429") ||
+    lower.includes("runpod api error: 500") ||
+    lower.includes("runpod api error: 502") ||
+    lower.includes("runpod api error: 503") ||
+    lower.includes("runpod api error: 504")
   );
 }
 
@@ -370,7 +380,8 @@ export async function pullModelIfMissing(
   const pullResponse = await fetch(`${ollamaUrl}/api/pull`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: modelName, stream: false }),
+    // Current Ollama expects `model`; older builds still read `name`.
+    body: JSON.stringify({ model: modelName, name: modelName, stream: false }),
   });
 
   if (!pullResponse.ok) {
