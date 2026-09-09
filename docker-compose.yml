@@ -180,18 +180,20 @@ services:
       - lgtm
 
   # Home MCP for Nikita’s agents only — do not auto-wire for Sergey/Pizduk.
+  # Host networking: debian-server cupsd listens only on 127.0.0.1:631, so bridge
+  # networks cannot reach CUPS. host mode lets lp/lpstat use localhost CUPS; MCP
+  # still binds PORT 8797 on the host (Tailscale → host:8797). ports: is unused.
   print:
     image: ${PRINT_IMAGE:-ghcr.io/crearec/grok-mcp-print}:main
     container_name: grok-mcp-print
     restart: unless-stopped
-    ports:
-      - "8797:8797"
+    network_mode: host
     env_file:
       - .env
     environment:
       - PORT=8797
       - HOST=0.0.0.0
-      - CUPS_SERVER=${CUPS_SERVER:-172.17.0.1:631}
+      - CUPS_SERVER=${CUPS_SERVER:-127.0.0.1:631}
       - CUPS_PRINTER=${CUPS_PRINTER:-HP_LaserJet_Tank_2504dw}
       - PRINT_SPOOL_DIR=${PRINT_SPOOL_DIR:-/var/tmp/print-mcp}
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://alloy:4318}
@@ -199,8 +201,6 @@ services:
       - OTEL_SERVICE_NAMESPACE=${OTEL_SERVICE_NAMESPACE:-mcp}
       - DEPLOY_ENV=${DEPLOY_ENV:-production}
       - OTEL_SERVICE_VERSION=${PRINT_OTEL_SERVICE_VERSION:-}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     volumes:
       # Host spool → container jail (read-only is fine for path= prints; downloads need rw).
       - ${PRINT_SPOOL_HOST_PATH:-/home/crearec/print-spool}:${PRINT_SPOOL_DIR:-/var/tmp/print-mcp}:rw
@@ -210,9 +210,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
-    networks:
-      - default
-      - lgtm
 
   # Docling is NOT started by `docker compose up -d` (profile + restart: "no").
   # The synology-indexer starts this container when a run has docling-routed dirty files,

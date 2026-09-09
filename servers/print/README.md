@@ -40,7 +40,7 @@ Runs `lpstat -p -d` and returns `{ ok, defaultPrinter?, printers?, error? }`. Do
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `CUPS_SERVER` | Recommended | — | Host cupsd address (`host:631`). Container uses cups-client only. |
+| `CUPS_SERVER` | Recommended | `127.0.0.1:631` (compose) | Host cupsd address. Production compose uses `network_mode: host` because cupsd is localhost-only. |
 | `CUPS_PRINTER` / `DEFAULT_PRINTER` | Recommended | — | Default queue (e.g. `HP_LaserJet_Tank_2504dw`) |
 | `PRINT_SPOOL_DIR` | No | `/var/tmp/print-mcp` | Path jail + temp download/upload root |
 | `PRINT_DOWNLOAD_TIMEOUT_MS` | No | `30000` | URL download timeout |
@@ -59,9 +59,9 @@ sudo apt-get update
 sudo apt-get install -y cups cups-client printer-driver-hpcups  # or IPP Everywhere / foomatic as needed
 sudo systemctl enable --now cups
 
-# Allow remote CUPS clients from Docker bridge / Tailscale if cupsd is locked down.
-# Typically edit /etc/cups/cupsd.conf Listen/Port and allow from 172.17.0.0/16 and Tailscale.
-# Then: sudo systemctl restart cups
+# cupsd on debian-server typically listens only on 127.0.0.1:631.
+# Do not open cupsd to the Docker bridge for this stack — compose uses
+# network_mode: host so lp talks to localhost CUPS instead.
 ```
 
 Add the printer queue (IPP Everywhere is often enough for this model):
@@ -89,16 +89,20 @@ sudo chown crearec:crearec /home/crearec/print-spool
 # Agents / users drop files here, then call print_file with path=/var/tmp/print-mcp/<name>
 ```
 
-Point the container at **host** cupsd (do not run cupsd inside the print MCP image):
+Point the container at **host** cupsd (do not run cupsd inside the print MCP image). Production compose sets `network_mode: host` and defaults `CUPS_SERVER` to localhost:
 
 ```sh
 # In /home/crearec/grok-mcp/.env
-CUPS_SERVER=172.17.0.1:631   # docker bridge gateway to host; or host Tailscale IP:631
+CUPS_SERVER=127.0.0.1:631
 CUPS_PRINTER=HP_LaserJet_Tank_2504dw
 PRINT_SPOOL_DIR=/var/tmp/print-mcp
 ```
 
-If `172.17.0.1` does not reach cupsd, use the host Tailscale IP (`100.x.x.x:631`) or enable `host.docker.internal` (`extra_hosts: host.docker.internal:host-gateway` is set in compose).
+**Why host networking:** bridge networks cannot reach a localhost-only cupsd (`lpstat: Scheduler is not running`). With `network_mode: host`, `lp` / `lpstat` use `127.0.0.1:631`. The MCP still binds **8797** on the host; Tailscale reaches `host:8797`. Spool volume mount is unchanged. After deploy:
+
+```sh
+docker exec grok-mcp-print lpstat -p -d
+```
 
 ## Development
 
@@ -115,7 +119,7 @@ Stdio mode for local MCP clients: `npm run dev`.
 
 ## Production / Grok Bot connect
 
-Compose service `print` publishes **8797** (avoids colliding with CreaParks on the debian host). HTTP path matches siblings: `/mcp` (streamable HTTP) and `/health`.
+Compose service `print` uses `network_mode: host` and binds **8797** on the host (avoids colliding with CreaParks; no `ports:` mapping). HTTP path matches siblings: `/mcp` (streamable HTTP) and `/health`.
 
 From Tailscale (Nikita’s agents only):
 
