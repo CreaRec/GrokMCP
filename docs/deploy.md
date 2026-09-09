@@ -7,6 +7,7 @@ Production runs as a Docker Compose stack. Images come from GitHub Container Reg
 | `ghcr.io/crearec/grok-mcp-apple-calendar` | `apple-calendar` |
 | `grafana/mcp-grafana` (Docker Hub) | `grafana-mcp` |
 | `ghcr.io/crearec/grok-mcp-utilities` | `utilities` |
+| `ghcr.io/crearec/grok-mcp-print` | `print` |
 | `pgvector/pgvector:0.8.6-pg16` (Docker Hub) | `synology-db` |
 
 Deploy directory: `/home/crearec/grok-mcp`
@@ -18,11 +19,12 @@ Deploy directory: `/home/crearec/grok-mcp`
 3. **Path filters** decide what publishes:
    - `servers/apple-calendar/**` → push `grok-mcp-apple-calendar` (`:main` + `:sha-<short>`)
    - `servers/utilities/**` → push `grok-mcp-utilities` (`:main` + `:sha-<short>`)
+   - `servers/print/**` → push `grok-mcp-print` (`:main` + `:sha-<short>`)
    - `docker-compose.yml` alone → redeploy without rebuilding images
 4. Actions copies `docker-compose.yml` to the server, then runs `docker compose pull && docker compose up -d`. Compose pins every grok-mcp service to the floating `:main` tag (no `*_IMAGE_TAG` / SHA pins). Pull refreshes digests for all services; a utilities-only (or calendar-only) publish cannot roll another service back to a stale `sha-*` left in `.env`.
 5. After a successful image publish, `ghcr_cleanup` keeps the **10** newest `sha-*` tags per package, always preserves `:main`, and deletes untagged/orphaned manifests.
 
-App secrets stay on the server in `.env`. CI never mutates `.env` and never commits secrets. Debian `.env` should **not** set `IMAGE_TAG`, `SYNOLOGY_IMAGE_TAG`, `SYNOLOGY_INDEXER_IMAGE_TAG`, or `UTILITIES_IMAGE_TAG` — drop those lines if present; compose ignores them.
+App secrets stay on the server in `.env`. CI never mutates `.env` and never commits secrets. Debian `.env` should **not** set `IMAGE_TAG`, `SYNOLOGY_IMAGE_TAG`, `SYNOLOGY_INDEXER_IMAGE_TAG`, `UTILITIES_IMAGE_TAG`, or `PRINT_IMAGE_TAG` — drop those lines if present; compose ignores them.
 
 ## One-time server bootstrap
 
@@ -104,6 +106,42 @@ curl -sS http://127.0.0.1:8795/health
 
 **Tool:** `utility_bills` — returns latest vs previous billed month for electricity, water, and gas (cost + consumption deltas, `latest_unbilled` when the newest month has no bill yet).
 
+#### Print MCP (home — Nikita agents only)
+
+The `print` service submits jobs to the household **HP LaserJet Tank 2504dw** through **host CUPS** (`lp` / `lpstat`). The container installs `cups-client` only and talks to cupsd via `CUPS_SERVER` — it does **not** run cupsd itself.
+
+**Do not auto-wire this MCP for Sergey or Pizduk.** Connect it only for Nikita’s Jarvis / Grok Bot agents (same home-MCP policy as utilities). **No autopilot print** — jobs run only when the agent explicitly calls `print_file`.
+
+On the Debian host, install/configure CUPS and the queue first (see [servers/print/README.md](../servers/print/README.md)):
+
+```sh
+lpstat -p -d
+lp -d HP_LaserJet_Tank_2504dw /usr/share/cups/data/testprint
+sudo mkdir -p /home/crearec/print-spool
+sudo chown crearec:crearec /home/crearec/print-spool
+```
+
+Add these variables to `.env`:
+
+```sh
+# Host cupsd from the container (docker bridge gateway, Tailscale IP, or host.docker.internal)
+CUPS_SERVER=172.17.0.1:631
+CUPS_PRINTER=HP_LaserJet_Tank_2504dw
+PRINT_SPOOL_DIR=/var/tmp/print-mcp
+PRINT_SPOOL_HOST_PATH=/home/crearec/print-spool
+
+# Optional registry path override only (tag is always :main in compose)
+# PRINT_IMAGE=ghcr.io/crearec/grok-mcp-print
+```
+
+The container exposes port **8796**. Health check:
+
+```sh
+curl -sS http://127.0.0.1:8796/health
+```
+
+**Tools:** `print_file` (path under spool / URL / base64), `list_printers`.
+
 #### Synology DB
 
 The `synology-db` service is a PostgreSQL + pgvector database for the Synology MCP. It stores labels, share URLs, and embeddings for semantic search—**never** file bytes or share passwords.
@@ -182,6 +220,9 @@ Add the MCP servers with URLs:
     },
     "utilities": {
       "url": "http://<DEPLOY_HOST>:8795/mcp"
+    },
+    "print": {
+      "url": "http://<DEPLOY_HOST>:8796/mcp"
     }
   }
 }
@@ -200,6 +241,9 @@ Or behind an nginx reverse proxy:
     },
     "utilities": {
       "url": "https://crearec.app/mcp/utilities"
+    },
+    "print": {
+      "url": "https://crearec.app/mcp/print"
     }
   }
 }
@@ -256,6 +300,35 @@ After merge, on the Debian host:
 1. Add `DASHBOARD_API_URL=http://192.168.1.135:3080` to `/home/crearec/grok-mcp/.env` (if not already set).
 2. Add the nginx snippet above and reload nginx.
 3. Let CI deploy the new `utilities` service, or run `docker compose pull && docker compose up -d utilities`.
+
+#### Reverse proxy note (Print MCP)
+
+The `print` container listens on port **8796** with endpoint path `/mcp`. Configure nginx to forward:
+
+- `https://crearec.app/mcp/print` → `http://127.0.0.1:8796/mcp`
+
+Create `/etc/nginx/snippets/grok-mcp-print.conf` and include it from `/etc/nginx/sites-available/default`:
+
+```nginx
+# /etc/nginx/snippets/grok-mcp-print.conf
+# Print MCP (streamable-http transport) — Nikita home agents only
+
+location = /mcp/print {
+    proxy_pass http://127.0.0.1:8796/mcp;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+After merge, on the Debian host:
+
+1. Ensure host CUPS + `HP_LaserJet_Tank_2504dw` work (`lpstat -p -d`).
+2. Add `CUPS_SERVER`, `CUPS_PRINTER`, and spool paths to `/home/crearec/grok-mcp/.env`.
+3. Create `/home/crearec/print-spool` and add the nginx snippet if using the public proxy.
+4. Let CI deploy, or run `docker compose pull && docker compose up -d print`.
 
 ## Day-to-day operations
 
