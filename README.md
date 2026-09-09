@@ -8,7 +8,8 @@ A monorepo of custom MCP (Model Context Protocol) servers for Grok Bot.
 GrokMCP/
 ├── servers/
 │   ├── apple-calendar/   # Apple Calendar (iCloud CalDAV) MCP
-│   └── utilities/        # CreaDashboard utility bills MCP
+│   ├── utilities/        # CreaDashboard utility bills MCP
+│   └── print/            # Home CUPS / HP LaserJet print MCP
 ├── docker-compose.yml    # Production deployment
 ├── docs/
 │   └── deploy.md         # Deployment guide
@@ -49,6 +50,16 @@ Read-only MCP server for monthly electricity, water, and gas bills from the Crea
 - `utility_bills` — Latest vs previous billed month with cost/consumption deltas
 
 **Env:** `DASHBOARD_API_URL` (default in compose: `http://192.168.1.135:3080`), port **8795**
+
+### [Print](./servers/print/)
+
+Home MCP for printing files on the HP LaserJet Tank 2504dw via host CUPS (`lp` / `lpstat`). For **Nikita’s agents** only — do not auto-wire for Sergey/Pizduk. Prints only when `print_file` is called (no autopilot).
+
+**Tools:**
+- `print_file` — Print PDF/PNG/JPG from spool path, URL, or base64
+- `list_printers` — List CUPS queues
+
+**Env:** `CUPS_SERVER`, `CUPS_PRINTER`, spool mount; port **8796**
 
 ## Adding a New Server
 
