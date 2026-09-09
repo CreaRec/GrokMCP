@@ -115,7 +115,7 @@ Stdio mode for local MCP clients: `npm run dev`.
 
 ## Production / Grok Bot connect
 
-Compose service `print` publishes **8797** (8796 is taken by CreaParks on the debian host). HTTP path matches siblings: `/mcp` (streamable HTTP) and `/health`.
+Compose service `print` publishes **8797** (avoids colliding with CreaParks on the debian host). HTTP path matches siblings: `/mcp` (streamable HTTP) and `/health`.
 
 From Tailscale (Nikita’s agents only):
 

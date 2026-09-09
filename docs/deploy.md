@@ -134,7 +134,7 @@ PRINT_SPOOL_HOST_PATH=/home/crearec/print-spool
 # PRINT_IMAGE=ghcr.io/crearec/grok-mcp-print
 ```
 
-The container exposes port **8797** (8796 is used by CreaParks on `debian-server`). Health check:
+The container exposes port **8797** (avoids colliding with CreaParks on `debian-server`). Health check:
 
 ```sh
 curl -sS http://127.0.0.1:8797/health
