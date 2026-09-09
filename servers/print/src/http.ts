@@ -11,6 +11,11 @@ import { getConfig } from "./config.js";
 import { listPrinters, printFile, type DuplexMode } from "./cups.js";
 import { resolvePrintSource } from "./spool.js";
 import {
+  BAD_REQUEST_SESSION_MESSAGE,
+  resolveMcpSessionAction,
+  SESSION_NOT_FOUND_MESSAGE,
+} from "./session.js";
+import {
   startTelemetry,
   shutdownTelemetry,
   withToolTelemetry,
@@ -168,12 +173,23 @@ async function main() {
   app.post("/mcp", async (req: Request, res: Response) => {
     try {
       const sessionId = req.headers["mcp-session-id"] as string | undefined;
-      let transport: StreamableHTTPServerTransport;
+      const action = resolveMcpSessionAction({
+        sessionId,
+        hasTransport: Boolean(sessionId && transports.has(sessionId)),
+        isInitialize: isInitializeRequest(req.body),
+      });
 
-      if (sessionId && transports.has(sessionId)) {
-        transport = transports.get(sessionId)!;
-      } else if (!sessionId && isInitializeRequest(req.body)) {
-        transport = new StreamableHTTPServerTransport({
+      if (action.type === "reuse") {
+        await transports.get(sessionId!)!.handleRequest(req, res, req.body);
+        return;
+      }
+
+      if (action.type === "initialize") {
+        // Ignore stale session ids from clients reconnecting after restart.
+        if (sessionId) {
+          delete req.headers["mcp-session-id"];
+        }
+        const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (id) => {
             transports.set(id, transport);
@@ -183,16 +199,22 @@ async function main() {
         await server.connect(transport);
         await transport.handleRequest(req, res, req.body);
         return;
-      } else {
-        res.status(400).json({
+      }
+
+      if (action.type === "session_not_found") {
+        res.status(404).json({
           jsonrpc: "2.0",
-          error: { code: -32000, message: "Bad Request: No valid session ID provided" },
+          error: { code: -32001, message: SESSION_NOT_FOUND_MESSAGE },
           id: null,
         });
         return;
       }
 
-      await transport.handleRequest(req, res, req.body);
+      res.status(400).json({
+        jsonrpc: "2.0",
+        error: { code: -32000, message: BAD_REQUEST_SESSION_MESSAGE },
+        id: null,
+      });
     } catch (error) {
       console.error("Error handling MCP request:", error);
       if (!res.headersSent) {
