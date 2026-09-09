@@ -1,5 +1,5 @@
 import { createWriteStream } from "node:fs";
-import { access, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
@@ -17,6 +17,11 @@ export interface ResolvePrintSourceInput {
 export interface ResolvedPrintFile {
   filePath: string;
   cleanup: boolean;
+  /**
+   * When `cleanup` is true, the mkdtemp directory created for this request
+   * (`download-*` / `upload-*` under the spool root). Never the spool root itself.
+   */
+  cleanupDir?: string;
 }
 
 function extensionOf(filePath: string): string {
@@ -102,7 +107,7 @@ export async function materializeBase64(
     throw new Error("contentBase64 decoded to empty content");
   }
   await writeFile(filePath, buffer);
-  return { filePath, cleanup: true };
+  return { filePath, cleanup: true, cleanupDir: dir };
 }
 
 export async function downloadToSpool(
@@ -161,10 +166,43 @@ export async function downloadToSpool(
     });
 
     await pipeline(nodeStream, createWriteStream(filePath));
-    return { filePath, cleanup: true };
+    return { filePath, cleanup: true, cleanupDir: dir };
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Remove a request-scoped mkdtemp directory after printing.
+ * Only deletes when `cleanup` is true and `cleanupDir` is a direct child of the
+ * spool root named `download-*` or `upload-*` — never the spool root or path= files.
+ */
+export async function cleanupResolvedPrintFile(
+  spoolRoot: string,
+  resolved: ResolvedPrintFile,
+): Promise<void> {
+  if (!resolved.cleanup || !resolved.cleanupDir) {
+    return;
+  }
+
+  const rootResolved = path.resolve(spoolRoot);
+  const dirResolved = path.resolve(resolved.cleanupDir);
+  const relative = path.relative(rootResolved, dirResolved);
+  const base = path.basename(dirResolved);
+
+  // Must be a single direct child of the spool (the mkdtemp dir), not nested
+  // traversal, and never the spool root itself.
+  if (
+    relative.startsWith("..") ||
+    path.isAbsolute(relative) ||
+    relative === "" ||
+    relative.includes(path.sep) ||
+    !(base.startsWith("download-") || base.startsWith("upload-"))
+  ) {
+    return;
+  }
+
+  await rm(dirResolved, { recursive: true, force: true });
 }
 
 export async function resolvePrintSource(
