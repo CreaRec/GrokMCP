@@ -110,6 +110,8 @@ curl -sS http://127.0.0.1:8795/health
 
 The `print` service submits jobs to the household **HP LaserJet Tank 2504dw** through **host CUPS** (`lp` / `lpstat`). The container installs `cups-client` only and talks to cupsd via `CUPS_SERVER` — it does **not** run cupsd itself.
 
+**Networking:** On `debian-server`, cupsd listens only on `127.0.0.1:631`, so a bridge-networked container cannot reach CUPS (`lpstat: Scheduler is not running`). Compose therefore sets `network_mode: host` for `print` and defaults `CUPS_SERVER=127.0.0.1:631`. The MCP HTTP server still binds **8797** on the host; Tailscale clients reach `debian-server:8797`. Spool remains a bind mount.
+
 **Do not auto-wire this MCP for Sergey or Pizduk.** Connect it only for Nikita’s Jarvis / Grok Bot agents (same home-MCP policy as utilities). **No autopilot print** — jobs run only when the agent explicitly calls `print_file`.
 
 On the Debian host, install/configure CUPS and the queue first (see [servers/print/README.md](../servers/print/README.md)):
@@ -124,8 +126,8 @@ sudo chown crearec:crearec /home/crearec/print-spool
 Add these variables to `.env`:
 
 ```sh
-# Host cupsd from the container (docker bridge gateway, Tailscale IP, or host.docker.internal)
-CUPS_SERVER=172.17.0.1:631
+# Host cupsd (localhost-only). Compose print uses network_mode: host.
+CUPS_SERVER=127.0.0.1:631
 CUPS_PRINTER=HP_LaserJet_Tank_2504dw
 PRINT_SPOOL_DIR=/var/tmp/print-mcp
 PRINT_SPOOL_HOST_PATH=/home/crearec/print-spool
@@ -134,7 +136,13 @@ PRINT_SPOOL_HOST_PATH=/home/crearec/print-spool
 # PRINT_IMAGE=ghcr.io/crearec/grok-mcp-print
 ```
 
-The container exposes port **8797** (avoids colliding with CreaParks on `debian-server`). Health check:
+After deploy, verify CUPS from inside the container (no compose override needed):
+
+```sh
+docker exec grok-mcp-print lpstat -p -d
+```
+
+The MCP listens on host port **8797** (avoids colliding with CreaParks on `debian-server`; `ports:` mapping is unused with host networking). Health check:
 
 ```sh
 curl -sS http://127.0.0.1:8797/health
