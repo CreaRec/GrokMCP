@@ -45,7 +45,7 @@ Runs `lpstat -p -d` and returns `{ ok, defaultPrinter?, printers?, error? }`. Do
 | `PRINT_SPOOL_DIR` | No | `/var/tmp/print-mcp` | Path jail + temp download/upload root |
 | `PRINT_DOWNLOAD_TIMEOUT_MS` | No | `30000` | URL download timeout |
 | `PRINT_MAX_DOWNLOAD_BYTES` | No | `52428800` | Max URL / download size |
-| `PORT` | No | `8796` | HTTP listen port |
+| `PORT` | No | `8797` | HTTP listen port |
 | `HOST` | No | `0.0.0.0` | HTTP bind address |
 
 OpenTelemetry variables match other GrokMCP servers (`OTEL_EXPORTER_OTLP_ENDPOINT`, etc.).
@@ -108,14 +108,14 @@ npm install
 npm test
 npm run build
 npm run dev:http
-curl -sS http://127.0.0.1:8796/health
+curl -sS http://127.0.0.1:8797/health
 ```
 
 Stdio mode for local MCP clients: `npm run dev`.
 
 ## Production / Grok Bot connect
 
-Compose service `print` publishes **8796**. HTTP path matches siblings: `/mcp` (streamable HTTP) and `/health`.
+Compose service `print` publishes **8797** (avoids colliding with CreaParks on the debian host). HTTP path matches siblings: `/mcp` (streamable HTTP) and `/health`.
 
 From Tailscale (Nikita’s agents only):
 
@@ -123,13 +123,13 @@ From Tailscale (Nikita’s agents only):
 {
   "mcpServers": {
     "print": {
-      "url": "http://<debian-server-tailscale-ip>:8796/mcp"
+      "url": "http://<debian-server-tailscale-ip>:8797/mcp"
     }
   }
 }
 ```
 
-Or via mcp-remote / Cursor pointing at the same URL. Optional nginx: `https://crearec.app/mcp/print` → `http://127.0.0.1:8796/mcp` (see [docs/deploy.md](../../docs/deploy.md)).
+Or via mcp-remote / Cursor pointing at the same URL. Optional nginx: `https://crearec.app/mcp/print` → `http://127.0.0.1:8797/mcp` (see [docs/deploy.md](../../docs/deploy.md)).
 
 Image: `ghcr.io/crearec/grok-mcp-print:main`
 

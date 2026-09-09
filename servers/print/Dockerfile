@@ -25,5 +25,5 @@ RUN --mount=type=secret,id=NODE_AUTH_TOKEN \
   NODE_AUTH_TOKEN="$(cat /run/secrets/NODE_AUTH_TOKEN)" npm ci --omit=dev && npm cache clean --force
 COPY --from=builder /app/dist ./dist
 USER node
-EXPOSE 8796
+EXPOSE 8797
 CMD ["node", "dist/http.js"]

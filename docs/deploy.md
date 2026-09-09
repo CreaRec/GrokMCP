@@ -134,10 +134,10 @@ PRINT_SPOOL_HOST_PATH=/home/crearec/print-spool
 # PRINT_IMAGE=ghcr.io/crearec/grok-mcp-print
 ```
 
-The container exposes port **8796**. Health check:
+The container exposes port **8797** (avoids colliding with CreaParks on `debian-server`). Health check:
 
 ```sh
-curl -sS http://127.0.0.1:8796/health
+curl -sS http://127.0.0.1:8797/health
 ```
 
 **Tools:** `print_file` (path under spool / URL / base64), `list_printers`.
@@ -222,7 +222,7 @@ Add the MCP servers with URLs:
       "url": "http://<DEPLOY_HOST>:8795/mcp"
     },
     "print": {
-      "url": "http://<DEPLOY_HOST>:8796/mcp"
+      "url": "http://<DEPLOY_HOST>:8797/mcp"
     }
   }
 }
@@ -303,9 +303,9 @@ After merge, on the Debian host:
 
 #### Reverse proxy note (Print MCP)
 
-The `print` container listens on port **8796** with endpoint path `/mcp`. Configure nginx to forward:
+The `print` container listens on port **8797** with endpoint path `/mcp`. Configure nginx to forward:
 
-- `https://crearec.app/mcp/print` → `http://127.0.0.1:8796/mcp`
+- `https://crearec.app/mcp/print` → `http://127.0.0.1:8797/mcp`
 
 Create `/etc/nginx/snippets/grok-mcp-print.conf` and include it from `/etc/nginx/sites-available/default`:
 
@@ -314,7 +314,7 @@ Create `/etc/nginx/snippets/grok-mcp-print.conf` and include it from `/etc/nginx
 # Print MCP (streamable-http transport) — Nikita home agents only
 
 location = /mcp/print {
-    proxy_pass http://127.0.0.1:8796/mcp;
+    proxy_pass http://127.0.0.1:8797/mcp;
     proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;

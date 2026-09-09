@@ -59,7 +59,7 @@ Home MCP for printing files on the HP LaserJet Tank 2504dw via host CUPS (`lp` /
 - `print_file` — Print PDF/PNG/JPG from spool path, URL, or base64
 - `list_printers` — List CUPS queues
 
-**Env:** `CUPS_SERVER`, `CUPS_PRINTER`, spool mount; port **8796**
+**Env:** `CUPS_SERVER`, `CUPS_PRINTER`, spool mount; port **8797**
 
 ## Adding a New Server
 
