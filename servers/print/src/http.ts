@@ -155,7 +155,7 @@ function createServer() {
 async function main() {
   startTelemetry();
 
-  const PORT = parseInt(process.env.PORT ?? "8796", 10);
+  const PORT = parseInt(process.env.PORT ?? "8797", 10);
   const HOST = process.env.HOST ?? "0.0.0.0";
 
   const app = createMcpExpressApp({ host: HOST });

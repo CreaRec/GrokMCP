@@ -185,11 +185,11 @@ services:
     container_name: grok-mcp-print
     restart: unless-stopped
     ports:
-      - "8796:8796"
+      - "8797:8797"
     env_file:
       - .env
     environment:
-      - PORT=8796
+      - PORT=8797
       - HOST=0.0.0.0
       - CUPS_SERVER=${CUPS_SERVER:-172.17.0.1:631}
       - CUPS_PRINTER=${CUPS_PRINTER:-HP_LaserJet_Tank_2504dw}
@@ -205,7 +205,7 @@ services:
       # Host spool → container jail (read-only is fine for path= prints; downloads need rw).
       - ${PRINT_SPOOL_HOST_PATH:-/home/crearec/print-spool}:${PRINT_SPOOL_DIR:-/var/tmp/print-mcp}:rw
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8796/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8797/health"]
       interval: 30s
       timeout: 5s
       retries: 3
