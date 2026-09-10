@@ -351,6 +351,25 @@ docker compose logs -f apple-calendar
 docker compose restart apple-calendar
 ```
 
+### Synology indexer transformers cache
+
+Folder rebuilds use a CPU `@xenova/transformers` embedder (`mixedbread-ai/mxbai-embed-large-v1`, ~337MB quantized). The image sets `TRANSFORMERS_CACHE=/app/.cache/transformers`; compose bind-mounts a host directory there so `docker compose up` recreates do not wipe the cache (a cold re-download mid-run can fail every dirty folder rebuild).
+
+One-time on the Debian host (container `USER node` is uid 1000; `crearec` matches on debian-server):
+
+```sh
+mkdir -p /home/crearec/grok-mcp/cache/synology-indexer-transformers
+chown crearec:crearec /home/crearec/grok-mcp/cache/synology-indexer-transformers
+```
+
+Optional override in `/home/crearec/grok-mcp/.env` (compose default is the path above):
+
+```sh
+SYNOLOGY_INDEXER_TRANSFORMERS_CACHE_HOST_PATH=/home/crearec/grok-mcp/cache/synology-indexer-transformers
+```
+
+Do **not** bake the model into the image — only persist the download cache.
+
 ### On-demand synology-indexer run
 
 The indexer daemon sleeps until `INDEX_DAILY_AT` (default 21:00 America/Chicago). To kick one full index now without restarting the container or shifting the daily slot:
