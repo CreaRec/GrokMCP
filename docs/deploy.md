@@ -7,6 +7,7 @@ Production runs as a Docker Compose stack. Images come from GitHub Container Reg
 | `ghcr.io/crearec/grok-mcp-apple-calendar` | `apple-calendar` |
 | `grafana/mcp-grafana` (Docker Hub) | `grafana-mcp` |
 | `ghcr.io/crearec/grok-mcp-utilities` | `utilities` |
+| `ghcr.io/crearec/grok-mcp-simplefin` | `simplefin` |
 | `ghcr.io/crearec/grok-mcp-print` | `print` |
 | `pgvector/pgvector:0.8.6-pg16` (Docker Hub) | `synology-db` |
 
@@ -19,12 +20,13 @@ Deploy directory: `/home/crearec/grok-mcp`
 3. **Path filters** decide what publishes:
    - `servers/apple-calendar/**` → push `grok-mcp-apple-calendar` (`:main` + `:sha-<short>`)
    - `servers/utilities/**` → push `grok-mcp-utilities` (`:main` + `:sha-<short>`)
+   - `servers/simplefin/**` → push `grok-mcp-simplefin` (`:main` + `:sha-<short>`)
    - `servers/print/**` → push `grok-mcp-print` (`:main` + `:sha-<short>`)
    - `docker-compose.yml` alone → redeploy without rebuilding images
 4. Actions copies `docker-compose.yml` to the server, then runs `docker compose pull && docker compose up -d`. Compose pins every grok-mcp service to the floating `:main` tag (no `*_IMAGE_TAG` / SHA pins). Pull refreshes digests for all services; a utilities-only (or calendar-only) publish cannot roll another service back to a stale `sha-*` left in `.env`.
 5. After a successful image publish, `ghcr_cleanup` keeps the **10** newest `sha-*` tags per package, always preserves `:main`, and deletes untagged/orphaned manifests.
 
-App secrets stay on the server in `.env`. CI never mutates `.env` and never commits secrets. Debian `.env` should **not** set `IMAGE_TAG`, `SYNOLOGY_IMAGE_TAG`, `SYNOLOGY_INDEXER_IMAGE_TAG`, `UTILITIES_IMAGE_TAG`, or `PRINT_IMAGE_TAG` — drop those lines if present; compose ignores them.
+App secrets stay on the server in `.env`. CI never mutates `.env` and never commits secrets. Debian `.env` should **not** set `IMAGE_TAG`, `SYNOLOGY_IMAGE_TAG`, `SYNOLOGY_INDEXER_IMAGE_TAG`, `UTILITIES_IMAGE_TAG`, `SIMPLEFIN_IMAGE_TAG`, or `PRINT_IMAGE_TAG` — drop those lines if present; compose ignores them.
 
 ## One-time server bootstrap
 
@@ -231,6 +233,9 @@ Add the MCP servers with URLs:
     "utilities": {
       "url": "http://<DEPLOY_HOST>:8795/mcp"
     },
+    "simplefin": {
+      "url": "http://<DEPLOY_HOST>:8798/mcp"
+    },
     "print": {
       "url": "http://<DEPLOY_HOST>:8797/mcp"
     }
@@ -251,6 +256,9 @@ Or behind an nginx reverse proxy:
     },
     "utilities": {
       "url": "https://crearec.app/mcp/utilities"
+    },
+    "simplefin": {
+      "url": "https://crearec.app/mcp/simplefin"
     },
     "print": {
       "url": "https://crearec.app/mcp/print"
@@ -310,6 +318,61 @@ After merge, on the Debian host:
 1. Add `DASHBOARD_API_URL=http://192.168.1.135:3080` to `/home/crearec/grok-mcp/.env` (if not already set).
 2. Add the nginx snippet above and reload nginx.
 3. Let CI deploy the new `utilities` service, or run `docker compose pull && docker compose up -d utilities`.
+
+#### SimpleFIN MCP
+
+The `simplefin` service reads account balances and transactions from the [SimpleFIN Bridge](https://bridge.simplefin.org) using a claimed Access URL. It does **not** scrape banks — only `GET {ACCESS_URL}/accounts` with `version=2`.
+
+Bridge expects roughly **≤ ~24 requests/day**; avoid polling from agents.
+
+Add these variables to `.env` (use a real Access URL from claim; never commit it):
+
+```sh
+# Paste the full Access URL returned by Bridge claim (embeds Basic Auth).
+# Never commit the real value — set it only in the host .env.
+SIMPLEFIN_ACCESS_URL=
+
+# Optional registry path override only (tag is always :main in compose)
+# SIMPLEFIN_IMAGE=ghcr.io/crearec/grok-mcp-simplefin
+```
+
+The container exposes port **8798**. Health check:
+
+```sh
+curl -sS http://127.0.0.1:8798/health
+```
+
+**Tools:**
+- `list_accounts` — balances only (`balances-only=1`); returns org name/domain and any SimpleFIN `errors`/`errlist`.
+- `get_transactions` — `start`/`end` as YYYY-MM-DD (America/Chicago day bounds → Unix inclusive/exclusive); max 90 days; optional `account` / `pending`.
+
+#### Reverse proxy note (SimpleFIN MCP)
+
+The `simplefin` container listens on port **8798** with endpoint path `/mcp`. Configure nginx to forward:
+
+- `https://crearec.app/mcp/simplefin` → `http://127.0.0.1:8798/mcp`
+
+Create `/etc/nginx/snippets/grok-mcp-simplefin.conf` and include it from `/etc/nginx/sites-available/default`:
+
+```nginx
+# /etc/nginx/snippets/grok-mcp-simplefin.conf
+# SimpleFIN MCP (streamable-http transport)
+
+location = /mcp/simplefin {
+    proxy_pass http://127.0.0.1:8798/mcp;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+After merge, on the Debian host:
+
+1. Add `SIMPLEFIN_ACCESS_URL=...` to `/home/crearec/grok-mcp/.env` (real Access URL from Bridge claim).
+2. Add the nginx snippet above and reload nginx.
+3. Let CI deploy the new `simplefin` service, or run `docker compose pull && docker compose up -d simplefin`.
 
 #### Reverse proxy note (Print MCP)
 
