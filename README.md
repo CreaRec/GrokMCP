@@ -9,6 +9,7 @@ GrokMCP/
 ├── servers/
 │   ├── apple-calendar/   # Apple Calendar (iCloud CalDAV) MCP
 │   ├── utilities/        # CreaDashboard utility bills MCP
+│   ├── simplefin/        # SimpleFIN Bridge balances/transactions MCP
 │   └── print/            # Home CUPS / HP LaserJet print MCP
 ├── docker-compose.yml    # Production deployment
 ├── docs/
@@ -51,6 +52,16 @@ Read-only MCP server for utility bills and daily water usage from the CreaDashbo
 - `water_daily` — Daily water gallons for a month or date range (from CreaDashboard, not WaterSmart scrape)
 
 **Env:** `DASHBOARD_API_URL` (default in compose: `http://192.168.1.135:3080`), port **8795**
+
+### [SimpleFIN](./servers/simplefin/)
+
+Read-only MCP server for SimpleFIN Bridge account balances and transactions (no bank scraping).
+
+**Tools:**
+- `list_accounts` — Balances (`version=2`, `balances-only`) with org name/domain
+- `get_transactions` — Flattened transactions for a YYYY-MM-DD range (max 90 days, America/Chicago day bounds)
+
+**Env:** `SIMPLEFIN_ACCESS_URL` (Access URL from Bridge claim; never commit), port **8798**
 
 ### [Print](./servers/print/)
 
