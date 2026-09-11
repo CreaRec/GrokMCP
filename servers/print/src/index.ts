@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { rm } from "node:fs/promises";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -9,7 +8,7 @@ import {
 import { z } from "zod";
 import { getConfig } from "./config.js";
 import { listPrinters, printFile, type DuplexMode } from "./cups.js";
-import { resolvePrintSource } from "./spool.js";
+import { cleanupResolvedPrintFile, resolvePrintSource } from "./spool.js";
 import {
   startTelemetry,
   shutdownTelemetry,
@@ -141,9 +140,9 @@ async function handlePrintFile(args: unknown) {
     });
     return jsonContent(result);
   } finally {
-    if (resolved.cleanup) {
-      await rm(resolved.filePath, { force: true }).catch(() => undefined);
-    }
+    await cleanupResolvedPrintFile(config.printSpoolDir, resolved).catch(
+      () => undefined,
+    );
   }
 }
 

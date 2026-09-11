@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
-import { rm } from "node:fs/promises";
 import type { Request, Response } from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -9,7 +8,7 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { getConfig } from "./config.js";
 import { listPrinters, printFile, type DuplexMode } from "./cups.js";
-import { resolvePrintSource } from "./spool.js";
+import { cleanupResolvedPrintFile, resolvePrintSource } from "./spool.js";
 import {
   BAD_REQUEST_SESSION_MESSAGE,
   resolveMcpSessionAction,
@@ -128,9 +127,9 @@ function createServer() {
             content: [{ type: "text", text: JSON.stringify(result) }],
           };
         } finally {
-          if (resolved.cleanup) {
-            await rm(resolved.filePath, { force: true }).catch(() => undefined);
-          }
+          await cleanupResolvedPrintFile(config.printSpoolDir, resolved).catch(
+            () => undefined,
+          );
         }
       });
     },
