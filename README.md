@@ -44,10 +44,11 @@ Uses the upstream Docker image `grafana/mcp-grafana` (no custom code in this rep
 
 ### [Utilities](./servers/utilities/)
 
-Read-only MCP server for monthly electricity, water, and gas bills from the CreaDashboard REST API.
+Read-only MCP server for utility bills and daily water usage from the CreaDashboard REST API.
 
-**Tool:**
+**Tools:**
 - `utility_bills` — Latest vs previous billed month with cost/consumption deltas
+- `water_daily` — Daily water gallons for a month or date range (from CreaDashboard, not WaterSmart scrape)
 
 **Env:** `DASHBOARD_API_URL` (default in compose: `http://192.168.1.135:3080`), port **8795**
 

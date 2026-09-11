@@ -6,12 +6,13 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { getUtilityBills } from "./config.js";
+import { getUtilityBills, getWaterDaily } from "./config.js";
 import {
   startTelemetry,
   shutdownTelemetry,
   withToolTelemetry,
 } from "./telemetry.js";
+import { WaterDailyArgError } from "./water-daily.js";
 
 const toolDefinitions = [
   {
@@ -33,7 +34,39 @@ const toolDefinitions = [
       },
     },
   },
+  {
+    name: "water_daily",
+    description:
+      "Read daily water usage (gallons) from CreaDashboard. " +
+      "Provide start+end (YYYY-MM-DD), or month (YYYY-MM), or omit dates for the current calendar month in America/Chicago. " +
+      "Multi-month ranges are fetched month-by-month and merged. Does not scrape WaterSmart.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        start: {
+          type: "string",
+          description: "Range start date YYYY-MM-DD (requires end). Mutually exclusive with month.",
+        },
+        end: {
+          type: "string",
+          description: "Range end date YYYY-MM-DD (requires start). Mutually exclusive with month.",
+        },
+        month: {
+          type: "string",
+          description: "Single month YYYY-MM. Mutually exclusive with start/end.",
+        },
+      },
+    },
+  },
 ];
+
+const waterDailyArgsSchema = z
+  .object({
+    start: z.string().optional(),
+    end: z.string().optional(),
+    month: z.string().optional(),
+  })
+  .strict();
 
 async function main() {
   startTelemetry();
@@ -76,6 +109,39 @@ async function main() {
               };
             } catch (err) {
               const message = err instanceof Error ? err.message : String(err);
+              return {
+                content: [{ type: "text", text: JSON.stringify({ ok: false, error: message }) }],
+              };
+            }
+          });
+        }
+
+        case "water_daily": {
+          return withToolTelemetry("water_daily", async () => {
+            const parsed = waterDailyArgsSchema.safeParse(args ?? {});
+            if (!parsed.success) {
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify({ ok: false, error: parsed.error.message }),
+                  },
+                ],
+              };
+            }
+
+            try {
+              const data = await getWaterDaily(parsed.data);
+              return {
+                content: [{ type: "text", text: JSON.stringify({ ok: true, data }) }],
+              };
+            } catch (err) {
+              const message =
+                err instanceof WaterDailyArgError
+                  ? err.message
+                  : err instanceof Error
+                    ? err.message
+                    : String(err);
               return {
                 content: [{ type: "text", text: JSON.stringify({ ok: false, error: message }) }],
               };

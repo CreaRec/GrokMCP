@@ -86,7 +86,7 @@ To create the service account token:
 
 #### Utilities MCP
 
-The `utilities` service reads monthly electricity, water, and gas bills from the existing CreaDashboard REST API on the LAN. It does **not** scrape utility portals or reimplement dashboard sync — it only `GET`s `{DASHBOARD_API_URL}/api/utilities`.
+The `utilities` service reads monthly electricity, water, and gas bills plus daily water usage from the existing CreaDashboard REST API on the LAN. It does **not** scrape utility portals or reimplement dashboard sync — it only `GET`s `{DASHBOARD_API_URL}/api/utilities` and `{DASHBOARD_API_URL}/api/water/daily`.
 
 Add these variables to `.env`:
 
@@ -104,7 +104,9 @@ The container exposes port **8795**. Health check:
 curl -sS http://127.0.0.1:8795/health
 ```
 
-**Tool:** `utility_bills` — returns latest vs previous billed month for electricity, water, and gas (cost + consumption deltas, `latest_unbilled` when the newest month has no bill yet).
+**Tools:**
+- `utility_bills` — returns latest vs previous billed month for electricity, water, and gas (cost + consumption deltas, `latest_unbilled` when the newest month has no bill yet).
+- `water_daily` — returns daily water gallons for the current month, a `YYYY-MM` month, or a `start`/`end` range (multi-month ranges are merged from per-month `/api/water/daily` calls).
 
 #### Print MCP (home — Nikita agents only)
 

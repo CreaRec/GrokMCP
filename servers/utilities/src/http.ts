@@ -6,7 +6,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { getUtilityBills } from "./config.js";
+import { getUtilityBills, getWaterDaily } from "./config.js";
 import {
   BAD_REQUEST_SESSION_MESSAGE,
   resolveMcpSessionAction,
@@ -17,6 +17,7 @@ import {
   shutdownTelemetry,
   withToolTelemetry,
 } from "./telemetry.js";
+import { WaterDailyArgError } from "./water-daily.js";
 
 function createServer() {
   const server = new McpServer(
@@ -52,6 +53,50 @@ function createServer() {
           };
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
+          return {
+            content: [{ type: "text", text: JSON.stringify({ ok: false, error: message }) }],
+          };
+        }
+      });
+    },
+  );
+
+  server.registerTool(
+    "water_daily",
+    {
+      description:
+        "Read daily water usage (gallons) from CreaDashboard. " +
+        "Provide start+end (YYYY-MM-DD), or month (YYYY-MM), or omit dates for the current calendar month in America/Chicago. " +
+        "Multi-month ranges are fetched month-by-month and merged. Does not scrape WaterSmart.",
+      inputSchema: {
+        start: z
+          .string()
+          .optional()
+          .describe("Range start date YYYY-MM-DD (requires end). Mutually exclusive with month."),
+        end: z
+          .string()
+          .optional()
+          .describe("Range end date YYYY-MM-DD (requires start). Mutually exclusive with month."),
+        month: z
+          .string()
+          .optional()
+          .describe("Single month YYYY-MM. Mutually exclusive with start/end."),
+      },
+    },
+    async ({ start, end, month }) => {
+      return withToolTelemetry("water_daily", async () => {
+        try {
+          const data = await getWaterDaily({ start, end, month });
+          return {
+            content: [{ type: "text", text: JSON.stringify({ ok: true, data }) }],
+          };
+        } catch (err) {
+          const message =
+            err instanceof WaterDailyArgError
+              ? err.message
+              : err instanceof Error
+                ? err.message
+                : String(err);
           return {
             content: [{ type: "text", text: JSON.stringify({ ok: false, error: message }) }],
           };

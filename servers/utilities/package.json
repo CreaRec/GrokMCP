@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Read-only MCP server for monthly utility bills from CreaDashboard",
+  "description": "Read-only MCP server for utility bills and daily water usage from CreaDashboard",
   "engines": {
     "node": ">=20"
   },

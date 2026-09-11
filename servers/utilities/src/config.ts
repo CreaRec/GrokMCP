@@ -1,5 +1,12 @@
-import { fetchUtilities } from "./dashboard-client.js";
+import { fetchUtilities, fetchWaterDaily } from "./dashboard-client.js";
 import { buildUtilityBillsResponse } from "./utility-bills.js";
+import {
+  buildWaterDailyResult,
+  monthAnchorsInRange,
+  resolveWaterDailyRange,
+  type WaterDailyArgs,
+  type WaterDailyResult,
+} from "./water-daily.js";
 
 export interface UtilitiesConfig {
   dashboardApiUrl: string;
@@ -42,4 +49,27 @@ export async function getUtilityBills(months: number): Promise<ReturnType<typeof
     months,
     timeZone: config.timeZone,
   });
+}
+
+export async function getWaterDaily(
+  args: WaterDailyArgs = {},
+  options: { now?: Date; fetchImpl?: typeof fetch } = {},
+): Promise<WaterDailyResult> {
+  const config = getConfig();
+  const range = resolveWaterDailyRange(args, config.timeZone, options.now);
+  const anchors = monthAnchorsInRange(range.start, range.end);
+
+  const responses = [];
+  for (const date of anchors) {
+    responses.push(
+      await fetchWaterDaily({
+        apiBaseUrl: config.dashboardApiUrl,
+        timeoutMs: config.timeoutMs,
+        date,
+        fetchImpl: options.fetchImpl,
+      }),
+    );
+  }
+
+  return buildWaterDailyResult(responses, range);
 }
