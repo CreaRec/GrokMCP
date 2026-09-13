@@ -110,7 +110,10 @@ async function convertWithLibreOffice(
     sourcePath,
   ];
 
-  console.error(`[print:convert] start soffice → pdf for "${basename}" (outdir=${outDir})`);
+  console.error(
+    `[print:convert] start soffice → pdf for "${basename}" ` +
+      `(outdir=${outDir}; UserInstallation=${userInstallation})`,
+  );
 
   let result: { stdout: string; stderr: string; code: number };
   try {
@@ -137,6 +140,10 @@ async function convertWithLibreOffice(
     );
   }
 
+  console.error(
+    `[print:convert] soffice exit 0 for "${basename}"; waiting for PDF in ${outDir}`,
+  );
+
   const expectedPdf = path.join(
     outDir,
     `${path.basename(sourcePath, path.extname(sourcePath))}.pdf`,
@@ -158,7 +165,7 @@ async function convertWithLibreOffice(
     );
   }
 
-  console.error(`[print:convert] success "${basename}" → ${path.basename(pdfPath)}`);
+  console.error(`[print:convert] success "${basename}" → ${pdfPath}`);
   return pdfPath;
 }
 
