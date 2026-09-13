@@ -40,7 +40,7 @@ export function classifyError(err: unknown): McpErrorType {
   ) {
     return "spool";
   }
-  if (/Invalid|must be|copies must|sides/i.test(message)) return "validation";
+  if (/Invalid|must be|copies must|sides|contentBase64 looks truncated/i.test(message)) return "validation";
   if (/ECONNREFUSED|ENOTFOUND|network|fetch failed|unreachable|HTTP \d+/i.test(message)) {
     return "network";
   }
