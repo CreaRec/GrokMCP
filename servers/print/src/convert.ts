@@ -1,5 +1,6 @@
-import { access, mkdtemp, readdir, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import type { PrintConfig } from "./config.js";
 import { defaultRunCommand, type RunCommand } from "./cups.js";
 import {
@@ -9,6 +10,25 @@ import {
 } from "./spool.js";
 
 const CONVERT_TIMEOUT_MS = 120_000;
+/** How long to wait for the PDF to appear after soffice exits 0. */
+const DEFAULT_PDF_APPEAR_TIMEOUT_MS = 5_000;
+const DEFAULT_PDF_POLL_INTERVAL_MS = 50;
+/** Consecutive identical non-zero sizes before treating the PDF as fully written. */
+const PDF_STABLE_CHECKS = 2;
+const OUTPUT_TRUNCATE = 500;
+const LO_PROFILE_DIRNAME = "lo-profile";
+
+function pdfAppearTimeoutMs(): number {
+  const raw = process.env.PRINT_CONVERT_PDF_WAIT_MS;
+  if (raw && /^\d+$/.test(raw)) return Number(raw);
+  return DEFAULT_PDF_APPEAR_TIMEOUT_MS;
+}
+
+function pdfPollIntervalMs(): number {
+  const raw = process.env.PRINT_CONVERT_PDF_POLL_MS;
+  if (raw && /^\d+$/.test(raw)) return Number(raw);
+  return DEFAULT_PDF_POLL_INTERVAL_MS;
+}
 
 /**
  * Ensure the resolved file is print-ready for CUPS/lp.
@@ -63,6 +83,11 @@ async function convertWithLibreOffice(
 ): Promise<string> {
   await access(sourcePath);
 
+  const basename = path.basename(sourcePath);
+  const profileDir = path.join(outDir, LO_PROFILE_DIRNAME);
+  await mkdir(profileDir, { recursive: true });
+  const userInstallation = pathToFileURL(profileDir).href;
+
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     HOME: process.env.HOME || "/tmp",
@@ -70,7 +95,10 @@ async function convertWithLibreOffice(
     SAL_USE_VCLPLUGIN: process.env.SAL_USE_VCLPLUGIN || "svp",
   };
 
+  // -env:UserInstallation must come before other soffice options so each job
+  // gets an isolated profile (avoids lock races on the default HOME profile).
   const args = [
+    `-env:UserInstallation=${userInstallation}`,
     "--headless",
     "--nologo",
     "--nofirststartwizard",
@@ -82,11 +110,14 @@ async function convertWithLibreOffice(
     sourcePath,
   ];
 
+  console.error(`[print:convert] start soffice → pdf for "${basename}" (outdir=${outDir})`);
+
   let result: { stdout: string; stderr: string; code: number };
   try {
     result = await runWithTimeout("soffice", args, env, CONVERT_TIMEOUT_MS, run);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    console.error(`[print:convert] failure for "${basename}": ${message}`);
     if (/ENOENT|not found/i.test(message)) {
       throw new Error(
         "LibreOffice (soffice) is not installed; cannot convert office/text files to PDF. " +
@@ -98,8 +129,11 @@ async function convertWithLibreOffice(
 
   if (result.code !== 0) {
     const detail = (result.stderr || result.stdout || `exit ${result.code}`).trim();
+    console.error(
+      `[print:convert] soffice exit ${result.code} for "${basename}": ${truncateOutput(detail)}`,
+    );
     throw new Error(
-      `LibreOffice failed to convert "${path.basename(sourcePath)}" to PDF: ${detail}`,
+      `LibreOffice failed to convert "${basename}" to PDF: ${detail}`,
     );
   }
 
@@ -107,6 +141,88 @@ async function convertWithLibreOffice(
     outDir,
     `${path.basename(sourcePath, path.extname(sourcePath))}.pdf`,
   );
+
+  const pdfPath = await waitForConvertedPdf(outDir, expectedPdf);
+  if (!pdfPath) {
+    const stdout = truncateOutput(result.stdout);
+    const stderr = truncateOutput(result.stderr);
+    const detail =
+      stdout || stderr
+        ? ` (stdout: ${stdout || "(empty)"}; stderr: ${stderr || "(empty)"})`
+        : " (stdout/stderr empty)";
+    console.error(
+      `[print:convert] no PDF after exit 0 for "${basename}"${detail}`,
+    );
+    throw new Error(
+      `LibreOffice reported success but no PDF was produced for "${basename}"${detail}`,
+    );
+  }
+
+  console.error(`[print:convert] success "${basename}" → ${path.basename(pdfPath)}`);
+  return pdfPath;
+}
+
+/**
+ * soffice can exit 0 before the PDF is fully flushed. Poll briefly for the
+ * expected name (or any .pdf in outDir), waiting for a non-zero stable size.
+ */
+async function waitForConvertedPdf(
+  outDir: string,
+  expectedPdf: string,
+): Promise<string | undefined> {
+  const deadline = Date.now() + pdfAppearTimeoutMs();
+  const pollMs = pdfPollIntervalMs();
+  let lastPath: string | undefined;
+  let lastSize = -1;
+  let stableCount = 0;
+
+  for (;;) {
+    const candidate = await findConvertedPdf(outDir, expectedPdf);
+    if (candidate) {
+      try {
+        const { size } = await stat(candidate);
+        if (size > 0) {
+          if (candidate === lastPath && size === lastSize) {
+            stableCount += 1;
+            if (stableCount >= PDF_STABLE_CHECKS) {
+              return candidate;
+            }
+          } else {
+            lastPath = candidate;
+            lastSize = size;
+            stableCount = 1;
+          }
+        }
+      } catch {
+        // File disappeared between readdir and stat; keep polling.
+        lastPath = undefined;
+        lastSize = -1;
+        stableCount = 0;
+      }
+    }
+
+    if (Date.now() >= deadline) {
+      break;
+    }
+    await sleep(pollMs);
+  }
+
+  // Accept a non-empty PDF even if size never fully stabilized within the window.
+  if (lastPath && lastSize > 0) {
+    try {
+      const { size } = await stat(lastPath);
+      if (size > 0) return lastPath;
+    } catch {
+      // fall through
+    }
+  }
+  return findConvertedPdf(outDir, expectedPdf);
+}
+
+async function findConvertedPdf(
+  outDir: string,
+  expectedPdf: string,
+): Promise<string | undefined> {
   try {
     await access(expectedPdf);
     return expectedPdf;
@@ -116,13 +232,19 @@ async function convertWithLibreOffice(
 
   const entries = await readdir(outDir);
   const pdfs = entries.filter((name) => name.toLowerCase().endsWith(".pdf"));
-  if (pdfs.length === 0) {
-    throw new Error(
-      `LibreOffice reported success but no PDF was produced for "${path.basename(sourcePath)}"`,
-    );
-  }
+  if (pdfs.length === 0) return undefined;
   pdfs.sort();
   return path.join(outDir, pdfs[pdfs.length - 1]!);
+}
+
+function truncateOutput(text: string, max = OUTPUT_TRUNCATE): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= max) return trimmed;
+  return `${trimmed.slice(0, max)}…`;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function runWithTimeout(

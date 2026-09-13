@@ -1,6 +1,7 @@
 import { access, mkdtemp, readdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { preparePrintReadyFile } from "./convert.js";
 import type { RunCommand } from "./cups.js";
@@ -83,6 +84,91 @@ describe("preparePrintReadyFile", () => {
     await cleanupResolvedPrintFile(spool, ready);
     await expect(access(ready.filePath)).rejects.toMatchObject({ code: "ENOENT" });
     await access(filePath);
+  });
+
+  it("passes a unique -env:UserInstallation profile under the job outdir", async () => {
+    const spool = await mkdtemp(path.join(tmpdir(), "print-spool-"));
+    dirs.push(spool);
+    const filePath = path.join(spool, "memo.docx");
+    await writeFile(filePath, "PK fake");
+
+    let capturedArgs: string[] | undefined;
+    const run: RunCommand = async (_command, args) => {
+      capturedArgs = args;
+      const outDir = args[args.indexOf("--outdir") + 1]!;
+      await writeFile(path.join(outDir, "memo.pdf"), "%PDF-1.4\n");
+      return { stdout: "ok", stderr: "", code: 0 };
+    };
+
+    await preparePrintReadyFile(testConfig(spool), { filePath, cleanup: false }, run);
+
+    expect(capturedArgs).toBeDefined();
+    const envArg = capturedArgs!.find((a) => a.startsWith("-env:UserInstallation="));
+    expect(envArg).toBeDefined();
+    expect(envArg!.startsWith("-env:UserInstallation=file://")).toBe(true);
+    expect(capturedArgs![0]).toBe(envArg);
+
+    const outDir = capturedArgs![capturedArgs!.indexOf("--outdir") + 1]!;
+    const expectedProfile = pathToFileURL(path.join(outDir, "lo-profile")).href;
+    expect(envArg).toBe(`-env:UserInstallation=${expectedProfile}`);
+  });
+
+  it("polls for the PDF after soffice exits 0 before the file appears", async () => {
+    const spool = await mkdtemp(path.join(tmpdir(), "print-spool-"));
+    dirs.push(spool);
+    const filePath = path.join(spool, "delayed.docx");
+    await writeFile(filePath, "PK fake");
+
+    const run: RunCommand = async (_command, args) => {
+      const outDir = args[args.indexOf("--outdir") + 1]!;
+      const pdfPath = path.join(outDir, "delayed.pdf");
+      // Simulate LibreOffice exiting before the PDF is flushed to disk.
+      void (async () => {
+        await new Promise((r) => setTimeout(r, 120));
+        await writeFile(pdfPath, "%PDF-1.4\nlate\n");
+      })();
+      return { stdout: "convert done", stderr: "", code: 0 };
+    };
+
+    const ready = await preparePrintReadyFile(
+      testConfig(spool),
+      { filePath, cleanup: false },
+      run,
+    );
+
+    expect(ready.filePath.endsWith("delayed.pdf")).toBe(true);
+    await access(ready.filePath);
+  });
+
+  it("includes truncated soffice stdout/stderr when exit 0 but no PDF appears", async () => {
+    const spool = await mkdtemp(path.join(tmpdir(), "print-spool-"));
+    dirs.push(spool);
+    const filePath = path.join(spool, "lezione1-rimma.docx");
+    await writeFile(filePath, "PK fake");
+
+    const prevWait = process.env.PRINT_CONVERT_PDF_WAIT_MS;
+    const prevPoll = process.env.PRINT_CONVERT_PDF_POLL_MS;
+    process.env.PRINT_CONVERT_PDF_WAIT_MS = "200";
+    process.env.PRINT_CONVERT_PDF_POLL_MS = "40";
+
+    const run: RunCommand = async () => ({
+      stdout: "Warn: something odd happened during export",
+      stderr: "javaldx failed: profile lock contention",
+      code: 0,
+    });
+
+    try {
+      await expect(
+        preparePrintReadyFile(testConfig(spool), { filePath, cleanup: false }, run),
+      ).rejects.toThrow(
+        /LibreOffice reported success but no PDF was produced for "lezione1-rimma\.docx".*stdout:.*something odd.*stderr:.*javaldx failed/,
+      );
+    } finally {
+      if (prevWait === undefined) delete process.env.PRINT_CONVERT_PDF_WAIT_MS;
+      else process.env.PRINT_CONVERT_PDF_WAIT_MS = prevWait;
+      if (prevPoll === undefined) delete process.env.PRINT_CONVERT_PDF_POLL_MS;
+      else process.env.PRINT_CONVERT_PDF_POLL_MS = prevPoll;
+    }
   });
 
   it("converts base64 docx inside upload-* and reuses that cleanup dir", async () => {
