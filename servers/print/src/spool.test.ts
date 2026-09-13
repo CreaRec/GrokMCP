@@ -29,10 +29,19 @@ describe("resolveSpoolPath", () => {
     );
   });
 
-  it("rejects unsupported extensions", () => {
+  it("rejects unsupported extensions with allowed list", () => {
     expect(() => assertAllowedExtension("/var/tmp/print-mcp/a.exe")).toThrow(
       /Unsupported file type/,
     );
+    expect(() => assertAllowedExtension("/var/tmp/print-mcp/a.exe")).toThrow(
+      /converted to PDF via LibreOffice/,
+    );
+  });
+
+  it("accepts office/text extensions for conversion", () => {
+    for (const name of ["a.txt", "a.docx", "a.odt", "a.rtf", "a.doc"]) {
+      expect(() => assertAllowedExtension(`/var/tmp/print-mcp/${name}`)).not.toThrow();
+    }
   });
 });
 
@@ -151,6 +160,23 @@ describe("cleanupResolvedPrintFile", () => {
     await cleanupResolvedPrintFile(spool, resolved);
 
     await access(filePath);
+  });
+
+  it("removes convert-* directories created for path= office conversion", async () => {
+    const spool = await mkdtemp(path.join(tmpdir(), "print-spool-"));
+    dirs.push(spool);
+    const convertDir = await mkdtemp(path.join(spool, "convert-"));
+    const pdfPath = path.join(convertDir, "notes.pdf");
+    await writeFile(pdfPath, "%PDF\n");
+
+    await cleanupResolvedPrintFile(spool, {
+      filePath: pdfPath,
+      cleanup: true,
+      cleanupDir: convertDir,
+    });
+
+    await expect(access(pdfPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await access(spool);
   });
 
   it("refuses to remove the spool root or non-temp directories", async () => {

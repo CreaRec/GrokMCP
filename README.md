@@ -68,7 +68,7 @@ Read-only MCP server for SimpleFIN Bridge account balances and transactions (no 
 Home MCP for printing files on the HP LaserJet Tank 2504dw via host CUPS (`lp` / `lpstat`). For **Nikita’s agents** only — do not auto-wire for Sergey/Pizduk. Prints only when `print_file` is called (no autopilot).
 
 **Tools:**
-- `print_file` — Print PDF/PNG/JPG from spool path, URL, or base64
+- `print_file` — Print PDF/PNG/JPG as-is, or TXT/DOCX/ODT/RTF/DOC (converted to PDF in-container via LibreOffice) from spool path, URL, or base64
 - `list_printers` — List CUPS queues
 
 **Env:** `CUPS_SERVER=127.0.0.1:631` (host cupsd; compose uses `network_mode: host`), `CUPS_PRINTER`, spool mount; port **8797** on host

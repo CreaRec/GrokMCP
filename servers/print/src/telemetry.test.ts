@@ -65,6 +65,9 @@ describe("classifyError", () => {
     const { classifyError } = await import("./telemetry.js");
     expect(classifyError(new Error("lp exited with code 1"))).toBe("cups");
     expect(classifyError(new Error("path must be under PRINT_SPOOL_DIR"))).toBe("spool");
+    expect(classifyError(new Error("LibreOffice failed to convert notes.docx"))).toBe(
+      "spool",
+    );
     expect(classifyError(new Error("ECONNREFUSED"))).toBe("network");
     expect(classifyError(new Error("Request timeout"))).toBe("timeout");
   });

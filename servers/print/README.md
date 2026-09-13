@@ -20,7 +20,11 @@ Provide **exactly one** source:
 | `url` | `http`/`https` URL — downloaded into the spool, then printed |
 | `contentBase64` | Base64 bytes — written into the spool, then printed |
 
-Supported types: **PDF, PNG, JPG/JPEG**.
+Supported types:
+- **Print as-is:** PDF, PNG, JPG/JPEG
+- **Converted to PDF in-container** (LibreOffice headless), then printed: **TXT, DOCX, ODT, RTF, DOC**
+
+Agents can send `.docx` / `.txt` (and other listed office formats) without pre-converting. Unsupported extensions fail with a clear error listing allowed types.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -42,11 +46,36 @@ Runs `lpstat -p -d` and returns `{ ok, defaultPrinter?, printers?, error? }`. Do
 |----------|----------|---------|-------------|
 | `CUPS_SERVER` | Recommended | `127.0.0.1:631` (compose) | Host cupsd address. Production compose uses `network_mode: host` because cupsd is localhost-only. |
 | `CUPS_PRINTER` / `DEFAULT_PRINTER` | Recommended | — | Default queue (e.g. `HP_LaserJet_Tank_2504dw`) |
-| `PRINT_SPOOL_DIR` | No | `/var/tmp/print-mcp` | Path jail + temp download/upload root |
+| `PRINT_SPOOL_DIR` | No | `/var/tmp/print-mcp` | Path jail + temp download/upload/convert root |
 | `PRINT_DOWNLOAD_TIMEOUT_MS` | No | `30000` | URL download timeout |
 | `PRINT_MAX_DOWNLOAD_BYTES` | No | `52428800` | Max URL / download size |
 | `PORT` | No | `8797` | HTTP listen port |
 | `HOST` | No | `0.0.0.0` | HTTP bind address |
+
+### Conversion (LibreOffice)
+
+Office/text inputs are converted **inside the print container** before `lp`:
+
+```text
+soffice --headless --convert-to pdf --outdir <spool-temp> <input>
+```
+
+| Format | Path |
+|--------|------|
+| PDF, PNG, JPG/JPEG | Submitted to CUPS unchanged |
+| TXT, DOCX, ODT, RTF, DOC | LibreOffice Writer → PDF, then `lp` |
+| Anything else | Rejected with `Unsupported file type …` |
+
+Temp PDFs land under `PRINT_SPOOL_DIR` in `upload-*` / `download-*` (with the source) or `convert-*` (for `path=` sources). They are removed the same way as other spool temps after the job is submitted. Original `path=` files are **not** deleted.
+
+**Image packages** (see `Dockerfile`; Bookworm slim, not Alpine):
+
+- `cups-client` — `lp` / `lpstat`
+- `libreoffice-writer-nogui` — provides `soffice` for conversion (no GUI)
+- `fonts-dejavu-core` — glyphs in converted PDFs
+- `wget` — compose healthcheck
+
+Rebuild/redeploy the print image after pulling this change so debian picks up LibreOffice. No host-side LibreOffice install is required; conversion does not change `CUPS_SERVER` / `network_mode: host` / spool mount behavior.
 
 OpenTelemetry variables match other GrokMCP servers (`OTEL_EXPORTER_OTLP_ENDPOINT`, etc.).
 

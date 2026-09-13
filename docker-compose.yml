@@ -217,6 +217,8 @@ services:
   # Host networking: debian-server cupsd listens only on 127.0.0.1:631, so bridge
   # networks cannot reach CUPS. host mode lets lp/lpstat use localhost CUPS; MCP
   # still binds PORT 8797 on the host (Tailscale → host:8797). ports: is unused.
+  # Image includes LibreOffice Writer (nogui) to convert txt/docx/odt/rtf/doc → PDF
+  # before lp; PDF/PNG/JPG are submitted unchanged.
   print:
     image: ${PRINT_IMAGE:-ghcr.io/crearec/grok-mcp-print}:main
     container_name: grok-mcp-print

@@ -33,7 +33,11 @@ export function classifyError(err: unknown): McpErrorType {
   const message = errorMessage(err);
   if (/ETIMEDOUT|ESOCKETTIMEDOUT|timeout|aborted/i.test(message)) return "timeout";
   if (/lpstat|lp exited|cups|printer/i.test(message)) return "cups";
-  if (/PRINT_SPOOL|spool|Unsupported file|path must|exactly one of/i.test(message)) {
+  if (
+    /PRINT_SPOOL|spool|Unsupported file|path must|exactly one of|LibreOffice|soffice|convert/i.test(
+      message,
+    )
+  ) {
     return "spool";
   }
   if (/Invalid|must be|copies must|sides/i.test(message)) return "validation";

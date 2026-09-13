@@ -7,8 +7,9 @@ import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { getConfig } from "./config.js";
+import { preparePrintReadyFile } from "./convert.js";
 import { listPrinters, printFile, type DuplexMode } from "./cups.js";
-import { cleanupResolvedPrintFile, resolvePrintSource } from "./spool.js";
+import { cleanupResolvedPrintFile, resolvePrintSource, type ResolvedPrintFile } from "./spool.js";
 import {
   BAD_REQUEST_SESSION_MESSAGE,
   resolveMcpSessionAction,
@@ -38,7 +39,8 @@ function createServer() {
       description:
         "Send a file to a CUPS printer via lp. Explicit tool call only — never auto-print. " +
         "Accepts exactly one of: absolute path under PRINT_SPOOL_DIR, http(s) URL (downloaded to spool), " +
-        "or contentBase64 (written to spool). Supported types: PDF, PNG, JPG/JPEG.",
+        "or contentBase64 (written to spool). " +
+        "Print-ready: PDF, PNG, JPG/JPEG. Converted to PDF in-container via LibreOffice: TXT, DOCX, ODT, RTF, DOC.",
       inputSchema: {
         path: z
           .string()
@@ -101,7 +103,7 @@ function createServer() {
 
         const config = getConfig();
         const sides = (args.sides ?? args.duplex) as DuplexMode | undefined;
-        let resolved;
+        let resolved: ResolvedPrintFile | undefined;
         try {
           resolved = await resolvePrintSource(config, {
             path: args.path,
@@ -109,8 +111,14 @@ function createServer() {
             contentBase64: args.contentBase64,
             filename: args.filename,
           });
+          resolved = await preparePrintReadyFile(config, resolved);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
+          if (resolved) {
+            await cleanupResolvedPrintFile(config.printSpoolDir, resolved).catch(
+              () => undefined,
+            );
+          }
           return {
             content: [{ type: "text", text: JSON.stringify({ ok: false, error: message }) }],
           };
