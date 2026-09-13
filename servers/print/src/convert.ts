@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import { access, mkdir, mkdtemp, open, readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { PrintConfig } from "./config.js";
@@ -17,6 +17,10 @@ const DEFAULT_PDF_POLL_INTERVAL_MS = 50;
 const PDF_STABLE_CHECKS = 2;
 const OUTPUT_TRUNCATE = 500;
 const LO_PROFILE_DIRNAME = "lo-profile";
+
+/** OOXML/ODF containers are ZIP files; tiny or non-PK payloads are usually truncated uploads. */
+const ZIP_OFFICE_EXTENSIONS = new Set([".docx", ".odt"]);
+const MIN_ZIP_OFFICE_BYTES = 64;
 
 function pdfAppearTimeoutMs(): number {
   const raw = process.env.PRINT_CONVERT_PDF_WAIT_MS;
@@ -76,12 +80,56 @@ export async function preparePrintReadyFile(
   }
 }
 
+
+/**
+ * Cheap pre-flight for convertible inputs before spawning soffice.
+ * docx/odt must look like a ZIP (PK…); empty/tiny buffers fail fast with a
+ * clear truncated-payload error (common when contentBase64 was cut off).
+ */
+async function assertConvertiblePayload(sourcePath: string): Promise<void> {
+  const basename = path.basename(sourcePath);
+  const ext = path.extname(sourcePath).toLowerCase();
+  const { size } = await stat(sourcePath);
+
+  if (size <= 0) {
+    throw new Error(
+      `contentBase64 looks truncated or invalid for "${basename}" (empty file)`,
+    );
+  }
+
+  if (!ZIP_OFFICE_EXTENSIONS.has(ext)) {
+    return;
+  }
+
+  if (size < MIN_ZIP_OFFICE_BYTES) {
+    throw new Error(
+      `contentBase64 looks truncated or invalid for "${basename}" ` +
+        `(expected ZIP/Office document; got ${size} bytes)`,
+    );
+  }
+
+  const handle = await open(sourcePath, "r");
+  try {
+    const header = Buffer.alloc(2);
+    const { bytesRead } = await handle.read(header, 0, 2, 0);
+    if (bytesRead < 2 || header[0] !== 0x50 || header[1] !== 0x4b) {
+      throw new Error(
+        `contentBase64 looks truncated or invalid for "${basename}" ` +
+          `(expected ZIP/PK header for ${ext}; got ${size} bytes)`,
+      );
+    }
+  } finally {
+    await handle.close();
+  }
+}
+
 async function convertWithLibreOffice(
   sourcePath: string,
   outDir: string,
   run: RunCommand,
 ): Promise<string> {
   await access(sourcePath);
+  await assertConvertiblePayload(sourcePath);
 
   const basename = path.basename(sourcePath);
   const profileDir = path.join(outDir, LO_PROFILE_DIRNAME);
