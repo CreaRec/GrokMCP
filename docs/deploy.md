@@ -112,7 +112,7 @@ curl -sS http://127.0.0.1:8795/health
 
 #### Print MCP (home — Nikita agents only)
 
-The `print` service submits jobs to the household **HP LaserJet Tank 2504dw** through **host CUPS** (`lp` / `lpstat`). The container installs `cups-client` only and talks to cupsd via `CUPS_SERVER` — it does **not** run cupsd itself.
+The `print` service submits jobs to the household **HP LaserJet Tank 2504dw** through **host CUPS** (`lp` / `lpstat`). The container installs `cups-client` plus **LibreOffice Writer (nogui)** so agents can send TXT/DOCX/ODT/RTF/DOC; those are converted to PDF inside the container before `lp`. PDF/PNG/JPG still go straight to CUPS. It does **not** run cupsd itself.
 
 **Networking:** On `debian-server`, cupsd listens only on `127.0.0.1:631`, so a bridge-networked container cannot reach CUPS (`lpstat: Scheduler is not running`). Compose therefore sets `network_mode: host` for `print` and defaults `CUPS_SERVER=127.0.0.1:631`. The MCP HTTP server still binds **8797** on the host; Tailscale clients reach `debian-server:8797`. Spool remains a bind mount.
 
@@ -152,7 +152,13 @@ The MCP listens on host port **8797** (avoids colliding with CreaParks on `debia
 curl -sS http://127.0.0.1:8797/health
 ```
 
-**Tools:** `print_file` (path under spool / URL / base64), `list_printers`.
+**Tools:** `print_file` (path under spool / URL / base64; PDF/PNG/JPG as-is, office/text → PDF via LibreOffice), `list_printers`.
+
+After upgrading the print image, confirm LibreOffice is present:
+
+```sh
+docker exec grok-mcp-print soffice --version
+```
 
 #### Synology DB
 

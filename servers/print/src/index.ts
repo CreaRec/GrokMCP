@@ -7,8 +7,9 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { getConfig } from "./config.js";
+import { preparePrintReadyFile } from "./convert.js";
 import { listPrinters, printFile, type DuplexMode } from "./cups.js";
-import { cleanupResolvedPrintFile, resolvePrintSource } from "./spool.js";
+import { cleanupResolvedPrintFile, resolvePrintSource, type ResolvedPrintFile } from "./spool.js";
 import {
   startTelemetry,
   shutdownTelemetry,
@@ -48,7 +49,8 @@ const toolDefinitions = [
     description:
       "Send a file to a CUPS printer via lp. Explicit tool call only — never auto-print. " +
       "Accepts exactly one of: absolute path under PRINT_SPOOL_DIR, http(s) URL (downloaded to spool), " +
-      "or contentBase64 (written to spool). Supported types: PDF, PNG, JPG/JPEG.",
+      "or contentBase64 (written to spool). " +
+      "Print-ready: PDF, PNG, JPG/JPEG. Converted to PDF in-container via LibreOffice: TXT, DOCX, ODT, RTF, DOC.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -118,7 +120,7 @@ async function handlePrintFile(args: unknown) {
 
   const config = getConfig();
   const sides = (parsed.data.sides ?? parsed.data.duplex) as DuplexMode | undefined;
-  let resolved;
+  let resolved: ResolvedPrintFile | undefined;
   try {
     resolved = await resolvePrintSource(config, {
       path: parsed.data.path,
@@ -126,8 +128,14 @@ async function handlePrintFile(args: unknown) {
       contentBase64: parsed.data.contentBase64,
       filename: parsed.data.filename,
     });
+    resolved = await preparePrintReadyFile(config, resolved);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    if (resolved) {
+      await cleanupResolvedPrintFile(config.printSpoolDir, resolved).catch(
+        () => undefined,
+      );
+    }
     return jsonContent({ ok: false, error: message });
   }
 

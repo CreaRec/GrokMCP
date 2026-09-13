@@ -5,7 +5,30 @@ import { pipeline } from "node:stream/promises";
 import { Readable } from "node:stream";
 import type { PrintConfig } from "./config.js";
 
-export const ALLOWED_EXTENSIONS = new Set([".pdf", ".png", ".jpg", ".jpeg"]);
+/** Formats CUPS/lp can submit without conversion. */
+export const DIRECT_PRINT_EXTENSIONS = new Set([
+  ".pdf",
+  ".png",
+  ".jpg",
+  ".jpeg",
+]);
+
+/**
+ * Office/text formats converted to PDF via LibreOffice headless before lp.
+ * Keep aligned with Dockerfile (libreoffice-writer-nogui).
+ */
+export const CONVERTIBLE_EXTENSIONS = new Set([
+  ".txt",
+  ".docx",
+  ".odt",
+  ".rtf",
+  ".doc",
+]);
+
+export const ALLOWED_EXTENSIONS = new Set([
+  ...DIRECT_PRINT_EXTENSIONS,
+  ...CONVERTIBLE_EXTENSIONS,
+]);
 
 export interface ResolvePrintSourceInput {
   path?: string;
@@ -19,20 +42,36 @@ export interface ResolvedPrintFile {
   cleanup: boolean;
   /**
    * When `cleanup` is true, the mkdtemp directory created for this request
-   * (`download-*` / `upload-*` under the spool root). Never the spool root itself.
+   * (`download-*` / `upload-*` / `convert-*` under the spool root). Never the
+   * spool root itself.
    */
   cleanupDir?: string;
 }
 
-function extensionOf(filePath: string): string {
+export function extensionOf(filePath: string): string {
   return path.extname(filePath).toLowerCase();
+}
+
+export function formatAllowedExtensionsMessage(): string {
+  const direct = [...DIRECT_PRINT_EXTENSIONS].map((e) => e.slice(1)).join(", ");
+  const convertible = [...CONVERTIBLE_EXTENSIONS]
+    .map((e) => e.slice(1))
+    .join(", ");
+  return (
+    `allowed: ${direct} (print as-is); ` +
+    `${convertible} (converted to PDF via LibreOffice)`
+  );
+}
+
+export function needsPdfConversion(filePath: string): boolean {
+  return CONVERTIBLE_EXTENSIONS.has(extensionOf(filePath));
 }
 
 export function assertAllowedExtension(filePath: string): void {
   const ext = extensionOf(filePath);
   if (!ALLOWED_EXTENSIONS.has(ext)) {
     throw new Error(
-      `Unsupported file type "${ext || "(none)"}"; allowed: pdf, png, jpg, jpeg`,
+      `Unsupported file type "${ext || "(none)"}"; ${formatAllowedExtensionsMessage()}`,
     );
   }
 }
@@ -172,10 +211,17 @@ export async function downloadToSpool(
   }
 }
 
+const CLEANUP_DIR_PREFIXES = ["download-", "upload-", "convert-"] as const;
+
+function isAllowedCleanupDirName(base: string): boolean {
+  return CLEANUP_DIR_PREFIXES.some((prefix) => base.startsWith(prefix));
+}
+
 /**
  * Remove a request-scoped mkdtemp directory after printing.
  * Only deletes when `cleanup` is true and `cleanupDir` is a direct child of the
- * spool root named `download-*` or `upload-*` — never the spool root or path= files.
+ * spool root named `download-*`, `upload-*`, or `convert-*` — never the spool
+ * root or path= source files.
  */
 export async function cleanupResolvedPrintFile(
   spoolRoot: string,
@@ -197,7 +243,7 @@ export async function cleanupResolvedPrintFile(
     path.isAbsolute(relative) ||
     relative === "" ||
     relative.includes(path.sep) ||
-    !(base.startsWith("download-") || base.startsWith("upload-"))
+    !isAllowedCleanupDirName(base)
   ) {
     return;
   }
