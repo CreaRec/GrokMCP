@@ -15,6 +15,8 @@ const baseConfig: PrintConfig = {
   printSpoolDir: "/var/tmp/print-mcp",
   downloadTimeoutMs: 30_000,
   maxDownloadBytes: 50 * 1024 * 1024,
+  maxUploadBytes: 50 * 1024 * 1024,
+  uploadToken: undefined,
 };
 
 describe("buildLpArgs", () => {

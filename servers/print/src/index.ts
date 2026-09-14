@@ -15,12 +15,21 @@ import {
   shutdownTelemetry,
   withToolTelemetry,
 } from "./telemetry.js";
+import { buildUploadInfoPayload } from "./upload.js";
 
 const duplexSchema = z.enum([
   "one-sided",
   "two-sided-long-edge",
   "two-sided-short-edge",
 ]);
+
+const PRINT_FILE_DESCRIPTION =
+  "Send a file to a CUPS printer via lp. Explicit tool call only — never auto-print. " +
+  "Accepts exactly one of: absolute path under PRINT_SPOOL_DIR, http(s) URL (downloaded to spool), " +
+  "or contentBase64 (written to spool). " +
+  "For large files (≈30KB+), prefer HTTP POST/PUT /print/upload (see print_upload_url) or url — " +
+  "avoid contentBase64 (MCP JSON may truncate). " +
+  "Print-ready: PDF, PNG, JPG/JPEG. Converted to PDF in-container via LibreOffice: TXT, DOCX, ODT, RTF, DOC.";
 
 const printFileSchema = z
   .object({
@@ -43,14 +52,14 @@ const printFileSchema = z
     }
   });
 
+const printUploadUrlSchema = z.object({
+  baseUrl: z.string().url().optional(),
+});
+
 const toolDefinitions = [
   {
     name: "print_file",
-    description:
-      "Send a file to a CUPS printer via lp. Explicit tool call only — never auto-print. " +
-      "Accepts exactly one of: absolute path under PRINT_SPOOL_DIR, http(s) URL (downloaded to spool), " +
-      "or contentBase64 (written to spool). " +
-      "Print-ready: PDF, PNG, JPG/JPEG. Converted to PDF in-container via LibreOffice: TXT, DOCX, ODT, RTF, DOC.",
+    description: PRINT_FILE_DESCRIPTION,
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -65,7 +74,9 @@ const toolDefinitions = [
         },
         contentBase64: {
           type: "string",
-          description: "Base64-encoded file bytes (written under the spool, then printed).",
+          description:
+            "Base64-encoded file bytes (written under the spool, then printed). " +
+            "Avoid for large docs — use /print/upload or url instead.",
         },
         filename: {
           type: "string",
@@ -102,6 +113,23 @@ const toolDefinitions = [
     inputSchema: {
       type: "object" as const,
       properties: {},
+    },
+  },
+  {
+    name: "print_upload_url",
+    description:
+      "Return the HTTP upload endpoint for large print jobs (Word/PDF/etc). " +
+      "Agents should stream files via multipart POST or raw PUT to this URL instead of " +
+      "stuffing contentBase64 into print_file. Does not print by itself.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        baseUrl: {
+          type: "string",
+          description:
+            "Optional public base URL of this server (default: http://127.0.0.1:$PORT).",
+        },
+      },
     },
   },
 ];
@@ -154,6 +182,17 @@ async function handlePrintFile(args: unknown) {
   }
 }
 
+async function handlePrintUploadUrl(args: unknown) {
+  const parsed = printUploadUrlSchema.safeParse(args ?? {});
+  if (!parsed.success) {
+    return jsonContent({ ok: false, error: parsed.error.message });
+  }
+  const config = getConfig();
+  const port = process.env.PORT ?? "8797";
+  const baseUrl = parsed.data.baseUrl?.trim() || `http://127.0.0.1:${port}`;
+  return jsonContent(buildUploadInfoPayload(baseUrl, Boolean(config.uploadToken)));
+}
+
 async function main() {
   startTelemetry();
 
@@ -179,6 +218,9 @@ async function main() {
             const result = await listPrinters(getConfig());
             return jsonContent(result);
           });
+
+        case "print_upload_url":
+          return withToolTelemetry("print_upload_url", () => handlePrintUploadUrl(args));
 
         default:
           return jsonContent({ ok: false, error: `Unknown tool: ${name}` });

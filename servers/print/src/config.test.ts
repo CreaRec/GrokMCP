@@ -18,6 +18,8 @@ describe("getConfig", () => {
       printSpoolDir: "/var/tmp/print-mcp",
       downloadTimeoutMs: 30_000,
       maxDownloadBytes: 50 * 1024 * 1024,
+      maxUploadBytes: 50 * 1024 * 1024,
+      uploadToken: undefined,
     });
   });
 
@@ -37,5 +39,17 @@ describe("getConfig", () => {
     vi.stubEnv("DEFAULT_PRINTER", "Office_Printer");
     const { getConfig } = await import("./config.js");
     expect(getConfig().defaultPrinter).toBe("Office_Printer");
+  });
+
+  it("reads PRINT_UPLOAD_TOKEN and PRINT_MAX_UPLOAD_BYTES", async () => {
+    vi.stubEnv("PRINT_UPLOAD_TOKEN", "upload-secret");
+    vi.stubEnv("PRINT_MAX_UPLOAD_BYTES", "1048576");
+    vi.stubEnv("PRINT_MAX_DOWNLOAD_BYTES", "2097152");
+    const { getConfig } = await import("./config.js");
+    expect(getConfig()).toMatchObject({
+      uploadToken: "upload-secret",
+      maxUploadBytes: 1_048_576,
+      maxDownloadBytes: 2_097_152,
+    });
   });
 });

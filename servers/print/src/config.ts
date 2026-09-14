@@ -4,6 +4,14 @@ export interface PrintConfig {
   printSpoolDir: string;
   downloadTimeoutMs: number;
   maxDownloadBytes: number;
+  /** Max HTTP upload size (multipart / raw PUT). Defaults to maxDownloadBytes. */
+  maxUploadBytes: number;
+  /**
+   * Shared secret for POST/PUT `/print/upload`.
+   * When set, require `Authorization: Bearer …` or `X-Print-Token`.
+   * When unset, upload auth is not enforced (Tailscale / network trust only).
+   */
+  uploadToken: string | undefined;
 }
 
 function positiveInt(raw: string | undefined, fallback: number, name: string): number {
@@ -23,6 +31,11 @@ export function getConfig(): PrintConfig {
     undefined;
   const printSpoolDir =
     process.env.PRINT_SPOOL_DIR?.trim() || "/var/tmp/print-mcp";
+  const maxDownloadBytes = positiveInt(
+    process.env.PRINT_MAX_DOWNLOAD_BYTES,
+    50 * 1024 * 1024,
+    "PRINT_MAX_DOWNLOAD_BYTES",
+  );
 
   return {
     cupsServer,
@@ -33,10 +46,12 @@ export function getConfig(): PrintConfig {
       30_000,
       "PRINT_DOWNLOAD_TIMEOUT_MS",
     ),
-    maxDownloadBytes: positiveInt(
-      process.env.PRINT_MAX_DOWNLOAD_BYTES,
-      50 * 1024 * 1024,
-      "PRINT_MAX_DOWNLOAD_BYTES",
+    maxDownloadBytes,
+    maxUploadBytes: positiveInt(
+      process.env.PRINT_MAX_UPLOAD_BYTES,
+      maxDownloadBytes,
+      "PRINT_MAX_UPLOAD_BYTES",
     ),
+    uploadToken: process.env.PRINT_UPLOAD_TOKEN?.trim() || undefined,
   };
 }

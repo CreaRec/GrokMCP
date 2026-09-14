@@ -4,7 +4,7 @@ Home Model Context Protocol (MCP) server that submits print jobs to the househol
 
 **Sergey / Pizduk must not get this MCP** — do not auto-wire it into their agent configs. Connect it only for Nikita’s home agents (same policy as other home-only MCPs such as utilities).
 
-**No autopilot print.** The server never prints on its own; a job is submitted only when an agent explicitly calls `print_file`.
+**No autopilot print.** The server never prints on its own; a job is submitted only when an agent explicitly calls `print_file` or uploads via `POST/PUT /print/upload`.
 
 ## Tools
 
@@ -18,7 +18,7 @@ Provide **exactly one** source:
 |--------|----------|
 | `path` | Absolute path **under** `PRINT_SPOOL_DIR` on the debian host (path-jailed; preferred) |
 | `url` | `http`/`https` URL — downloaded into the spool, then printed |
-| `contentBase64` | Base64 bytes — written into the spool, then printed |
+| `contentBase64` | Base64 bytes — written into the spool, then printed. **Avoid for large files** (≈30KB+); MCP tool JSON often truncates and CUPS never sees the job. Prefer **HTTP upload** or `url`. |
 
 Supported types:
 - **Print as-is:** PDF, PNG, JPG/JPEG
@@ -30,7 +30,7 @@ Agents can send `.docx` / `.txt` (and other listed office formats) without pre-c
 |-----------|------|---------|-------------|
 | `path` | string | — | Absolute path inside the spool jail |
 | `url` | string | — | Remote file to download |
-| `contentBase64` | string | — | Base64 file content |
+| `contentBase64` | string | — | Base64 file content (small files only) |
 | `filename` | string | inferred | Filename (with extension) for `url` / `contentBase64` |
 | `copies` | integer | `1` | Copies (`1`–`100`) |
 | `sides` / `duplex` | enum | unset | `one-sided` \| `two-sided-long-edge` \| `two-sided-short-edge` |
@@ -39,6 +39,52 @@ Agents can send `.docx` / `.txt` (and other listed office formats) without pre-c
 ### `list_printers`
 
 Runs `lpstat -p -d` and returns `{ ok, defaultPrinter?, printers?, error? }`. Does not print.
+
+### `print_upload_url`
+
+Returns the HTTP upload URL, auth notes, and curl examples for large files. Does not print.
+
+## HTTP upload (large files)
+
+Stream Word/PDF/etc. to the print container **without** stuffing `contentBase64` into an MCP tool call.
+
+- **POST** `http://<host>:8797/print/upload` — `multipart/form-data` with file field `file` (also accepts `upload` / any single file part)
+- **PUT** `http://<host>:8797/print/upload?filename=document.docx` — raw body (`Content-Type: application/octet-stream`)
+
+Same type rules as `print_file` (PDF/PNG/JPG direct; office/text via LibreOffice). Options as form fields or query params: `printer`, `copies`, `sides` / `duplex`, `filename`.
+
+Auth: when `PRINT_UPLOAD_TOKEN` is set, send `Authorization: Bearer <token>` or `X-Print-Token: <token>`. When unset, uploads are open like `/mcp` (rely on Tailscale / network trust). **Recommended on debian:** set a token in `/home/crearec/grok-mcp/.env`.
+
+```sh
+# Debian: generate and store token (do not commit)
+openssl rand -hex 32
+# → PRINT_UPLOAD_TOKEN=<value> in /home/crearec/grok-mcp/.env
+# docker compose up -d print
+```
+
+Multipart example (agents / curl):
+
+```sh
+curl -sS -X POST \
+  -H "Authorization: Bearer $PRINT_UPLOAD_TOKEN" \
+  -F "file=@./letter.docx" \
+  -F "copies=1" \
+  -F "sides=one-sided" \
+  "http://<debian-server-tailscale-ip>:8797/print/upload"
+# → {"ok":true,"jobId":"HP_LaserJet_Tank_2504dw-123","printer":"HP_LaserJet_Tank_2504dw"}
+```
+
+Raw PUT example:
+
+```sh
+curl -sS -X PUT \
+  -H "Authorization: Bearer $PRINT_UPLOAD_TOKEN" \
+  -H "Content-Type: application/octet-stream" \
+  --data-binary @./letter.docx \
+  "http://<debian-server-tailscale-ip>:8797/print/upload?filename=letter.docx&printer=HP_LaserJet_Tank_2504dw"
+```
+
+Uploads land under `PRINT_SPOOL_DIR` in `upload-*`, convert if needed, submit via `lp`, then clean temps — same path as `print_file`.
 
 ## Environment
 
@@ -49,6 +95,8 @@ Runs `lpstat -p -d` and returns `{ ok, defaultPrinter?, printers?, error? }`. Do
 | `PRINT_SPOOL_DIR` | No | `/var/tmp/print-mcp` | Path jail + temp download/upload/convert root |
 | `PRINT_DOWNLOAD_TIMEOUT_MS` | No | `30000` | URL download timeout |
 | `PRINT_MAX_DOWNLOAD_BYTES` | No | `52428800` | Max URL / download size |
+| `PRINT_MAX_UPLOAD_BYTES` | No | same as download | Max HTTP upload size |
+| `PRINT_UPLOAD_TOKEN` | Recommended | unset | Shared secret for `/print/upload` (Bearer / X-Print-Token) |
 | `PORT` | No | `8797` | HTTP listen port |
 | `HOST` | No | `0.0.0.0` | HTTP bind address |
 
@@ -125,6 +173,8 @@ Point the container at **host** cupsd (do not run cupsd inside the print MCP ima
 CUPS_SERVER=127.0.0.1:631
 CUPS_PRINTER=HP_LaserJet_Tank_2504dw
 PRINT_SPOOL_DIR=/var/tmp/print-mcp
+# Recommended: gate /print/upload (openssl rand -hex 32)
+PRINT_UPLOAD_TOKEN=<secret>
 ```
 
 **Why host networking:** bridge networks cannot reach a localhost-only cupsd (`lpstat: Scheduler is not running`). With `network_mode: host`, `lp` / `lpstat` use `127.0.0.1:631`. The MCP still binds **8797** on the host; Tailscale reaches `host:8797`. Spool volume mount is unchanged. After deploy:
@@ -148,7 +198,7 @@ Stdio mode for local MCP clients: `npm run dev`.
 
 ## Production / Grok Bot connect
 
-Compose service `print` uses `network_mode: host` and binds **8797** on the host (avoids colliding with CreaParks; no `ports:` mapping). HTTP path matches siblings: `/mcp` (streamable HTTP) and `/health`.
+Compose service `print` uses `network_mode: host` and binds **8797** on the host (avoids colliding with CreaParks; no `ports:` mapping). HTTP paths: `/mcp` (streamable HTTP), `/print/upload` (multipart/raw file upload), and `/health`.
 
 From Tailscale (Nikita’s agents only):
 

@@ -25,6 +25,8 @@ function testConfig(spool: string): PrintConfig {
     printSpoolDir: spool,
     downloadTimeoutMs: 5_000,
     maxDownloadBytes: 1_000_000,
+    maxUploadBytes: 1_000_000,
+    uploadToken: undefined,
   };
 }
 

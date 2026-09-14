@@ -20,12 +20,25 @@ import {
   shutdownTelemetry,
   withToolTelemetry,
 } from "./telemetry.js";
+import {
+  buildUploadInfoPayload,
+  handlePrintUpload,
+  PRINT_UPLOAD_PATH,
+} from "./upload.js";
 
 const duplexSchema = z.enum([
   "one-sided",
   "two-sided-long-edge",
   "two-sided-short-edge",
 ]);
+
+const PRINT_FILE_DESCRIPTION =
+  "Send a file to a CUPS printer via lp. Explicit tool call only — never auto-print. " +
+  "Accepts exactly one of: absolute path under PRINT_SPOOL_DIR, http(s) URL (downloaded to spool), " +
+  "or contentBase64 (written to spool). " +
+  "For large files (≈30KB+), prefer HTTP POST/PUT /print/upload (see print_upload_url) or url — " +
+  "avoid contentBase64 (MCP JSON may truncate). " +
+  "Print-ready: PDF, PNG, JPG/JPEG. Converted to PDF in-container via LibreOffice: TXT, DOCX, ODT, RTF, DOC.";
 
 function createServer() {
   const server = new McpServer(
@@ -36,11 +49,7 @@ function createServer() {
   server.registerTool(
     "print_file",
     {
-      description:
-        "Send a file to a CUPS printer via lp. Explicit tool call only — never auto-print. " +
-        "Accepts exactly one of: absolute path under PRINT_SPOOL_DIR, http(s) URL (downloaded to spool), " +
-        "or contentBase64 (written to spool). " +
-        "Print-ready: PDF, PNG, JPG/JPEG. Converted to PDF in-container via LibreOffice: TXT, DOCX, ODT, RTF, DOC.",
+      description: PRINT_FILE_DESCRIPTION,
       inputSchema: {
         path: z
           .string()
@@ -58,7 +67,10 @@ function createServer() {
           .string()
           .min(1)
           .optional()
-          .describe("Base64-encoded file bytes (written under the spool, then printed)."),
+          .describe(
+            "Base64-encoded file bytes (written under the spool, then printed). " +
+              "Avoid for large docs — use /print/upload or url instead.",
+          ),
         filename: z
           .string()
           .min(1)
@@ -161,6 +173,42 @@ function createServer() {
     },
   );
 
+  server.registerTool(
+    "print_upload_url",
+    {
+      description:
+        "Return the HTTP upload endpoint for large print jobs (Word/PDF/etc). " +
+        "Agents should stream files via multipart POST or raw PUT to this URL instead of " +
+        "stuffing contentBase64 into print_file. Does not print by itself.",
+      inputSchema: {
+        baseUrl: z
+          .string()
+          .url()
+          .optional()
+          .describe(
+            "Optional public base URL of this server (default: http://127.0.0.1:$PORT).",
+          ),
+      },
+    },
+    async (args) => {
+      return withToolTelemetry("print_upload_url", async () => {
+        const config = getConfig();
+        const port = process.env.PORT ?? "8797";
+        const baseUrl = args.baseUrl?.trim() || `http://127.0.0.1:${port}`;
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                buildUploadInfoPayload(baseUrl, Boolean(config.uploadToken)),
+              ),
+            },
+          ],
+        };
+      });
+    },
+  );
+
   return server;
 }
 
@@ -175,6 +223,14 @@ async function main() {
 
   app.get("/health", (_req: Request, res: Response) => {
     res.json({ status: "ok", service: "print-mcp", version: "0.1.0" });
+  });
+
+  // Streamed file upload (multipart POST or raw PUT) — prefer over contentBase64 for large docs.
+  app.post(PRINT_UPLOAD_PATH, (req: Request, res: Response) => {
+    void handlePrintUpload(req, res);
+  });
+  app.put(PRINT_UPLOAD_PATH, (req: Request, res: Response) => {
+    void handlePrintUpload(req, res);
   });
 
   app.post("/mcp", async (req: Request, res: Response) => {
@@ -241,6 +297,7 @@ async function main() {
   app.listen(PORT, HOST, () => {
     console.error(`Print MCP server listening on http://${HOST}:${PORT}`);
     console.error(`MCP endpoint: http://${HOST}:${PORT}/mcp`);
+    console.error(`Print upload: http://${HOST}:${PORT}${PRINT_UPLOAD_PATH}`);
     console.error(`Health check: http://${HOST}:${PORT}/health`);
   });
 
