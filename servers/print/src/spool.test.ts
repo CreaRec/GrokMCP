@@ -64,6 +64,8 @@ describe("resolvePrintSource", () => {
       printSpoolDir: spool,
       downloadTimeoutMs: 5_000,
       maxDownloadBytes: 1_000_000,
+      maxUploadBytes: 1_000_000,
+      uploadToken: undefined,
     };
 
     const resolved = await resolvePrintSource(config, { path: filePath });
@@ -81,6 +83,8 @@ describe("resolvePrintSource", () => {
       printSpoolDir: spool,
       downloadTimeoutMs: 5_000,
       maxDownloadBytes: 1_000_000,
+      maxUploadBytes: 1_000_000,
+      uploadToken: undefined,
     };
 
     const resolved = await resolvePrintSource(config, {
@@ -101,6 +105,8 @@ describe("resolvePrintSource", () => {
       printSpoolDir: "/var/tmp/print-mcp",
       downloadTimeoutMs: 5_000,
       maxDownloadBytes: 1_000_000,
+      maxUploadBytes: 1_000_000,
+      uploadToken: undefined,
     };
     await expect(resolvePrintSource(config, {})).rejects.toThrow(/exactly one/);
   });
@@ -122,6 +128,8 @@ describe("cleanupResolvedPrintFile", () => {
       printSpoolDir: spool,
       downloadTimeoutMs: 5_000,
       maxDownloadBytes: 1_000_000,
+      maxUploadBytes: 1_000_000,
+      uploadToken: undefined,
     };
 
     const resolved = await resolvePrintSource(config, {
@@ -152,6 +160,8 @@ describe("cleanupResolvedPrintFile", () => {
       printSpoolDir: spool,
       downloadTimeoutMs: 5_000,
       maxDownloadBytes: 1_000_000,
+      maxUploadBytes: 1_000_000,
+      uploadToken: undefined,
     };
 
     const resolved = await resolvePrintSource(config, { path: filePath });

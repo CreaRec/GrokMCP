@@ -110,13 +110,31 @@ export async function ensureSpoolDir(spoolRoot: string): Promise<string> {
   return root;
 }
 
-function sanitizeFilename(name: string): string {
+export function sanitizeFilename(name: string): string {
   const base = path.basename(name).replace(/[^\w.\-]+/g, "_");
   if (!base || base === "." || base === "..") {
     throw new Error("Invalid filename");
   }
   assertAllowedExtension(base);
   return base;
+}
+
+/**
+ * Create an `upload-*` temp dir under the spool and return the destination path
+ * for a streamed HTTP upload (multipart or raw PUT).
+ */
+export async function createUploadSpoolTarget(
+  spoolRoot: string,
+  filename: string,
+): Promise<ResolvedPrintFile & { cleanupDir: string }> {
+  const root = await ensureSpoolDir(spoolRoot);
+  const safeName = sanitizeFilename(filename);
+  const dir = await mkdtemp(path.join(root, "upload-"));
+  return {
+    filePath: path.join(dir, safeName),
+    cleanup: true,
+    cleanupDir: dir,
+  };
 }
 
 function filenameFromUrl(url: string): string {
