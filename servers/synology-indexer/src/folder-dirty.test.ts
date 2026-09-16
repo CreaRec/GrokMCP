@@ -272,24 +272,75 @@ describe("rebuildDirtyFolders + embedText retry-once", () => {
     expect(state.every((f) => f.dirty === false)).toBe(true);
   });
 
-  it("first folder double-500 fails but later folders still rebuild", async () => {
+  it("oversized folder summary is chunked by embedText; rebuild still clears dirty", async () => {
+    const { embedText } = await import("./embedder.js");
+    const embedding = Array(1024).fill(0.15);
+
+    const { db, state } = makeMockDb([
+      {
+        id: "fsa",
+        synoPath: "/Documents/USA/Taxes/2026/FSA Receipts",
+        dirty: true,
+      },
+      { id: "ok", synoPath: "/Documents/Other", dirty: true },
+    ]);
+
+    // Many children → long folder summary that must be chunked.
+    db.file.findMany = vi.fn(async () =>
+      Array.from({ length: 20 }, (_, i) => ({
+        label: `receipt-${i}.pdf`,
+        description: `FSA pharmacy receipt ${i}: ${"itemized charge detail ".repeat(20)}`.slice(
+          0,
+          500,
+        ),
+        kind: "doc",
+      })),
+    );
+
+    vi.mocked(fetch).mockImplementation(async (_url, init) => {
+      const body = JSON.parse((init as RequestInit).body as string) as { prompt: string };
+      expect(body.prompt.length).toBeLessThanOrEqual(1_500);
+      return new Response(JSON.stringify({ embedding }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+
+    const result = await rebuildDirtyFolders(
+      db as never,
+      (text, ctx) =>
+        embedText(text, "http://ollama:11434", "mxbai-embed-large", {
+          maxEmbedChars: 1_500,
+          chunkOverlap: 100,
+          path: ctx?.path,
+          source: "folder-rebuild",
+        }),
+      new Date(),
+    );
+
+    expect(result).toEqual({ rebuilt: 2, failed: 0 });
+    expect(fetch).toHaveBeenCalled();
+    expect(vi.mocked(fetch).mock.calls.length).toBeGreaterThan(1);
+    expect(state.every((f) => f.dirty === false)).toBe(true);
+  });
+
+  it("context-length 500 on one folder does not abort the rest of the batch", async () => {
     const { embedText } = await import("./embedder.js");
     const embedding = Array(1024).fill(0.2);
 
     const { db, state } = makeMockDb([
       { id: "f1", synoPath: "/Share/A", dirty: true },
       { id: "f2", synoPath: "/Share/B", dirty: true },
-      { id: "f3", synoPath: "/Share/C", dirty: true },
     ]);
 
+    // Folder A: single short chunk that still gets a context-length 500 twice → skip → throw.
+    // Folder B: success.
     vi.mocked(fetch)
-      .mockResolvedValueOnce(new Response("oom first", { status: 500 }))
-      .mockResolvedValueOnce(new Response("oom second", { status: 500 }))
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ embedding }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
+        new Response("the input length exceeds the context length", { status: 500 }),
+      )
+      .mockResolvedValueOnce(
+        new Response("the input length exceeds the context length", { status: 500 }),
       )
       .mockResolvedValueOnce(
         new Response(JSON.stringify({ embedding }), {
@@ -300,18 +351,21 @@ describe("rebuildDirtyFolders + embedText retry-once", () => {
 
     const result = await rebuildDirtyFolders(
       db as never,
-      (text) => embedText(text, "http://ollama:11434", "mxbai-embed-large"),
+      (text, ctx) =>
+        embedText(text, "http://ollama:11434", "mxbai-embed-large", {
+          path: ctx?.path,
+          source: "folder-rebuild",
+        }),
       new Date(),
     );
 
-    expect(result).toEqual({ rebuilt: 2, failed: 1 });
+    expect(result).toEqual({ rebuilt: 1, failed: 1 });
     expect(state.find((f) => f.id === "f1")!.dirty).toBe(true);
     expect(state.find((f) => f.id === "f2")!.dirty).toBe(false);
-    expect(state.find((f) => f.id === "f3")!.dirty).toBe(false);
     expect(logErrorWithCause).toHaveBeenCalledWith(
       "folder rebuild failed",
       expect.objectContaining({
-        message: expect.stringContaining("HTTP 500: oom second"),
+        message: expect.stringMatching(/context length|all .* chunk/i),
       }),
       { syno_path: "/Share/A" },
     );

@@ -4,7 +4,7 @@ import { generateFolderSummary, type ChildDescription } from "./folder-summarize
 import { logErrorWithCause } from "./telemetry.js";
 
 export interface EmbedFn {
-  (text: string): Promise<{ embedding: number[]; model: string }>;
+  (text: string, context?: { path?: string }): Promise<{ embedding: number[]; model: string }>;
 }
 
 export interface RebuildDirtyFoldersResult {
@@ -69,7 +69,7 @@ export async function rebuildDirtyFolders(
         children as ChildDescription[],
       );
 
-      const embed = await embedFn(summary.description);
+      const embed = await embedFn(summary.description, { path: folder.synoPath });
 
       await db.$executeRaw`
         UPDATE folders

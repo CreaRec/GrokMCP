@@ -10,6 +10,10 @@ export interface Config {
   qwenDocumentChars: number;
   /** Max DESCRIPTION length before mxbai embed. */
   maxDescriptionChars: number;
+  /** Max characters per embed chunk (mxbai 512-token context). */
+  maxEmbedChars: number;
+  /** Overlap between embed chunks (chars). */
+  embedChunkOverlap: number;
   ollamaBaseUrl: string | null;
   visionModel: string;
   embedModel: string;
@@ -73,6 +77,12 @@ export function getConfig(): Config {
   const maxDescRaw = process.env.INDEX_MAX_DESCRIPTION_CHARS ?? "500";
   const parsedMaxDesc = parseInt(maxDescRaw, 10);
 
+  const maxEmbedRaw = process.env.INDEX_MAX_EMBED_CHARS ?? "1500";
+  const parsedMaxEmbed = parseInt(maxEmbedRaw, 10);
+
+  const embedOverlapRaw = process.env.INDEX_EMBED_CHUNK_OVERLAP ?? "100";
+  const parsedEmbedOverlap = parseInt(embedOverlapRaw, 10);
+
   const doclingConvertRaw = process.env.DOCLING_CONVERT_TIMEOUT_MS ?? "90000";
   const parsedDoclingConvert = parseInt(doclingConvertRaw, 10);
 
@@ -94,6 +104,12 @@ export function getConfig(): Config {
       Number.isFinite(parsedQwenDoc) && parsedQwenDoc > 0 ? parsedQwenDoc : 32_768,
     maxDescriptionChars:
       Number.isFinite(parsedMaxDesc) && parsedMaxDesc > 0 ? parsedMaxDesc : 500,
+    maxEmbedChars:
+      Number.isFinite(parsedMaxEmbed) && parsedMaxEmbed > 0 ? parsedMaxEmbed : 1_500,
+    embedChunkOverlap:
+      Number.isFinite(parsedEmbedOverlap) && parsedEmbedOverlap >= 0
+        ? parsedEmbedOverlap
+        : 100,
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL ?? null,
     visionModel: process.env.VISION_MODEL ?? "qwen2.5vl:7b",
     embedModel: process.env.EMBED_MODEL ?? "mxbai-embed-large",

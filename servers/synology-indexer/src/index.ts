@@ -613,7 +613,13 @@ export async function runIndex(
     const doclingFiles = qwenQueue.filter((file) => file.route === "docling");
     const nonDoclingFiles = qwenQueue.filter((file) => file.route !== "docling");
 
-    const gpuEmbed = (text: string) => embedText(text, ollamaUrl, config.embedModel);
+    const gpuEmbed = (text: string, path?: string) =>
+      embedText(text, ollamaUrl, config.embedModel, {
+        maxEmbedChars: config.maxEmbedChars,
+        chunkOverlap: config.embedChunkOverlap,
+        path,
+        source: "file",
+      });
 
     const processFiles = async (files: RoutedDirtyFile[]): Promise<void> => {
       if (files.length === 0) {
@@ -624,7 +630,7 @@ export async function runIndex(
 
       for (const file of files) {
         try {
-          await processQwenFile(file, ollamaUrl, gpuEmbed);
+          await processQwenFile(file, ollamaUrl, (text) => gpuEmbed(text, file.synoPath));
         } catch (err) {
           logErrorWithCause("qwen/embedding failed", err, {
             syno_path: file.synoPath,
@@ -677,7 +683,13 @@ export async function runIndex(
       try {
         const result = await rebuildDirtyFolders(
           db,
-          (text) => embedText(text, ollamaUrl, config.embedModel),
+          (text, ctx) =>
+            embedText(text, ollamaUrl, config.embedModel, {
+              maxEmbedChars: config.maxEmbedChars,
+              chunkOverlap: config.embedChunkOverlap,
+              path: ctx?.path,
+              source: "folder-rebuild",
+            }),
           now,
         );
         stats.foldersRebuilt += result.rebuilt;
@@ -701,7 +713,13 @@ export async function runIndex(
     try {
       const result = await rebuildDirtyFolders(
         db,
-        (text) => embedTextCpu(text),
+        (text, ctx) =>
+          embedTextCpu(text, {
+            maxEmbedChars: config.maxEmbedChars,
+            chunkOverlap: config.embedChunkOverlap,
+            path: ctx?.path,
+            source: "folder-rebuild-cpu",
+          }),
         now,
       );
       stats.foldersRebuilt += result.rebuilt;
