@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { EMBEDDING_DIM, MODEL_ID, embedTextCpu, resetCpuEmbedderForTests } from "./cpu-embedder.js";
 
+vi.mock("./telemetry.js", () => ({
+  logInfo: vi.fn(),
+  logWarn: vi.fn(),
+}));
+
 const mockPipeline = vi.fn();
 
 vi.mock("@xenova/transformers", () => ({
@@ -49,5 +54,28 @@ describe("embedTextCpu", () => {
     }));
 
     await expect(embedTextCpu("bad dim")).rejects.toThrow(/1024/);
+  });
+
+  it("chunks long input and mean-pools embeddings", async () => {
+    let call = 0;
+    mockPipeline.mockResolvedValue(async (text: string) => {
+      expect(text.length).toBeLessThanOrEqual(100);
+      call++;
+      const data = new Float32Array(1024);
+      data[call === 1 ? 0 : 1] = 1;
+      return { data };
+    });
+
+    const long = "word ".repeat(80);
+    const result = await embedTextCpu(long, {
+      maxEmbedChars: 100,
+      chunkOverlap: 10,
+      path: "/Documents/USA/Taxes/2026/FSA Receipts",
+    });
+
+    expect(call).toBeGreaterThan(1);
+    expect(result.embedding).toHaveLength(1024);
+    const norm = Math.sqrt(result.embedding.reduce((s, x) => s + x * x, 0));
+    expect(norm).toBeCloseTo(1, 5);
   });
 });

@@ -43,6 +43,8 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     textHeadBytes: 65_536,
     qwenDocumentChars: 32_768,
     maxDescriptionChars: 500,
+    maxEmbedChars: 1_500,
+    embedChunkOverlap: 100,
     dockerSocketPath: "/var/run/docker.sock",
     ...overrides,
   };
