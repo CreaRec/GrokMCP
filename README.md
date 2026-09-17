@@ -10,7 +10,10 @@ GrokMCP/
 │   ├── apple-calendar/   # Apple Calendar (iCloud CalDAV) MCP
 │   ├── utilities/        # CreaDashboard utility bills MCP
 │   ├── simplefin/        # SimpleFIN Bridge balances/transactions MCP
-│   └── print/            # Home CUPS / HP LaserJet print MCP
+│   ├── print/            # Home CUPS / HP LaserJet print MCP
+│   ├── findvid/          # Findvid Telegram search → forward to downloader
+│   ├── synology/         # Synology semantic search MCP
+│   └── synology-indexer/ # Synology indexer daemon (not MCP)
 ├── docker-compose.yml    # Production deployment
 ├── docs/
 │   └── deploy.md         # Deployment guide
@@ -72,6 +75,17 @@ Home MCP for printing files on the HP LaserJet Tank 2504dw via host CUPS (`lp` /
 - `list_printers` — List CUPS queues
 
 **Env:** `CUPS_SERVER=127.0.0.1:631` (host cupsd; compose uses `network_mode: host`), `CUPS_PRINTER`, spool mount; port **8797** on host
+
+### [Findvid](./servers/findvid/)
+
+Telegram Findvid VIP search UX for Nikita’s agents: inline search → optional озвучка/quality browse → **forward** the final video message to CreaVideoDownloaderBot. Does **not** download multi‑GB files.
+
+**Tools:**
+- `search` — best match (+ alternatives) via Findvid inline bot
+- `list_voiceovers` / `list_qualities` — optional button browse
+- `confirm_and_forward` — pick defaults/overrides, wait for video, forward to downloader bot
+
+**Env:** reuse downloader `settings.json` (`TELEGRAM_SETTINGS_PATH` + `TELEGRAM_USER_ID`) or `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` / `TELEGRAM_SESSION`; `FINDVID_BOT_USERNAME`, `DOWNLOADER_BOT_USERNAME`; port **8796**. VIP/rate-limits/UI changes on Findvid can break automation.
 
 ## Adding a New Server
 

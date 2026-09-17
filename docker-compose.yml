@@ -213,6 +213,48 @@ services:
       - default
       - lgtm
 
+  findvid:
+    image: ${FINDVID_IMAGE:-ghcr.io/crearec/grok-mcp-findvid}:main
+    container_name: grok-mcp-findvid
+    restart: unless-stopped
+    ports:
+      - "8796:8796"
+    env_file:
+      - .env
+    environment:
+      - PORT=8796
+      - HOST=0.0.0.0
+      - TELEGRAM_API_ID=${TELEGRAM_API_ID:-}
+      - TELEGRAM_API_HASH=${TELEGRAM_API_HASH:-}
+      - TELEGRAM_SESSION=${TELEGRAM_SESSION:-}
+      - TELEGRAM_USER_ID=${TELEGRAM_USER_ID:-}
+      - TELEGRAM_SETTINGS_PATH=${TELEGRAM_SETTINGS_PATH:-/settings/settings.json}
+      - FINDVID_BOT_USERNAME=${FINDVID_BOT_USERNAME:-fvidBot}
+      - FINDVID_INLINE_BOT_USERNAME=${FINDVID_INLINE_BOT_USERNAME:-}
+      - DOWNLOADER_BOT_USERNAME=${DOWNLOADER_BOT_USERNAME:-}
+      - FINDVID_PREFERRED_VOICEOVER=${FINDVID_PREFERRED_VOICEOVER:-Дублированный}
+      - FINDVID_PREFERRED_QUALITIES=${FINDVID_PREFERRED_QUALITIES:-1080p,720p,480p}
+      - FINDVID_WAIT_TIMEOUT_MS=${FINDVID_WAIT_TIMEOUT_MS:-120000}
+      - FINDVID_POLL_INTERVAL_MS=${FINDVID_POLL_INTERVAL_MS:-1500}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://alloy:4318}
+      - OTEL_SERVICE_NAME=${FINDVID_OTEL_SERVICE_NAME:-findvid}
+      - OTEL_SERVICE_NAMESPACE=${OTEL_SERVICE_NAMESPACE:-mcp}
+      - DEPLOY_ENV=${DEPLOY_ENV:-production}
+      - OTEL_SERVICE_VERSION=${FINDVID_OTEL_SERVICE_VERSION:-}
+    volumes:
+      # Bind-mount the downloader config dir (read-only) so settings.json is available.
+      # Host path: FINDVID_SETTINGS_HOST_DIR (must contain settings.json).
+      - ${FINDVID_SETTINGS_HOST_DIR:-/home/crearec/telegram-video-downloader/config}:/settings:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8796/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - default
+      - lgtm
+
   # Home MCP for Nikita’s agents only — do not auto-wire for Sergey/Pizduk.
   # Host networking: debian-server cupsd listens only on 127.0.0.1:631, so bridge
   # networks cannot reach CUPS. host mode lets lp/lpstat use localhost CUPS; MCP

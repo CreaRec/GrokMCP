@@ -9,6 +9,7 @@ Production runs as a Docker Compose stack. Images come from GitHub Container Reg
 | `ghcr.io/crearec/grok-mcp-utilities` | `utilities` |
 | `ghcr.io/crearec/grok-mcp-simplefin` | `simplefin` |
 | `ghcr.io/crearec/grok-mcp-print` | `print` |
+| `ghcr.io/crearec/grok-mcp-findvid` | `findvid` |
 | `pgvector/pgvector:0.8.6-pg16` (Docker Hub) | `synology-db` |
 
 Deploy directory: `/home/crearec/grok-mcp`
@@ -22,6 +23,7 @@ Deploy directory: `/home/crearec/grok-mcp`
    - `servers/utilities/**` → push `grok-mcp-utilities` (`:main` + `:sha-<short>`)
    - `servers/simplefin/**` → push `grok-mcp-simplefin` (`:main` + `:sha-<short>`)
    - `servers/print/**` → push `grok-mcp-print` (`:main` + `:sha-<short>`)
+   - `servers/findvid/**` → push `grok-mcp-findvid` (`:main` + `:sha-<short>`)
    - `docker-compose.yml` alone → redeploy without rebuilding images
 4. Actions copies `docker-compose.yml` to the server, then runs `docker compose pull && docker compose up -d`. Compose pins every grok-mcp service to the floating `:main` tag (no `*_IMAGE_TAG` / SHA pins). Pull refreshes digests for all services; a utilities-only (or calendar-only) publish cannot roll another service back to a stale `sha-*` left in `.env`.
 5. After a successful image publish, `ghcr_cleanup` keeps the **10** newest `sha-*` tags per package, always preserves `:main`, and deletes untagged/orphaned manifests.
@@ -244,6 +246,9 @@ Add the MCP servers with URLs:
     },
     "print": {
       "url": "http://<DEPLOY_HOST>:8797/mcp"
+    },
+    "findvid": {
+      "url": "http://<DEPLOY_HOST>:8796/mcp"
     }
   }
 }
@@ -268,6 +273,9 @@ Or behind an nginx reverse proxy:
     },
     "print": {
       "url": "https://crearec.app/mcp/print"
+    },
+    "findvid": {
+      "url": "https://crearec.app/mcp/findvid"
     }
   }
 }
@@ -408,6 +416,67 @@ After merge, on the Debian host:
 2. Add `CUPS_SERVER`, `CUPS_PRINTER`, and spool paths to `/home/crearec/grok-mcp/.env`.
 3. Create `/home/crearec/print-spool` and add the nginx snippet if using the public proxy.
 4. Let CI deploy, or run `docker compose pull && docker compose up -d print`.
+
+#### Findvid MCP
+
+The `findvid` service drives Findvid VIP Telegram search (inline results → озвучка → quality) and **forwards** the final video/document message to CreaVideoDownloaderBot. It reuses the downloader’s GramJS user session and does **not** download multi‑GB files.
+
+**Caveat:** Findvid VIP / rate-limits / UI button changes can break automation.
+
+Add these variables to `.env` (never commit secrets):
+
+```sh
+# Prefer mounting the existing downloader settings.json
+FINDVID_SETTINGS_HOST_DIR=/home/crearec/telegram-video-downloader/config
+TELEGRAM_SETTINGS_PATH=/settings/settings.json
+TELEGRAM_USER_ID=YOUR_TELEGRAM_USER_ID
+
+# Or export the same GramJS fields instead of mounting settings:
+# TELEGRAM_API_ID=...
+# TELEGRAM_API_HASH=...
+# TELEGRAM_SESSION=...
+# DOWNLOADER_BOT_USERNAME=your_downloader_bot_without_at
+
+FINDVID_BOT_USERNAME=fvidBot
+# FINDVID_INLINE_BOT_USERNAME=fvid_try_bot
+# FINDVID_IMAGE=ghcr.io/crearec/grok-mcp-findvid
+```
+
+The container exposes port **8796**. Health check:
+
+```sh
+curl -sS http://127.0.0.1:8796/health
+```
+
+**Tools:** `search`, `list_voiceovers`, `list_qualities`, `confirm_and_forward`.
+
+#### Reverse proxy note (Findvid MCP)
+
+The `findvid` container listens on port **8796** with endpoint path `/mcp`. Configure nginx to forward:
+
+- `https://crearec.app/mcp/findvid` → `http://127.0.0.1:8796/mcp`
+
+Create `/etc/nginx/snippets/grok-mcp-findvid.conf` and include it from `/etc/nginx/sites-available/default`:
+
+```nginx
+# /etc/nginx/snippets/grok-mcp-findvid.conf
+# Findvid MCP (streamable-http transport) — Nikita agents
+
+location = /mcp/findvid {
+    proxy_pass http://127.0.0.1:8796/mcp;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+After merge, on the Debian host:
+
+1. Point `FINDVID_SETTINGS_HOST_DIR` at the real downloader `config/` directory (or set API/session env vars).
+2. Add the nginx snippet above and reload nginx.
+3. Let CI deploy the new `findvid` service, or run `docker compose pull && docker compose up -d findvid`.
 
 ## Day-to-day operations
 
