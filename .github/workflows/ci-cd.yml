@@ -13,6 +13,7 @@ env:
   UTILITIES_IMAGE: ghcr.io/crearec/grok-mcp-utilities
   SIMPLEFIN_IMAGE: ghcr.io/crearec/grok-mcp-simplefin
   PRINT_IMAGE: ghcr.io/crearec/grok-mcp-print
+  FINDVID_IMAGE: ghcr.io/crearec/grok-mcp-findvid
   DEPLOY_DIR: /home/crearec/grok-mcp
 
 jobs:
@@ -28,6 +29,7 @@ jobs:
       utilities: ${{ steps.filter.outputs.utilities }}
       simplefin: ${{ steps.filter.outputs.simplefin }}
       print: ${{ steps.filter.outputs.print }}
+      findvid: ${{ steps.filter.outputs.findvid }}
       compose: ${{ steps.filter.outputs.compose }}
       ci: ${{ steps.filter.outputs.ci }}
     steps:
@@ -49,6 +51,8 @@ jobs:
               - 'servers/simplefin/**'
             print:
               - 'servers/print/**'
+            findvid:
+              - 'servers/findvid/**'
             compose:
               - 'docker-compose.yml'
             ci:
@@ -217,6 +221,48 @@ jobs:
           context: servers/print
           push: false
           tags: ${{ env.PRINT_IMAGE }}:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          secrets: |
+            NODE_AUTH_TOKEN=${{ secrets.GITHUB_TOKEN }}
+
+  test-findvid:
+    runs-on: ubuntu-latest
+    needs: changes
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: servers/findvid/package-lock.json
+          registry-url: https://npm.pkg.github.com
+          scope: "@crearec"
+
+      - name: Install dependencies
+        working-directory: servers/findvid
+        run: npm ci
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run tests
+        working-directory: servers/findvid
+        run: npm test
+
+      - uses: docker/setup-buildx-action@v4
+        if: needs.changes.outputs.findvid == 'true'
+
+      - name: Build findvid image (no push)
+        if: needs.changes.outputs.findvid == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: servers/findvid
+          push: false
+          tags: ${{ env.FINDVID_IMAGE }}:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
           secrets: |
@@ -580,9 +626,51 @@ jobs:
           secrets: |
             NODE_AUTH_TOKEN=${{ secrets.GITHUB_TOKEN }}
 
+  publish-findvid:
+    runs-on: ubuntu-latest
+    needs: [test-findvid, changes]
+    if: >-
+      github.event_name == 'push'
+      && github.ref == 'refs/heads/main'
+      && needs.changes.outputs.findvid == 'true'
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags
+        id: meta
+        run: |
+          SHORT_SHA="$(echo "${GITHUB_SHA}" | cut -c1-7)"
+          echo "image_tag=sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "tags=${{ env.FINDVID_IMAGE }}:main,${{ env.FINDVID_IMAGE }}:sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: servers/findvid
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          secrets: |
+            NODE_AUTH_TOKEN=${{ secrets.GITHUB_TOKEN }}
+
   deploy:
     runs-on: ubuntu-latest
-    needs: [test-apple-calendar, test-synology, test-synology-indexer, test-utilities, test-simplefin, test-print, changes, publish-apple-calendar, publish-synology, publish-synology-indexer, publish-utilities, publish-simplefin, publish-print]
+    needs: [test-apple-calendar, test-synology, test-synology-indexer, test-utilities, test-simplefin, test-print, test-findvid, changes, publish-apple-calendar, publish-synology, publish-synology-indexer, publish-utilities, publish-simplefin, publish-print, publish-findvid]
     if: >-
       always()
       && !cancelled()
@@ -593,12 +681,14 @@ jobs:
       && needs.test-utilities.result == 'success'
       && needs.test-simplefin.result == 'success'
       && needs.test-print.result == 'success'
+      && needs.test-findvid.result == 'success'
       && (needs.publish-apple-calendar.result == 'success' || needs.publish-apple-calendar.result == 'skipped')
       && (needs.publish-synology.result == 'success' || needs.publish-synology.result == 'skipped')
       && (needs.publish-synology-indexer.result == 'success' || needs.publish-synology-indexer.result == 'skipped')
       && (needs.publish-utilities.result == 'success' || needs.publish-utilities.result == 'skipped')
       && (needs.publish-simplefin.result == 'success' || needs.publish-simplefin.result == 'skipped')
       && (needs.publish-print.result == 'success' || needs.publish-print.result == 'skipped')
+      && (needs.publish-findvid.result == 'success' || needs.publish-findvid.result == 'skipped')
       && (
         github.event_name == 'workflow_dispatch'
         || (
@@ -610,6 +700,7 @@ jobs:
             || needs.changes.outputs.utilities == 'true'
             || needs.changes.outputs.simplefin == 'true'
             || needs.changes.outputs.print == 'true'
+            || needs.changes.outputs.findvid == 'true'
             || needs.changes.outputs.compose == 'true'
             || needs.changes.outputs.ci == 'true'
           )
@@ -646,6 +737,7 @@ jobs:
           UTILITIES_CHANGED: ${{ needs.changes.outputs.utilities }}
           SIMPLEFIN_CHANGED: ${{ needs.changes.outputs.simplefin }}
           PRINT_CHANGED: ${{ needs.changes.outputs.print }}
+          FINDVID_CHANGED: ${{ needs.changes.outputs.findvid }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
         run: |
@@ -696,6 +788,9 @@ jobs:
           if [ '${PRINT_CHANGED}' = 'true' ]; then
             docker compose logs --tail=30 print || true
           fi
+          if [ '${FINDVID_CHANGED}' = 'true' ]; then
+            docker compose logs --tail=30 findvid || true
+          fi
 
           # Logout so credentials don't persist on disk
           docker logout ghcr.io || true
@@ -703,13 +798,13 @@ jobs:
 
   ghcr_cleanup:
     runs-on: ubuntu-latest
-    needs: [publish-apple-calendar, publish-synology, publish-synology-indexer, publish-utilities, publish-simplefin, publish-print]
+    needs: [publish-apple-calendar, publish-synology, publish-synology-indexer, publish-utilities, publish-simplefin, publish-print, publish-findvid]
     if: >-
       always()
       && !cancelled()
       && github.event_name == 'push'
       && github.ref == 'refs/heads/main'
-      && (needs.publish-apple-calendar.result == 'success' || needs.publish-synology.result == 'success' || needs.publish-synology-indexer.result == 'success' || needs.publish-utilities.result == 'success' || needs.publish-simplefin.result == 'success' || needs.publish-print.result == 'success')
+      && (needs.publish-apple-calendar.result == 'success' || needs.publish-synology.result == 'success' || needs.publish-synology-indexer.result == 'success' || needs.publish-utilities.result == 'success' || needs.publish-simplefin.result == 'success' || needs.publish-print.result == 'success' || needs.publish-findvid.result == 'success')
     concurrency:
       group: ghcr-cleanup
       cancel-in-progress: false
@@ -777,6 +872,17 @@ jobs:
         uses: dataaxiom/ghcr-cleanup-action@v1
         with:
           packages: grok-mcp-print
+          delete-tags: sha-*
+          keep-n-tagged: "10"
+          exclude-tags: main
+          delete-untagged: true
+          delete-orphaned-images: true
+
+      - name: Prune grok-mcp-findvid (keep 10 sha-*)
+        if: needs.publish-findvid.result == 'success'
+        uses: dataaxiom/ghcr-cleanup-action@v1
+        with:
+          packages: grok-mcp-findvid
           delete-tags: sha-*
           keep-n-tagged: "10"
           exclude-tags: main

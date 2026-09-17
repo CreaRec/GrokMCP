@@ -1,0 +1,36 @@
+{
+  "name": "@crearec/findvid",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MCP server for Findvid Telegram search, voiceover/quality selection, and forward to CreaVideoDownloaderBot",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "dev:http": "tsx src/http.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "start:http": "node dist/http.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@crearec/otel": "^0.0.3",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "big-integer": "^1.6.52",
+    "telegram": "^2.26.22",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.0.0"
+  },
+  "bin": {
+    "findvid-mcp": "./dist/http.js"
+  }
+}
