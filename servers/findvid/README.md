@@ -38,7 +38,7 @@ Return shape is always JSON text: `{ ok: true, data }` / `{ ok: false, error }`.
 | `DOWNLOADER_BOT_USERNAME` | CreaVideoDownloaderBot username without `@` |
 | `FINDVID_PREFERRED_VOICEOVER` | Default `Дублированный` |
 | `FINDVID_PREFERRED_QUALITIES` | Comma list, default `1080p,720p,480p` |
-| `PORT` | HTTP port (default **8801**) |
+| `PORT` | HTTP port (default **8800**) |
 
 ### Debian deploy (reuse downloader settings)
 
@@ -71,7 +71,7 @@ cp .env.example .env
 npm ci
 npm test
 npm run dev:http
-curl -sS http://127.0.0.1:8801/health
+curl -sS http://127.0.0.1:8800/health
 ```
 
 ### Example MCP tool call (HTTP)
@@ -88,7 +88,7 @@ After initialize, call tools via your MCP client. Conceptual args:
 
 ## Production
 
-See **[docs/deploy.md](../../docs/deploy.md)** — image `ghcr.io/crearec/grok-mcp-findvid`, port **8801**, path `/mcp/findvid`.
+See **[docs/deploy.md](../../docs/deploy.md)** — image `ghcr.io/crearec/grok-mcp-findvid`, port **8800**, path `/mcp/findvid`.
 
 ## License
 
