@@ -12,9 +12,11 @@ import {
   DEFAULT_OLLAMA_HEALTHY_TIMEOUT_MS,
   waitForOllamaHealthy,
   pullModelIfMissing,
+  consumeOllamaPullStream,
   type RunPodDeployConfig,
   type RunPodPodConfig,
 } from "./runpod.js";
+import { DEFAULT_VISION_MODEL } from "./config.js";
 import type { LogAttributes } from "./telemetry.js";
 import { logInfo, logError } from "./telemetry.js";
 
@@ -758,8 +760,13 @@ describe("pullModelIfMissing", () => {
     vi.restoreAllMocks();
   });
 
-  it("POST /api/pull JSON includes model equal to the vision model name", async () => {
-    const visionModel = "qwen2.5vl:7b";
+  it("DEFAULT_VISION_MODEL is the official ollama.com library tag qwen2.5vl:7b", () => {
+    // Not qwen2.5-vl:7b (hyphenated) — that manifest 404s on registry.ollama.ai.
+    expect(DEFAULT_VISION_MODEL).toBe("qwen2.5vl:7b");
+  });
+
+  it("POST /api/pull streams NDJSON with model equal to the vision model name", async () => {
+    const visionModel = DEFAULT_VISION_MODEL;
     const fetchMock = vi.mocked(fetch);
     const pullBodies: unknown[] = [];
 
@@ -770,7 +777,10 @@ describe("pullModelIfMissing", () => {
       }
       if (urlStr.includes("/api/pull")) {
         pullBodies.push(JSON.parse(String(init?.body ?? "{}")));
-        return jsonResponse({});
+        return new Response('{"status":"pulling manifest"}\n{"status":"success"}\n', {
+          status: 200,
+          headers: { "Content-Type": "application/x-ndjson" },
+        });
       }
       return jsonResponse({});
     });
@@ -781,8 +791,43 @@ describe("pullModelIfMissing", () => {
     expect(pullBodies[0]).toMatchObject({
       model: visionModel,
       name: visionModel,
-      stream: false,
+      stream: true,
     });
+  });
+
+  it("throws when the pull stream reports an error", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async (url) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/api/tags")) {
+        return jsonResponse({ models: [] });
+      }
+      if (urlStr.includes("/api/pull")) {
+        return new Response(
+          '{"status":"pulling manifest"}\n{"error":"pull model manifest: file does not exist"}\n',
+          { status: 200, headers: { "Content-Type": "application/x-ndjson" } },
+        );
+      }
+      return jsonResponse({});
+    });
+
+    await expect(
+      pullModelIfMissing("https://example-pod-11434.proxy.runpod.net", "qwen2.5-vl:7b"),
+    ).rejects.toThrow(/Failed to pull model qwen2\.5-vl:7b: pull model manifest/);
+  });
+});
+
+describe("consumeOllamaPullStream", () => {
+  it("resolves when the stream ends with status success", async () => {
+    const body = new Response('{"status":"pulling manifest"}\n{"status":"success"}\n').body;
+    await expect(consumeOllamaPullStream(body, DEFAULT_VISION_MODEL)).resolves.toBeUndefined();
+  });
+
+  it("rejects when success never arrives", async () => {
+    const body = new Response('{"status":"pulling manifest"}\n').body;
+    await expect(consumeOllamaPullStream(body, DEFAULT_VISION_MODEL)).rejects.toThrow(
+      /pull finished without success/,
+    );
   });
 });
 

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { describeFromDocumentText, describeWithVisionImage } from "./vision.js";
+import { DEFAULT_VISION_MODEL } from "./config.js";
 
 vi.mock("./telemetry.js", () => ({
   logInfo: vi.fn(),
@@ -32,7 +33,7 @@ describe("describeFromDocumentText", () => {
       "# Quarterly Report\n\nRevenue was up 10%.",
       "report.pdf",
       "http://ollama:11434",
-      "qwen2.5vl:7b",
+      DEFAULT_VISION_MODEL,
     );
 
     expect(result.label).toBe("Quarterly Report");
@@ -65,7 +66,7 @@ describe("describeFromDocumentText", () => {
       "PORT=8080\nDEBUG=true",
       "app.properties",
       "http://ollama:11434",
-      "qwen2.5vl:7b",
+      DEFAULT_VISION_MODEL,
       { source: "qwen-text" },
     );
 

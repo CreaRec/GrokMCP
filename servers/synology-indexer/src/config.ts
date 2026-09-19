@@ -1,3 +1,12 @@
+/**
+ * Default Ollama vision model for image/document gists.
+ *
+ * Official library tag on https://ollama.com/library/qwen2.5vl (verified):
+ * `qwen2.5vl:7b` — no hyphen between "2.5" and "vl".
+ * Wrong names that 404/fail on pull: `qwen2.5-vl:7b`, `qwen2.5-vl`.
+ */
+export const DEFAULT_VISION_MODEL = "qwen2.5vl:7b";
+
 export interface Config {
   databaseUrl: string;
   mountRoot: string;
@@ -111,7 +120,7 @@ export function getConfig(): Config {
         ? parsedEmbedOverlap
         : 100,
     ollamaBaseUrl: process.env.OLLAMA_BASE_URL ?? null,
-    visionModel: process.env.VISION_MODEL ?? "qwen2.5vl:7b",
+    visionModel: process.env.VISION_MODEL ?? DEFAULT_VISION_MODEL,
     embedModel: process.env.EMBED_MODEL ?? "mxbai-embed-large",
     dsmHost: process.env.DSM_HOST ?? null,
     dsmShareUser: process.env.DSM_SHARE_USER ?? null,
