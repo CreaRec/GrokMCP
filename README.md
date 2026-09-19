@@ -85,7 +85,7 @@ Telegram Findvid VIP search UX for Nikita’s agents: inline search → optional
 - `list_voiceovers` / `list_qualities` — optional button browse
 - `confirm_and_forward` — pick defaults/overrides, wait for video, forward to downloader bot
 
-**Env:** reuse downloader `settings.json` (`TELEGRAM_SETTINGS_PATH` + `TELEGRAM_USER_ID`) or `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` / `TELEGRAM_SESSION`; `FINDVID_BOT_USERNAME`, `DOWNLOADER_BOT_USERNAME`; port **8796**. VIP/rate-limits/UI changes on Findvid can break automation.
+**Env:** reuse downloader `settings.json` (`TELEGRAM_SETTINGS_PATH` + `TELEGRAM_USER_ID`) or `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` / `TELEGRAM_SESSION`; `FINDVID_BOT_USERNAME`, `DOWNLOADER_BOT_USERNAME`; port **8800**. VIP/rate-limits/UI changes on Findvid can break automation.
 
 ## Adding a New Server
 

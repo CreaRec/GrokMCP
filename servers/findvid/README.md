@@ -38,7 +38,7 @@ Return shape is always JSON text: `{ ok: true, data }` / `{ ok: false, error }`.
 | `DOWNLOADER_BOT_USERNAME` | CreaVideoDownloaderBot username without `@` |
 | `FINDVID_PREFERRED_VOICEOVER` | Default `Дублированный` |
 | `FINDVID_PREFERRED_QUALITIES` | Comma list, default `1080p,720p,480p` |
-| `PORT` | HTTP port (default **8796**) |
+| `PORT` | HTTP port (default **8800**) |
 
 ### Debian deploy (reuse downloader settings)
 
@@ -46,7 +46,7 @@ On the host, either:
 
 ```sh
 # Mount/copy the existing downloader settings (read-only is fine)
-TELEGRAM_SETTINGS_PATH=/home/crearec/telegram-video-downloader/config/settings.json
+TELEGRAM_SETTINGS_PATH=/home/crearec/crea-video-downloader-bot/config/settings.json
 TELEGRAM_USER_ID=YOUR_TELEGRAM_USER_ID
 FINDVID_BOT_USERNAME=fvidBot
 # DOWNLOADER_BOT_USERNAME is read from settings.telegram.botUsername when unset
@@ -61,7 +61,7 @@ TELEGRAM_SESSION=...
 DOWNLOADER_BOT_USERNAME=your_downloader_bot
 ```
 
-Compose can bind-mount the downloader **config directory** via `FINDVID_SETTINGS_HOST_DIR` (see root `docs/deploy.md`).
+Compose can bind-mount the downloader **config directory** via `FINDVID_SETTINGS_HOST_DIR` (default `/home/crearec/crea-video-downloader-bot/config`; see root `docs/deploy.md`).
 
 ## Development
 
@@ -71,7 +71,7 @@ cp .env.example .env
 npm ci
 npm test
 npm run dev:http
-curl -sS http://127.0.0.1:8796/health
+curl -sS http://127.0.0.1:8800/health
 ```
 
 ### Example MCP tool call (HTTP)
@@ -88,7 +88,7 @@ After initialize, call tools via your MCP client. Conceptual args:
 
 ## Production
 
-See **[docs/deploy.md](../../docs/deploy.md)** — image `ghcr.io/crearec/grok-mcp-findvid`, port **8796**, path `/mcp/findvid`.
+See **[docs/deploy.md](../../docs/deploy.md)** — image `ghcr.io/crearec/grok-mcp-findvid`, port **8800**, path `/mcp/findvid`.
 
 ## License
 

@@ -248,7 +248,7 @@ Add the MCP servers with URLs:
       "url": "http://<DEPLOY_HOST>:8797/mcp"
     },
     "findvid": {
-      "url": "http://<DEPLOY_HOST>:8796/mcp"
+      "url": "http://<DEPLOY_HOST>:8800/mcp"
     }
   }
 }
@@ -427,7 +427,7 @@ Add these variables to `.env` (never commit secrets):
 
 ```sh
 # Prefer mounting the existing downloader settings.json
-FINDVID_SETTINGS_HOST_DIR=/home/crearec/telegram-video-downloader/config
+FINDVID_SETTINGS_HOST_DIR=/home/crearec/crea-video-downloader-bot/config
 TELEGRAM_SETTINGS_PATH=/settings/settings.json
 TELEGRAM_USER_ID=YOUR_TELEGRAM_USER_ID
 
@@ -442,19 +442,19 @@ FINDVID_BOT_USERNAME=fvidBot
 # FINDVID_IMAGE=ghcr.io/crearec/grok-mcp-findvid
 ```
 
-The container exposes port **8796**. Health check:
+The container exposes port **8800** (avoids colliding with crea-parks on **8796**). Health check:
 
 ```sh
-curl -sS http://127.0.0.1:8796/health
+curl -sS http://127.0.0.1:8800/health
 ```
 
 **Tools:** `search`, `list_voiceovers`, `list_qualities`, `confirm_and_forward`.
 
 #### Reverse proxy note (Findvid MCP)
 
-The `findvid` container listens on port **8796** with endpoint path `/mcp`. Configure nginx to forward:
+The `findvid` container listens on port **8800** with endpoint path `/mcp`. Configure nginx to forward:
 
-- `https://crearec.app/mcp/findvid` → `http://127.0.0.1:8796/mcp`
+- `https://crearec.app/mcp/findvid` → `http://127.0.0.1:8800/mcp`
 
 Create `/etc/nginx/snippets/grok-mcp-findvid.conf` and include it from `/etc/nginx/sites-available/default`:
 
@@ -463,7 +463,7 @@ Create `/etc/nginx/snippets/grok-mcp-findvid.conf` and include it from `/etc/ngi
 # Findvid MCP (streamable-http transport) — Nikita agents
 
 location = /mcp/findvid {
-    proxy_pass http://127.0.0.1:8796/mcp;
+    proxy_pass http://127.0.0.1:8800/mcp;
     proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
