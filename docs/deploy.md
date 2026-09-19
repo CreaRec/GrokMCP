@@ -510,6 +510,14 @@ SYNOLOGY_INDEXER_TRANSFORMERS_CACHE_HOST_PATH=/home/crearec/grok-mcp/cache/synol
 
 Do **not** bake the model into the image — only persist the download cache.
 
+### Synology indexer vision model (`VISION_MODEL`)
+
+Nightly GPU indexing pulls the Ollama vision model onto an ephemeral RunPod pod. The default is the official library tag **`qwen2.5vl:7b`** ([ollama.com/library/qwen2.5vl](https://ollama.com/library/qwen2.5vl)) — note **no hyphen** between `2.5` and `vl`. Hyphenated names like `qwen2.5-vl:7b` are not in the library and fail on pull.
+
+**Migration:** If Debian `/home/crearec/grok-mcp/.env` sets `VISION_MODEL` to an old or hyphenated tag, change it to `qwen2.5vl:7b` or delete the line so compose’s default applies. Then `docker compose up -d synology-indexer` (or wait for the next CI deploy).
+
+Pulls use streaming `/api/pull` so RunPod’s HTTP proxy does not idle-timeout during the multi-GB download.
+
 ### On-demand synology-indexer run
 
 The indexer daemon sleeps until `INDEX_DAILY_AT` (default 21:00 America/Chicago). To kick one full index now without restarting the container or shifting the daily slot:

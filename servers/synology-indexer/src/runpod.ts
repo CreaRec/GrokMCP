@@ -357,6 +357,67 @@ export async function waitForOllamaHealthy(
   throw new Error("Timeout waiting for Ollama to be healthy");
 }
 
+/**
+ * Consume an Ollama `/api/pull` NDJSON stream until `status: success` or an error.
+ *
+ * Must stream (not `stream: false`): RunPod's HTTP proxy idle-times out multi-GB
+ * pulls that send no bytes until the download finishes, which surfaces as HTTP 404.
+ */
+export async function consumeOllamaPullStream(
+  body: ReadableStream<Uint8Array> | null,
+  modelName: string,
+): Promise<void> {
+  if (!body) {
+    throw new Error(`Failed to pull model ${modelName}: empty response body`);
+  }
+
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let sawSuccess = false;
+
+  const handleLine = (line: string): void => {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      return;
+    }
+    let event: { status?: string; error?: string };
+    try {
+      event = JSON.parse(trimmed) as { status?: string; error?: string };
+    } catch {
+      throw new Error(`Failed to pull model ${modelName}: invalid pull stream JSON`);
+    }
+    if (event.error) {
+      throw new Error(`Failed to pull model ${modelName}: ${event.error}`);
+    }
+    if (event.status === "success") {
+      sawSuccess = true;
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      handleLine(line);
+    }
+  }
+
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    handleLine(buffer);
+  }
+
+  if (!sawSuccess) {
+    throw new Error(`Failed to pull model ${modelName}: pull finished without success`);
+  }
+}
+
 export async function pullModelIfMissing(
   ollamaUrl: string,
   modelName: string,
@@ -381,12 +442,17 @@ export async function pullModelIfMissing(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     // Current Ollama expects `model`; older builds still read `name`.
-    body: JSON.stringify({ model: modelName, name: modelName, stream: false }),
+    // stream: true keeps bytes flowing through RunPod's HTTP proxy during large pulls.
+    body: JSON.stringify({ model: modelName, name: modelName, stream: true }),
   });
 
   if (!pullResponse.ok) {
-    throw new Error(`Failed to pull model ${modelName}: ${pullResponse.status}`);
+    const detail = await pullResponse.text().catch(() => "");
+    const suffix = detail.trim() ? ` ${detail.trim().slice(0, 200)}` : "";
+    throw new Error(`Failed to pull model ${modelName}: ${pullResponse.status}${suffix}`);
   }
+
+  await consumeOllamaPullStream(pullResponse.body, modelName);
 
   logInfo("runpod model pulled", { model: modelName });
 }

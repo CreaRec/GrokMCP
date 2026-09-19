@@ -121,7 +121,7 @@ services:
       - RUNPOD_START_RETRIES=${RUNPOD_START_RETRIES:-}
       - RUNPOD_START_RETRY_MS=${RUNPOD_START_RETRY_MS:-}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-}
-      - VISION_MODEL=${VISION_MODEL:-qwen2.5vl:7b}
+      - VISION_MODEL=${VISION_MODEL:-qwen2.5vl:7b}  # ollama.com/library/qwen2.5vl (not qwen2.5-vl)
       - EMBED_MODEL=${EMBED_MODEL:-mxbai-embed-large}
       # CPU folder embeddings (@xenova/transformers / mxbai-embed-large-v1).
       # Must match Dockerfile ENV and cpu-embedder.ts; bind-mounted below so recreates keep the ~337MB download.
