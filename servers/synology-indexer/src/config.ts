@@ -4,8 +4,39 @@
  * Official library tag on https://ollama.com/library/qwen2.5vl (verified):
  * `qwen2.5vl:7b` — no hyphen between "2.5" and "vl".
  * Wrong names that 404/fail on pull: `qwen2.5-vl:7b`, `qwen2.5-vl`.
+ * Requires Ollama ≥ 0.7.0 (see DEFAULT_RUNPOD_IMAGE).
  */
 export const DEFAULT_VISION_MODEL = "qwen2.5vl:7b";
+
+/**
+ * Default RunPod container image for ephemeral Ollama pods.
+ *
+ * Pin a version tag — bare `ollama/ollama` (latest) is unsafe on RunPod Secure
+ * Cloud: hosts may serve a stale cached `latest` that pre-dates qwen2.5vl
+ * support, and floating latest drifts without a deploy. 0.34.2 is ≥ 0.7.0 and
+ * matched Docker Hub `latest` when this pin was chosen (2026-09).
+ */
+export const DEFAULT_RUNPOD_IMAGE = "ollama/ollama:0.34.2";
+
+/** Minimum Ollama version that can pull/run qwen2.5vl (per ollama.com/library). */
+export const MIN_OLLAMA_VERSION_FOR_VISION = "0.7.0";
+
+/**
+ * Resolve RUNPOD_IMAGE. Bare `ollama/ollama` / `:latest` are rewritten to
+ * {@link DEFAULT_RUNPOD_IMAGE} so a leftover Debian `.env` pin does not keep
+ * pulling a stale Secure Cloud cached digest.
+ */
+export function resolveRunpodImage(raw: string | undefined | null): string {
+  const trimmed = (raw ?? "").trim();
+  if (
+    !trimmed ||
+    trimmed === "ollama/ollama" ||
+    trimmed === "ollama/ollama:latest"
+  ) {
+    return DEFAULT_RUNPOD_IMAGE;
+  }
+  return trimmed;
+}
 
 export interface Config {
   databaseUrl: string;
@@ -128,7 +159,7 @@ export function getConfig(): Config {
     runpodApiKey: process.env.RUNPOD_API_KEY ?? null,
     runpodPodId: process.env.RUNPOD_POD_ID ?? null,
     runpodTemplateId: process.env.RUNPOD_TEMPLATE_ID ?? null,
-    runpodImage: process.env.RUNPOD_IMAGE ?? "ollama/ollama",
+    runpodImage: resolveRunpodImage(process.env.RUNPOD_IMAGE),
     runpodCloudType: process.env.RUNPOD_CLOUD_TYPE ?? "SECURE",
     runpodGpuTypeId: process.env.RUNPOD_GPU_TYPE_ID ?? "NVIDIA GeForce RTX 4090",
     runpodContainerDiskGb:
