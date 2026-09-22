@@ -1,3 +1,7 @@
+import {
+  DEFAULT_RUNPOD_IMAGE,
+  MIN_OLLAMA_VERSION_FOR_VISION,
+} from "./config.js";
 import { logInfo, logError, logErrorWithCause, logWarn } from "./telemetry.js";
 
 const RUNPOD_API_BASE = "https://api.runpod.io/graphql";
@@ -7,6 +11,10 @@ export const DEFAULT_START_ATTEMPTS = 6;
 export const DEFAULT_START_RETRY_MS = 120_000;
 /** Cold ollama/ollama on a new Secure GPU can exceed 3 minutes before /api/tags responds. */
 export const DEFAULT_OLLAMA_HEALTHY_TIMEOUT_MS = 600_000;
+/** Brief pause before retrying a transient /api/pull HTTP failure (proxy 404/5xx). */
+export const DEFAULT_PULL_RETRY_DELAY_MS = 2_000;
+/** Re-export for deploy/docs callers that only import from runpod. */
+export { DEFAULT_RUNPOD_IMAGE, MIN_OLLAMA_VERSION_FOR_VISION };
 
 export type OllamaUrlSource = "proxy" | "override";
 
@@ -362,6 +370,9 @@ export async function waitForOllamaHealthy(
  *
  * Must stream (not `stream: false`): RunPod's HTTP proxy idle-times out multi-GB
  * pulls that send no bytes until the download finishes, which surfaces as HTTP 404.
+ *
+ * Distinct from an *immediate* empty-body HTTP 404 on the POST itself (proxy routing);
+ * see {@link formatPullHttpError}.
  */
 export async function consumeOllamaPullStream(
   body: ReadableStream<Uint8Array> | null,
@@ -418,10 +429,129 @@ export async function consumeOllamaPullStream(
   }
 }
 
+/** Parse `1.2.3` / `0.34.2-rc1` style versions into major.minor.patch. */
+export function parseSemverTriplet(version: string): [number, number, number] | null {
+  const match = version.trim().match(/^v?(\d+)\.(\d+)\.(\d+)/);
+  if (!match) {
+    return null;
+  }
+  return [parseInt(match[1], 10), parseInt(match[2], 10), parseInt(match[3], 10)];
+}
+
+export function isOllamaVersionAtLeast(version: string, minimum: string): boolean {
+  const current = parseSemverTriplet(version);
+  const min = parseSemverTriplet(minimum);
+  if (!current || !min) {
+    return false;
+  }
+  for (let i = 0; i < 3; i++) {
+    if (current[i] > min[i]) {
+      return true;
+    }
+    if (current[i] < min[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * GET /api/version — used for diagnostics before model pulls.
+ * Returns null when the endpoint is missing or non-JSON (very old images).
+ */
+export async function fetchOllamaVersion(ollamaUrl: string): Promise<string | null> {
+  try {
+    const response = await fetch(`${ollamaUrl}/api/version`, { method: "GET" });
+    if (!response.ok) {
+      return null;
+    }
+    const payload = (await response.json()) as { version?: string };
+    return typeof payload.version === "string" && payload.version.trim()
+      ? payload.version.trim()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** HTTP statuses worth one pull retry (RunPod proxy flaps; not auth). */
+export function isRetryablePullHttpStatus(status: number): boolean {
+  return status === 404 || status === 502 || status === 503 || status === 504;
+}
+
+/**
+ * Build a pull failure message that cannot be confused with a missing library tag.
+ *
+ * Immediate empty-body 404 on POST /api/pull is characteristic of the RunPod HTTP
+ * proxy (or a stale/wrong Ollama image), not registry.ollama.ai rejecting qwen2.5vl:7b
+ * (that surfaces as NDJSON `{"error":"…file does not exist"}` on HTTP 200).
+ */
+export function formatPullHttpError(
+  modelName: string,
+  status: number,
+  bodyText: string,
+  ollamaVersion: string | null,
+): string {
+  const trimmed = bodyText.trim();
+  const versionLabel = ollamaVersion ?? "unknown";
+  const parts: string[] = [
+    `Failed to pull model ${modelName}: HTTP ${status}`,
+  ];
+
+  if (!trimmed) {
+    parts.push(
+      "(empty body — likely RunPod proxy routing, not an Ollama/registry missing-tag error)",
+    );
+  } else {
+    parts.push(`body=${JSON.stringify(trimmed.slice(0, 200))}`);
+  }
+
+  parts.push(`ollama_version=${versionLabel}`);
+
+  if (ollamaVersion && !isOllamaVersionAtLeast(ollamaVersion, MIN_OLLAMA_VERSION_FOR_VISION)) {
+    parts.push(
+      `(Ollama < ${MIN_OLLAMA_VERSION_FOR_VISION} cannot run qwen2.5vl; set RUNPOD_IMAGE=${DEFAULT_RUNPOD_IMAGE})`,
+    );
+  } else if (status === 404 && !trimmed) {
+    parts.push(
+      `(retry once; pin RUNPOD_IMAGE=${DEFAULT_RUNPOD_IMAGE} so Secure Cloud hosts do not serve a stale ollama/ollama:latest)`,
+    );
+  }
+
+  return parts.join(" ");
+}
+
+export interface PullModelOptions {
+  /** Injectable sleep for tests (default real timer). */
+  sleep?: (ms: number) => Promise<void>;
+  /** Delay before the single retry (default {@link DEFAULT_PULL_RETRY_DELAY_MS}). */
+  retryDelayMs?: number;
+  /** Max POST /api/pull attempts including the first (default 2). */
+  maxAttempts?: number;
+}
+
+async function postOllamaPull(
+  ollamaUrl: string,
+  modelName: string,
+): Promise<Response> {
+  return fetch(`${ollamaUrl}/api/pull`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    // Current Ollama expects `model`; older builds still read `name`.
+    // stream: true keeps bytes flowing through RunPod's HTTP proxy during large pulls.
+    body: JSON.stringify({ model: modelName, name: modelName, stream: true }),
+  });
+}
+
 export async function pullModelIfMissing(
   ollamaUrl: string,
   modelName: string,
+  options: PullModelOptions = {},
 ): Promise<void> {
+  const sleep = options.sleep ?? defaultSleep;
+  const retryDelayMs = options.retryDelayMs ?? DEFAULT_PULL_RETRY_DELAY_MS;
+  const maxAttempts = options.maxAttempts ?? 2;
+
   const tagsResponse = await fetch(`${ollamaUrl}/api/tags`, { method: "GET" });
   if (!tagsResponse.ok) {
     throw new Error(`Failed to get Ollama tags: ${tagsResponse.status}`);
@@ -437,24 +567,59 @@ export async function pullModelIfMissing(
     return;
   }
 
-  logInfo("runpod pulling model", { model: modelName });
-  const pullResponse = await fetch(`${ollamaUrl}/api/pull`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    // Current Ollama expects `model`; older builds still read `name`.
-    // stream: true keeps bytes flowing through RunPod's HTTP proxy during large pulls.
-    body: JSON.stringify({ model: modelName, name: modelName, stream: true }),
+  const ollamaVersion = await fetchOllamaVersion(ollamaUrl);
+  logInfo("runpod ollama version", {
+    model: modelName,
+    ollama_version: ollamaVersion ?? "unknown",
   });
 
-  if (!pullResponse.ok) {
-    const detail = await pullResponse.text().catch(() => "");
-    const suffix = detail.trim() ? ` ${detail.trim().slice(0, 200)}` : "";
-    throw new Error(`Failed to pull model ${modelName}: ${pullResponse.status}${suffix}`);
+  if (ollamaVersion && !isOllamaVersionAtLeast(ollamaVersion, MIN_OLLAMA_VERSION_FOR_VISION)) {
+    logWarn("runpod ollama version below qwen2.5vl minimum", {
+      ollama_version: ollamaVersion,
+      minimum: MIN_OLLAMA_VERSION_FOR_VISION,
+      recommended_image: DEFAULT_RUNPOD_IMAGE,
+    });
   }
 
-  await consumeOllamaPullStream(pullResponse.body, modelName);
+  logInfo("runpod pulling model", { model: modelName });
 
-  logInfo("runpod model pulled", { model: modelName });
+  let lastError: Error | null = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const pullResponse = await postOllamaPull(ollamaUrl, modelName);
+
+    if (!pullResponse.ok) {
+      const detail = await pullResponse.text().catch(() => "");
+      const message = formatPullHttpError(
+        modelName,
+        pullResponse.status,
+        detail,
+        ollamaVersion,
+      );
+      lastError = new Error(message);
+
+      const retryable = isRetryablePullHttpStatus(pullResponse.status);
+      if (!retryable || attempt >= maxAttempts) {
+        throw lastError;
+      }
+
+      logWarn("runpod pull HTTP error; retrying", {
+        model: modelName,
+        attempt,
+        max_attempts: maxAttempts,
+        http_status: pullResponse.status,
+        ollama_version: ollamaVersion ?? "unknown",
+        retry_delay_ms: retryDelayMs,
+      });
+      await sleep(retryDelayMs);
+      continue;
+    }
+
+    await consumeOllamaPullStream(pullResponse.body, modelName);
+    logInfo("runpod model pulled", { model: modelName, attempt });
+    return;
+  }
+
+  throw lastError ?? new Error(`Failed to pull model ${modelName}`);
 }
 
 export interface GpuLifecycleOptions {
@@ -475,7 +640,10 @@ export async function withGpuPod<T>(
   let podRef: RunPodPodConfig | null = null;
 
   try {
-    logInfo("runpod creating ephemeral pod");
+    logInfo("runpod creating ephemeral pod", {
+      image: deployConfig.templateId ? "template" : deployConfig.imageName,
+      cloud_type: deployConfig.cloudType,
+    });
     podRef = await createPod(deployConfig);
     options?.onStart?.();
 

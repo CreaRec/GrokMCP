@@ -48,7 +48,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     runpodApiKey: null,
     runpodPodId: null,
     runpodTemplateId: null,
-    runpodImage: "ollama/ollama",
+    runpodImage: "ollama/ollama:0.34.2",
     runpodCloudType: "SECURE",
     runpodGpuTypeId: "NVIDIA GeForce RTX 4090",
     runpodContainerDiskGb: 80,

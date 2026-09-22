@@ -510,13 +510,21 @@ SYNOLOGY_INDEXER_TRANSFORMERS_CACHE_HOST_PATH=/home/crearec/grok-mcp/cache/synol
 
 Do **not** bake the model into the image — only persist the download cache.
 
-### Synology indexer vision model (`VISION_MODEL`)
+### Synology indexer vision model (`VISION_MODEL` / `RUNPOD_IMAGE`)
 
-Nightly GPU indexing pulls the Ollama vision model onto an ephemeral RunPod pod. The default is the official library tag **`qwen2.5vl:7b`** ([ollama.com/library/qwen2.5vl](https://ollama.com/library/qwen2.5vl)) — note **no hyphen** between `2.5` and `vl`. Hyphenated names like `qwen2.5-vl:7b` are not in the library and fail on pull.
+Nightly GPU indexing pulls the Ollama vision model onto an ephemeral RunPod pod. The default is the official library tag **`qwen2.5vl:7b`** ([ollama.com/library/qwen2.5vl](https://ollama.com/library/qwen2.5vl)) — note **no hyphen** between `2.5` and `vl`. Hyphenated names like `qwen2.5-vl:7b` are not in the library and fail on pull. The library requires **Ollama ≥ 0.7.0**.
 
-**Migration:** If Debian `/home/crearec/grok-mcp/.env` sets `VISION_MODEL` to an old or hyphenated tag, change it to `qwen2.5vl:7b` or delete the line so compose’s default applies. Then `docker compose up -d synology-indexer` (or wait for the next CI deploy).
+**`RUNPOD_IMAGE`:** Compose defaults to a **pinned** tag `ollama/ollama:0.34.2` (not floating `ollama/ollama` / `:latest`). RunPod Secure Cloud hosts often keep a stale cached `latest`; that shows up as an **immediate empty-body HTTP 404** on `POST /api/pull` within ~1s (while `GET /api/tags` still succeeds). That is the proxy/stale-image path — distinct from a registry missing-tag error, which arrives as NDJSON `{"error":"…file does not exist"}` on HTTP 200 after streaming starts. The indexer logs `GET /api/version` before each pull and retries once on transient 404/502/503/504.
+
+**Migration (Debian `/home/crearec/grok-mcp/.env`):**
+
+1. If `VISION_MODEL` is an old/hyphenated tag, set `VISION_MODEL=qwen2.5vl:7b` or delete the line.
+2. If `RUNPOD_IMAGE=ollama/ollama` (unpinned), set `RUNPOD_IMAGE=ollama/ollama:0.34.2` or delete the line so compose’s pin applies. The indexer also rewrites bare `ollama/ollama` / `:latest` to `0.34.2` at runtime, but updating `.env` avoids confusion.
+3. `docker compose up -d synology-indexer` (or wait for the next CI deploy).
 
 Pulls use streaming `/api/pull` so RunPod’s HTTP proxy does not idle-timeout during the multi-GB download.
+
+**Next nightly check:** Loki should show `runpod ollama version` with `ollama_version` ≥ `0.7.0`, then `runpod model pulled` for `qwen2.5vl:7b`. An empty-body 404 should appear at most once (retry), then succeed — or fail with a message that includes `ollama_version=` and the proxy hint.
 
 ### On-demand synology-indexer run
 

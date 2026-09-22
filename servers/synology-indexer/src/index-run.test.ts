@@ -1,6 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { planIndexWork } from "./index-plan.js";
-import { isRunPodGpuConfigured, ollamaUrlOverrideForGpuPod, type Config } from "./config.js";
+import {
+  isRunPodGpuConfigured,
+  ollamaUrlOverrideForGpuPod,
+  resolveRunpodImage,
+  DEFAULT_RUNPOD_IMAGE,
+  type Config,
+} from "./config.js";
 import { classifyFileRoute, routeNeedsQwen } from "./file-route.js";
 
 const withGpuPod = vi.fn();
@@ -25,7 +31,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     runpodApiKey: null,
     runpodPodId: null,
     runpodTemplateId: null,
-    runpodImage: "ollama/ollama",
+    runpodImage: "ollama/ollama:0.34.2",
     runpodCloudType: "SECURE",
     runpodGpuTypeId: "NVIDIA GeForce RTX 4090",
     runpodContainerDiskGb: 80,
@@ -82,7 +88,7 @@ describe("runIndex GPU vs CPU paths", () => {
     const staleProxy = "https://y5m6f3oroycbs1-11434.proxy.runpod.net";
     const config = makeConfig({
       runpodApiKey: "rp_test_key",
-      runpodImage: "ollama/ollama",
+      runpodImage: "ollama/ollama:0.34.2",
       ollamaBaseUrl: staleProxy,
     });
 
@@ -108,5 +114,20 @@ describe("runIndex GPU vs CPU paths", () => {
     expect(qwenCount).toBe(0);
     expect(planIndexWork(qwenCount, 0)).toBe("none");
     expect(withGpuPod).not.toHaveBeenCalled();
+  });
+});
+
+describe("resolveRunpodImage", () => {
+  it("pins bare ollama/ollama and :latest to DEFAULT_RUNPOD_IMAGE", () => {
+    expect(DEFAULT_RUNPOD_IMAGE).toBe("ollama/ollama:0.34.2");
+    expect(resolveRunpodImage(undefined)).toBe(DEFAULT_RUNPOD_IMAGE);
+    expect(resolveRunpodImage("")).toBe(DEFAULT_RUNPOD_IMAGE);
+    expect(resolveRunpodImage("ollama/ollama")).toBe(DEFAULT_RUNPOD_IMAGE);
+    expect(resolveRunpodImage("ollama/ollama:latest")).toBe(DEFAULT_RUNPOD_IMAGE);
+  });
+
+  it("preserves explicit version tags and custom images", () => {
+    expect(resolveRunpodImage("ollama/ollama:0.33.0")).toBe("ollama/ollama:0.33.0");
+    expect(resolveRunpodImage("myregistry/ollama:custom")).toBe("myregistry/ollama:custom");
   });
 });

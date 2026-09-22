@@ -10,15 +10,22 @@ import {
   DEFAULT_START_ATTEMPTS,
   DEFAULT_START_RETRY_MS,
   DEFAULT_OLLAMA_HEALTHY_TIMEOUT_MS,
+  DEFAULT_RUNPOD_IMAGE,
+  MIN_OLLAMA_VERSION_FOR_VISION,
   waitForOllamaHealthy,
   pullModelIfMissing,
   consumeOllamaPullStream,
+  fetchOllamaVersion,
+  formatPullHttpError,
+  isRetryablePullHttpStatus,
+  isOllamaVersionAtLeast,
+  parseSemverTriplet,
   type RunPodDeployConfig,
   type RunPodPodConfig,
 } from "./runpod.js";
 import { DEFAULT_VISION_MODEL } from "./config.js";
 import type { LogAttributes } from "./telemetry.js";
-import { logInfo, logError } from "./telemetry.js";
+import { logInfo, logError, logWarn } from "./telemetry.js";
 
 vi.mock("./telemetry.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./telemetry.js")>();
@@ -46,7 +53,7 @@ function makeDeployConfig(overrides: Partial<RunPodDeployConfig> = {}): RunPodDe
     apiKey: API_KEY,
     ollamaPort: 11434,
     templateId: null,
-    imageName: "ollama/ollama",
+    imageName: DEFAULT_RUNPOD_IMAGE,
     cloudType: "SECURE",
     gpuTypeId: "NVIDIA GeForce RTX 4090",
     containerDiskInGb: 80,
@@ -154,7 +161,8 @@ describe("buildDeployInput", () => {
   it("includes OLLAMA_HOST for image-based deploy", () => {
     const input = buildDeployInput(makeDeployConfig());
     expect(input.env).toEqual([{ key: "OLLAMA_HOST", value: "0.0.0.0:11434" }]);
-    expect(input.imageName).toBe("ollama/ollama");
+    expect(input.imageName).toBe(DEFAULT_RUNPOD_IMAGE);
+    expect(DEFAULT_RUNPOD_IMAGE).toBe("ollama/ollama:0.34.2");
     expect(input.templateId).toBeUndefined();
   });
 
@@ -749,6 +757,54 @@ describe("buildRunPodProxyOllamaUrl", () => {
   });
 });
 
+describe("ollama version helpers", () => {
+  it("parses semver triplets", () => {
+    expect(parseSemverTriplet("0.34.2")).toEqual([0, 34, 2]);
+    expect(parseSemverTriplet("v0.7.0")).toEqual([0, 7, 0]);
+    expect(parseSemverTriplet("bogus")).toBeNull();
+  });
+
+  it("compares against MIN_OLLAMA_VERSION_FOR_VISION", () => {
+    expect(MIN_OLLAMA_VERSION_FOR_VISION).toBe("0.7.0");
+    expect(isOllamaVersionAtLeast("0.7.0", MIN_OLLAMA_VERSION_FOR_VISION)).toBe(true);
+    expect(isOllamaVersionAtLeast("0.34.2", MIN_OLLAMA_VERSION_FOR_VISION)).toBe(true);
+    expect(isOllamaVersionAtLeast("0.6.9", MIN_OLLAMA_VERSION_FOR_VISION)).toBe(false);
+  });
+
+  it("treats empty-body 404 as retryable proxy failure in error text", () => {
+    const msg = formatPullHttpError("qwen2.5vl:7b", 404, "", "0.34.2");
+    expect(msg).toContain("HTTP 404");
+    expect(msg).toContain("empty body");
+    expect(msg).toContain("RunPod proxy");
+    expect(msg).toContain("ollama_version=0.34.2");
+    expect(msg).toContain(DEFAULT_RUNPOD_IMAGE);
+    // Must not look like the old bare ": 404" that confused registry misses.
+    expect(msg).not.toMatch(/qwen2\.5vl:7b: 404$/);
+  });
+
+  it("includes Ollama body text when present", () => {
+    const msg = formatPullHttpError("qwen2.5vl:7b", 500, '{"error":"boom"}', "0.34.2");
+    expect(msg).toContain("body=");
+    expect(msg).toContain("boom");
+  });
+
+  it("flags Ollama below qwen2.5vl minimum", () => {
+    const msg = formatPullHttpError("qwen2.5vl:7b", 404, "", "0.5.0");
+    expect(msg).toContain("Ollama < 0.7.0");
+    expect(msg).toContain(DEFAULT_RUNPOD_IMAGE);
+  });
+
+  it("isRetryablePullHttpStatus covers proxy flaps only", () => {
+    expect(isRetryablePullHttpStatus(404)).toBe(true);
+    expect(isRetryablePullHttpStatus(502)).toBe(true);
+    expect(isRetryablePullHttpStatus(503)).toBe(true);
+    expect(isRetryablePullHttpStatus(504)).toBe(true);
+    expect(isRetryablePullHttpStatus(400)).toBe(false);
+    expect(isRetryablePullHttpStatus(401)).toBe(false);
+    expect(isRetryablePullHttpStatus(500)).toBe(false);
+  });
+});
+
 describe("pullModelIfMissing", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -775,6 +831,9 @@ describe("pullModelIfMissing", () => {
       if (urlStr.includes("/api/tags")) {
         return jsonResponse({ models: [] });
       }
+      if (urlStr.includes("/api/version")) {
+        return jsonResponse({ version: "0.34.2" });
+      }
       if (urlStr.includes("/api/pull")) {
         pullBodies.push(JSON.parse(String(init?.body ?? "{}")));
         return new Response('{"status":"pulling manifest"}\n{"status":"success"}\n', {
@@ -793,6 +852,10 @@ describe("pullModelIfMissing", () => {
       name: visionModel,
       stream: true,
     });
+    expect(vi.mocked(logInfo)).toHaveBeenCalledWith(
+      "runpod ollama version",
+      expect.objectContaining({ ollama_version: "0.34.2", model: visionModel }),
+    );
   });
 
   it("throws when the pull stream reports an error", async () => {
@@ -801,6 +864,9 @@ describe("pullModelIfMissing", () => {
       const urlStr = String(url);
       if (urlStr.includes("/api/tags")) {
         return jsonResponse({ models: [] });
+      }
+      if (urlStr.includes("/api/version")) {
+        return jsonResponse({ version: "0.34.2" });
       }
       if (urlStr.includes("/api/pull")) {
         return new Response(
@@ -814,6 +880,89 @@ describe("pullModelIfMissing", () => {
     await expect(
       pullModelIfMissing("https://example-pod-11434.proxy.runpod.net", "qwen2.5-vl:7b"),
     ).rejects.toThrow(/Failed to pull model qwen2\.5-vl:7b: pull model manifest/);
+  });
+
+  it("retries once on immediate empty-body HTTP 404 then succeeds", async () => {
+    const fetchMock = vi.mocked(fetch);
+    let pullAttempts = 0;
+    const sleep = vi.fn(async () => undefined);
+
+    fetchMock.mockImplementation(async (url) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/api/tags")) {
+        return jsonResponse({ models: [] });
+      }
+      if (urlStr.includes("/api/version")) {
+        return jsonResponse({ version: "0.34.2" });
+      }
+      if (urlStr.includes("/api/pull")) {
+        pullAttempts += 1;
+        if (pullAttempts === 1) {
+          return new Response("", { status: 404, statusText: "Not Found" });
+        }
+        return new Response('{"status":"success"}\n', {
+          status: 200,
+          headers: { "Content-Type": "application/x-ndjson" },
+        });
+      }
+      return jsonResponse({});
+    });
+
+    await pullModelIfMissing("https://example-pod-11434.proxy.runpod.net", DEFAULT_VISION_MODEL, {
+      sleep,
+      retryDelayMs: 5,
+    });
+
+    expect(pullAttempts).toBe(2);
+    expect(sleep).toHaveBeenCalledWith(5);
+    expect(vi.mocked(logWarn)).toHaveBeenCalledWith(
+      "runpod pull HTTP error; retrying",
+      expect.objectContaining({ http_status: 404, attempt: 1 }),
+    );
+  });
+
+  it("surfaces classified empty 404 after retries are exhausted", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async (url) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/api/tags")) {
+        return jsonResponse({ models: [] });
+      }
+      if (urlStr.includes("/api/version")) {
+        return jsonResponse({ version: "0.6.0" });
+      }
+      if (urlStr.includes("/api/pull")) {
+        return new Response("  ", { status: 404, statusText: "Not Found" });
+      }
+      return jsonResponse({});
+    });
+
+    await expect(
+      pullModelIfMissing("https://example-pod-11434.proxy.runpod.net", DEFAULT_VISION_MODEL, {
+        sleep: async () => undefined,
+        retryDelayMs: 1,
+      }),
+    ).rejects.toThrow(/HTTP 404.*empty body.*RunPod proxy.*ollama_version=0\.6\.0.*Ollama < 0\.7\.0/);
+  });
+});
+
+describe("fetchOllamaVersion", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("returns version string from /api/version", async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse({ version: "0.34.2" }));
+    await expect(fetchOllamaVersion("http://ollama:11434")).resolves.toBe("0.34.2");
+  });
+
+  it("returns null when version endpoint is unavailable", async () => {
+    vi.mocked(fetch).mockResolvedValue(new Response("", { status: 404 }));
+    await expect(fetchOllamaVersion("http://ollama:11434")).resolves.toBeNull();
   });
 });
 
