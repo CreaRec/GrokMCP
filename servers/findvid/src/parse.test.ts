@@ -5,6 +5,7 @@ import {
   findSearchResultRecoveryButton,
   findVoiceoverMenuButton,
   formatBytes,
+  formatKeyboardDebug,
   isChoiceButton,
   looksLikeBotHomeKeyboard,
   looksLikeChromeMenu,
@@ -291,6 +292,17 @@ describe("looksLikeGuideMedia", () => {
         durationSeconds: 6372,
       }),
     ).toBe(false);
+  });
+});
+
+describe("formatKeyboardDebug", () => {
+  it("dumps button texts with kind and data flags", () => {
+    expect(
+      formatKeyboardDebug(
+        [{ text: "🎶 Озвучка", kind: "inline", data: "x" }],
+        { messageId: 9 },
+      ),
+    ).toMatch(/msg#9.*Озвучка.*data=yes/);
   });
 });
 

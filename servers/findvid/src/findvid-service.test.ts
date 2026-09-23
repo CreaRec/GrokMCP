@@ -22,14 +22,20 @@ function config(overrides: Partial<FindvidConfig> = {}): FindvidConfig {
 }
 
 function msg(partial: Partial<ChatMessageSnapshot> & { id: number }): ChatMessageSnapshot {
+  const buttons = (partial.buttons ?? []).map((b) => ({
+    ...b,
+    messageId: b.messageId ?? partial.id,
+  }));
+  const { buttons: _ignored, ...rest } = partial;
   return {
     date: 1,
     text: "",
-    buttons: [],
     hasVideo: false,
     hasDocument: false,
     raw: {},
-    ...partial,
+    hasInlineMarkup: buttons.some((b) => b.kind === "inline"),
+    ...rest,
+    buttons,
   };
 }
 
@@ -60,6 +66,8 @@ class FakeTelegram implements TelegramPort {
   connected = false;
   forwarded: Array<{ username: string; messageId: number }> = [];
   clicks: ButtonLike[] = [];
+  /** True when clickButton would have used sendMessage (reply_text path). */
+  textSends: string[] = [];
   history: ChatMessageSnapshot[] = [];
   inline: InlineSearchResponse = { queryId: "qid", results: [] };
   afterSend: ChatMessageSnapshot | null = null;
@@ -88,6 +96,21 @@ class FakeTelegram implements TelegramPort {
     return this.afterSend;
   }
   async clickButton(button: ButtonLike): Promise<void> {
+    // Mirror resolveClickAction: inline without data must not become a text send.
+    if (button.kind === "inline" || button.data !== undefined) {
+      if (!button.data) {
+        throw new Error(
+          `Inline button "${button.text}" has no callback data. Refusing to sendMessage.`,
+        );
+      }
+      if (button.messageId === undefined) {
+        throw new Error(
+          `Inline button "${button.text}" missing messageId for GetBotCallbackAnswer.`,
+        );
+      }
+    } else {
+      this.textSends.push(button.text);
+    }
     this.clicks.push(button);
     this.onClick?.(button);
   }
@@ -254,6 +277,9 @@ describe("FindvidService flow", () => {
     const voiceovers = await service.listVoiceovers();
 
     expect(telegram.clicks.map((c) => c.text)).toEqual(["🎶 Озвучка"]);
+    expect(telegram.clicks[0]?.data).toBe("vo");
+    expect(telegram.clicks[0]?.messageId).toBe(5);
+    expect(telegram.textSends).toEqual([]);
     expect(voiceovers.voiceovers.map((v) => v.text)).toEqual([
       "✔️ Back Board Cinema",
       "✔️ Дублированный",
@@ -396,6 +422,10 @@ describe("FindvidService flow", () => {
     const voiceovers = await service.listVoiceovers({ resultId: "121666" });
     expect(telegram.clicks.some((c) => /Результат поиска/i.test(c.text))).toBe(true);
     expect(telegram.clicks.some((c) => /озвучк/i.test(c.text))).toBe(true);
+    const ozv = telegram.clicks.find((c) => /озвучк/i.test(c.text));
+    expect(ozv?.data).toBeTruthy();
+    expect(ozv?.messageId).toBe(41);
+    expect(telegram.textSends.every((t) => !/озвучк/i.test(t))).toBe(true);
     expect(voiceovers.voiceovers.map((v) => v.text)).toEqual([
       "✔️ Back Board Cinema",
       "✔️ Дублированный",
