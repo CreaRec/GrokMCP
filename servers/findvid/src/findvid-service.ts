@@ -2,11 +2,14 @@ import type { FindvidConfig } from "./config.js";
 import { FindvidError } from "./errors.js";
 import {
   findQualityMenuButton,
+  findSearchResultRecoveryButton,
   findVoiceoverMenuButton,
   formatBytes,
   listChoiceButtons,
+  looksLikeBotHomeKeyboard,
   looksLikeChromeMenu,
   looksLikeGuideMedia,
+  looksLikeMovieCardButtons,
   looksLikeQualityButtons,
   looksLikeVoiceoverButtons,
   pickQualityButton,
@@ -146,18 +149,14 @@ export class FindvidService {
       resultId,
     });
 
-    let reply = sent && this.hasAnyButtons(sent) ? sent : null;
-    if (!reply) {
-      const afterId = sent?.id ?? this.state.lastBotMessageId ?? 0;
-      reply = await this.telegram.waitForMessage(
-        (msg) => this.hasAnyButtons(msg),
-        {
-          timeoutMs: this.config.waitTimeoutMs,
-          pollIntervalMs: this.config.pollIntervalMs,
-          afterMessageId: Math.max(0, afterId - 1),
-        },
-      );
-    }
+    let reply =
+      sent && looksLikeMovieCardButtons(sent.buttons)
+        ? sent
+        : await this.waitForMovieCardMessage({
+            afterMessageId: Math.max(0, (sent?.id ?? this.state.lastBotMessageId ?? 0) - 1),
+            resultId,
+            allowResend: true,
+          });
 
     this.state.lastBotMessageId = reply.id;
     reply = await this.openChromeSubmenuIfNeeded(reply, "voiceover");
@@ -179,10 +178,17 @@ export class FindvidService {
       };
     }
 
-    if (looksLikeChromeMenu(reply.buttons)) {
+    if (looksLikeChromeMenu(reply.buttons) || looksLikeBotHomeKeyboard(reply.buttons)) {
       throw new FindvidError(
-        "Findvid still shows the chrome menu after opening Озвучка. " +
-          "VIP/UI changes may have renamed the voiceover submenu.",
+        "Findvid did not show a voiceover list after selecting the match. " +
+          "Still on chrome/bot-home keyboard — VIP/UI changes may have renamed Озвучка.",
+      );
+    }
+
+    if (!looksLikeVoiceoverButtons(reply.buttons)) {
+      throw new FindvidError(
+        "Findvid buttons after match select are neither voiceovers nor qualities. " +
+          "Got unexpected keyboard (possibly sticky reply keyboard). Retry search or check VIP UI.",
       );
     }
 
@@ -448,8 +454,78 @@ export class FindvidService {
     };
   }
 
-  private hasAnyButtons(msg: ChatMessageSnapshot): boolean {
-    return msg.buttons.length > 0;
+  /**
+   * Wait for movie-card chrome (Озвучка/Качество) or nested voiceover/quality lists.
+   * Ignores the sticky bot-home reply keyboard (Подборки/Фильтр/…).
+   * Recovery: click «Результат поиска», then optionally re-send the inline result once.
+   */
+  private async waitForMovieCardMessage(options: {
+    afterMessageId: number;
+    resultId: string;
+    allowResend: boolean;
+  }): Promise<ChatMessageSnapshot> {
+    const deadline = Date.now() + this.config.waitTimeoutMs;
+    const startedAt = Date.now();
+    let afterId = options.afterMessageId;
+    let triedRecoveryClick = false;
+    let triedResend = false;
+
+    while (Date.now() < deadline) {
+      const recent = await this.telegram.getRecentMessages(15);
+      for (let i = recent.length - 1; i >= 0; i -= 1) {
+        const msg = recent[i];
+        if (msg.id < afterId) continue;
+        if (looksLikeMovieCardButtons(msg.buttons)) {
+          this.state.lastBotMessageId = msg.id;
+          return msg;
+        }
+      }
+
+      const latestWithButtons = [...recent].reverse().find((m) => m.buttons.length > 0);
+      if (
+        latestWithButtons &&
+        looksLikeBotHomeKeyboard(latestWithButtons.buttons) &&
+        !triedRecoveryClick
+      ) {
+        const recovery = findSearchResultRecoveryButton(latestWithButtons.buttons);
+        if (recovery) {
+          triedRecoveryClick = true;
+          this.state.lastBotMessageId = latestWithButtons.id;
+          await this.telegram.clickButton(recovery);
+          afterId = latestWithButtons.id;
+          await sleep(this.config.pollIntervalMs);
+          continue;
+        }
+      }
+
+      const elapsed = Date.now() - startedAt;
+      if (
+        options.allowResend &&
+        !triedResend &&
+        this.state.queryId &&
+        elapsed >= Math.floor(this.config.waitTimeoutMs / 3)
+      ) {
+        triedResend = true;
+        const resent = await this.telegram.sendInlineResult({
+          botUsername: this.config.findvidInlineBotUsername,
+          queryId: this.state.queryId,
+          resultId: options.resultId,
+        });
+        if (resent && looksLikeMovieCardButtons(resent.buttons)) {
+          this.state.lastBotMessageId = resent.id;
+          return resent;
+        }
+        afterId = Math.max(afterId, resent?.id ?? afterId);
+      }
+
+      await sleep(this.config.pollIntervalMs);
+    }
+
+    throw new FindvidError(
+      "Timed out waiting for Findvid movie card (Озвучка/Качество or озвучки list). " +
+        "Saw only the sticky bot-home reply keyboard (Подборки/Фильтр/…) or no buttons. " +
+        "VIP/rate-limits or UI changes may block automation.",
+    );
   }
 
   private async openChromeSubmenuIfNeeded(
@@ -505,6 +581,8 @@ export class FindvidService {
           }
         }
         if (msg.buttons.length === 0) continue;
+        // Ignore sticky bot-home keyboard updates.
+        if (looksLikeBotHomeKeyboard(msg.buttons)) continue;
         if (msg.id > beforeId) {
           this.state.lastBotMessageId = msg.id;
           return msg;
@@ -534,6 +612,14 @@ export class FindvidService {
 
   private async latestButtons(): Promise<ButtonLike[]> {
     const recent = await this.telegram.getRecentMessages(15);
+    for (let i = recent.length - 1; i >= 0; i -= 1) {
+      const msg = recent[i];
+      if (msg.buttons.length === 0) continue;
+      if (looksLikeBotHomeKeyboard(msg.buttons)) continue;
+      this.state.lastBotMessageId = msg.id;
+      return msg.buttons;
+    }
+    // Fall back to any buttons if nothing else is available.
     for (let i = recent.length - 1; i >= 0; i -= 1) {
       const msg = recent[i];
       if (msg.buttons.length > 0) {
