@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import type { FindvidConfig } from "./config.js";
 import { FindvidService } from "./findvid-service.js";
-import type { ButtonLike } from "./parse.js";
+import {
+  looksLikeChromeMenu,
+  looksLikeMovieCardButtons,
+  looksLikeQualityButtons,
+  looksLikeVoiceoverButtons,
+  type ButtonLike,
+} from "./parse.js";
 import type { ChatMessageSnapshot, InlineSearchResponse, TelegramPort } from "./telegram-port.js";
 import { isFinalVideoMessage, resolveClickAction } from "./telegram-port.js";
 
@@ -68,6 +74,8 @@ class FakeTelegram implements TelegramPort {
   clicks: ButtonLike[] = [];
   /** True when clickButton would have used sendMessage (reply_text path). */
   textSends: string[] = [];
+  /** Count of SendInlineBotResult invocations (posts a chat message). */
+  inlineSends = 0;
   history: ChatMessageSnapshot[] = [];
   inline: InlineSearchResponse = { queryId: "qid", results: [] };
   afterSend: ChatMessageSnapshot | null = null;
@@ -84,6 +92,7 @@ class FakeTelegram implements TelegramPort {
     return this.inline;
   }
   async sendInlineResult(): Promise<ChatMessageSnapshot | null> {
+    this.inlineSends += 1;
     if (this.afterSend) {
       const already = this.history.some((m) => m.id === this.afterSend!.id);
       if (!already) this.history.push(this.afterSend);
@@ -102,6 +111,20 @@ class FakeTelegram implements TelegramPort {
       throw new Error(action.reason);
     }
     if (action.type === "reply_text") {
+      // Mirror GramJsTelegramPort: refuse text sends while a movie card is visible.
+      const card = [...this.history].reverse().find(
+        (m) =>
+          looksLikeMovieCardButtons(m.buttons) &&
+          (m.hasInlineMarkup ||
+            looksLikeChromeMenu(m.buttons) ||
+            looksLikeVoiceoverButtons(m.buttons) ||
+            looksLikeQualityButtons(m.buttons)),
+      );
+      if (card) {
+        throw new Error(
+          `Refusing to sendMessage "${action.text}" while movie card msg#${card.id} is on screen.`,
+        );
+      }
       this.textSends.push(action.text);
     }
     this.clicks.push(button);
@@ -203,10 +226,10 @@ describe("FindvidService flow", () => {
       id: 10,
       text: "Выберите озвучку",
       buttons: [
-        { text: "HDrezka", kind: "reply" },
-        { text: "Дублированный", kind: "reply" },
-        { text: "LostFilm", kind: "reply" },
-        { text: "Вернуться", kind: "reply" },
+        { text: "HDrezka", kind: "inline", dataBytes: Buffer.from("hd") },
+        { text: "Дублированный", kind: "inline", dataBytes: Buffer.from("dub") },
+        { text: "LostFilm", kind: "inline", dataBytes: Buffer.from("lf") },
+        { text: "🔙 Назад", kind: "inline", dataBytes: Buffer.from("back") },
       ],
     });
     const qualityMsg = msg({
@@ -265,7 +288,7 @@ describe("FindvidService flow", () => {
       text: "Невидимый гость (Back Board Cinema [1080p])",
       buttons: chromeButtons,
     });
-    telegram.afterSend = chromeMsg;
+    // Card already on screen (e.g. prior select) — must not SendInlineBotResult.
     telegram.history = [chromeMsg];
 
     // In-place keyboard edit (same message id) — matches live VIP behavior.
@@ -284,6 +307,7 @@ describe("FindvidService flow", () => {
     await service.search("Невидимый гость");
     const voiceovers = await service.listVoiceovers();
 
+    expect(telegram.inlineSends).toBe(0);
     expect(telegram.clicks.map((c) => c.text)).toEqual(["🎶 Озвучка"]);
     expect(telegram.clicks[0]?.dataBytes?.equals(Buffer.from("vo"))).toBe(true);
     expect(telegram.clicks[0]?.messageId).toBe(5);
@@ -297,6 +321,123 @@ describe("FindvidService flow", () => {
     expect(voiceovers.voiceovers.some((v) => /озвучк|качеств|уведомл|поиск/i.test(v.text))).toBe(
       false,
     );
+    // Studios + «Назад» stay recognizable; nav-only Back/Hide is not this state.
+    expect(voiceoverButtons.some((b) => /назад/i.test(b.text))).toBe(true);
+  });
+
+  it("list_voiceovers on existing movie card never sendMessage / SendInlineBotResult", async () => {
+    const telegram = new FakeTelegram();
+    telegram.inline = {
+      queryId: "preexisting",
+      results: [{ id: "121666", title: "Достать ножи (Knives Out) (2019)", description: "Смотреть" }],
+    };
+
+    const chromeMsg = msg({
+      id: 961905,
+      text: "Достать ножи (Back Board Cinema [1080p])",
+      buttons: chromeButtons,
+      hasVideo: true,
+    });
+    // Film already shown — sticky bot-home may also sit older in history.
+    telegram.history = [
+      msg({
+        id: 40,
+        text: "home",
+        buttons: [
+          { text: "🗂 Подборки", kind: "reply" },
+          { text: "🔍 Результат поиска", kind: "reply" },
+        ],
+        hasInlineMarkup: false,
+      }),
+      chromeMsg,
+    ];
+    telegram.afterSend = chromeMsg; // must not be used
+
+    telegram.onClick = (button) => {
+      if (/озвучк/i.test(button.text)) {
+        const idx = telegram.history.findIndex((m) => m.id === 961905);
+        telegram.history[idx] = msg({
+          id: 961905,
+          text: chromeMsg.text,
+          hasVideo: true,
+          buttons: voiceoverButtons,
+        });
+      }
+    };
+
+    const service = new FindvidService(config(), telegram);
+    await service.search("Knives Out");
+    const voiceovers = await service.listVoiceovers({ resultId: "121666" });
+
+    expect(telegram.inlineSends).toBe(0);
+    expect(telegram.textSends).toEqual([]);
+    expect(telegram.clicks.map((c) => c.text)).toEqual(["🎶 Озвучка"]);
+    expect(telegram.clicks[0]?.dataBytes?.equals(Buffer.from("vo"))).toBe(true);
+    expect(voiceovers.voiceovers.map((v) => v.text)).toEqual([
+      "✔️ Back Board Cinema",
+      "✔️ Дублированный",
+      "✔️ AlexFilm",
+      "✔️ [EN] Original",
+    ]);
+    expect(voiceovers.voiceovers.every((v) => !/вернуться|скрыть/i.test(v.text))).toBe(true);
+  });
+
+  it("list_voiceovers refuses send when card keyboard already collapsed to Вернуться/Скрыть", async () => {
+    const telegram = new FakeTelegram();
+    telegram.inline = {
+      queryId: "collapsed",
+      results: [{ id: "1", title: "Film (2019)", description: "Смотреть" }],
+    };
+    telegram.history = [
+      msg({
+        id: 77,
+        text: "Film (studio [1080p])",
+        hasVideo: true,
+        buttons: [
+          { text: "⏭ Вернуться", kind: "inline", dataBytes: Buffer.from("back") },
+          { text: "✖️ Скрыть", kind: "inline", dataBytes: Buffer.from("hide") },
+        ],
+      }),
+    ];
+    telegram.afterSend = telegram.history[0];
+
+    const service = new FindvidService(config(), telegram);
+    await service.search("Film");
+    await expect(service.listVoiceovers({ resultId: "1" })).rejects.toThrow(
+      /collapsed|Refusing to sendMessage|Вернуться\/Скрыть/i,
+    );
+    expect(telegram.inlineSends).toBe(0);
+    expect(telegram.textSends).toEqual([]);
+  });
+
+  it("list_voiceovers bootstraps via SendInlineBotResult only when no card exists", async () => {
+    const telegram = new FakeTelegram();
+    telegram.inline = {
+      queryId: "boot",
+      results: [{ id: "r1", title: "Film (2019)", description: "Смотреть" }],
+    };
+    const chromeMsg = msg({ id: 3, text: "Film", buttons: chromeButtons });
+    telegram.afterSend = chromeMsg;
+    telegram.history = []; // no preexisting card
+
+    telegram.onClick = (button) => {
+      if (/озвучк/i.test(button.text)) {
+        telegram.history.push(msg({ id: 3, text: "Film", buttons: voiceoverButtons }));
+        // in-place: replace the sent chrome
+        const idx = telegram.history.findIndex((m) => m.id === 3);
+        telegram.history[idx] = msg({ id: 3, text: "Film", buttons: voiceoverButtons });
+      }
+    };
+
+    const service = new FindvidService(config(), telegram);
+    await service.search("Film");
+    const voiceovers = await service.listVoiceovers({ resultId: "r1" });
+    expect(telegram.inlineSends).toBe(1);
+    expect(telegram.textSends).toEqual([]);
+    expect(voiceovers.voiceovers.some((v) => /Back Board|Дублирован|AlexFilm|Original/i.test(v.text))).toBe(
+      true,
+    );
+    expect(voiceovers.voiceovers.every((v) => !/вернуться|скрыть/i.test(v.text))).toBe(true);
   });
 
   it("list_qualities opens Качество from chrome and ignores guide labels", async () => {
@@ -439,6 +580,7 @@ describe("FindvidService flow", () => {
     expect(searched.best.resultId).toBe("121666");
 
     const voiceovers = await service.listVoiceovers({ resultId: "121666" });
+    expect(telegram.inlineSends).toBeGreaterThanOrEqual(1);
     expect(telegram.textSends.some((t) => /Результат поиска/i.test(t))).toBe(true);
     expect(telegram.clicks.some((c) => /озвучк/i.test(c.text))).toBe(true);
     const ozv = telegram.clicks.find((c) => /озвучк/i.test(c.text));

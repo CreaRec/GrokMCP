@@ -9,7 +9,11 @@ import {
   extractButtonsFromMarkup,
   hasCallbackData,
   isBotHomeButton,
+  looksLikeChromeMenu,
   looksLikeGuideMedia,
+  looksLikeMovieCardButtons,
+  looksLikeQualityButtons,
+  looksLikeVoiceoverButtons,
   type ButtonLike,
   type InlineResultLike,
 } from "./parse.js";
@@ -491,6 +495,23 @@ export class GramJsTelegramPort implements TelegramPort {
     }
 
     if (action.type === "reply_text") {
+      // Nikita: any sendMessage after the movie card is visible collapses chrome
+      // to «Вернуться/Скрыть». Prefer failing loudly over text recovery.
+      const recent = await this.getRecentMessages(15);
+      const card = [...recent].reverse().find(
+        (m) =>
+          looksLikeMovieCardButtons(m.buttons) &&
+          (m.hasInlineMarkup ||
+            looksLikeChromeMenu(m.buttons) ||
+            looksLikeVoiceoverButtons(m.buttons) ||
+            looksLikeQualityButtons(m.buttons)),
+      );
+      if (card) {
+        throw new TelegramError(
+          `Refusing to sendMessage "${action.text}" while movie card msg#${card.id} is on screen. ` +
+            "Post-card text collapses the keyboard to Вернуться/Скрыть — click inline callbacks only.",
+        );
+      }
       await client.sendMessage(peer, { message: action.text });
       return;
     }
