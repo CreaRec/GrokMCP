@@ -147,22 +147,38 @@ export class FindvidService {
       throw new FindvidError("No result selected. Pass resultId or run search again.");
     }
 
-    const sent = await this.telegram.sendInlineResult({
-      botUsername: this.config.findvidInlineBotUsername,
-      queryId: this.state.queryId,
-      resultId,
-    });
-
     this.telegram.resetFloodStats();
 
-    let reply =
-      sent && looksLikeMovieCardButtons(sent.buttons)
-        ? sent
-        : await this.waitForMovieCardMessage({
-            afterMessageId: Math.max(0, (sent?.id ?? this.state.lastBotMessageId ?? 0) - 1),
-            resultId,
-            allowResend: true,
-          });
+    // Nikita: once the movie card is on screen, ANY sendMessage / SendInlineBotResult
+    // collapses the keyboard to «Вернуться/Скрыть». Prefer the existing card and
+    // only click inline callbacks — never send text to "recover".
+    let reply = await this.findExistingMovieCardMessage();
+    if (!reply) {
+      const collapsed = await this.findCollapsedMovieCardMessage();
+      if (collapsed) {
+        throw new FindvidError(
+          "Findvid movie card is on screen but its keyboard collapsed to navigation only " +
+            "(Вернуться/Скрыть). Refusing to sendMessage/SendInlineBotResult — that makes it worse. " +
+            "Click existing inline buttons only, or start a fresh search. " +
+            formatKeyboardDebug(collapsed.buttons, { messageId: collapsed.id }),
+        );
+      }
+
+      const sent = await this.telegram.sendInlineResult({
+        botUsername: this.config.findvidInlineBotUsername,
+        queryId: this.state.queryId,
+        resultId,
+      });
+
+      reply =
+        sent && looksLikeMovieCardButtons(sent.buttons)
+          ? sent
+          : await this.waitForMovieCardMessage({
+              afterMessageId: Math.max(0, (sent?.id ?? this.state.lastBotMessageId ?? 0) - 1),
+              resultId,
+              allowResend: true,
+            });
+    }
 
     this.state.lastBotMessageId = reply.id;
     reply = await this.openChromeSubmenuIfNeeded(reply, "voiceover");
@@ -467,9 +483,47 @@ export class FindvidService {
   }
 
   /**
+   * Prefer an already-visible movie card (chrome / озвучки / qualities).
+   * When present, callers must not sendMessage or SendInlineBotResult.
+   */
+  private async findExistingMovieCardMessage(): Promise<ChatMessageSnapshot | null> {
+    const recent = await this.telegram.getRecentMessages(15);
+    for (let i = recent.length - 1; i >= 0; i -= 1) {
+      const msg = recent[i];
+      if (!looksLikeMovieCardButtons(msg.buttons)) continue;
+      if (
+        msg.hasInlineMarkup ||
+        looksLikeChromeMenu(msg.buttons) ||
+        looksLikeVoiceoverButtons(msg.buttons) ||
+        looksLikeQualityButtons(msg.buttons)
+      ) {
+        return msg;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Film/card media still in chat but keyboard collapsed to Вернуться/Скрыть
+   * (typical after any post-card text send). Do not send to "fix".
+   */
+  private async findCollapsedMovieCardMessage(): Promise<ChatMessageSnapshot | null> {
+    const recent = await this.telegram.getRecentMessages(15);
+    for (let i = recent.length - 1; i >= 0; i -= 1) {
+      const msg = recent[i];
+      if (!looksLikeNavOnlyKeyboard(msg.buttons)) continue;
+      if (msg.hasVideo || msg.hasDocument || Boolean(msg.fileName) || Boolean(msg.text?.trim())) {
+        return msg;
+      }
+    }
+    return null;
+  }
+
+  /**
    * Wait for movie-card chrome (Озвучка/Качество) or nested voiceover/quality lists.
    * Ignores the sticky bot-home reply keyboard (Подборки/Фильтр/…).
-   * Recovery: click «Результат поиска», then optionally re-send the inline result once.
+   * Recovery: click «Результат поиска» only when no movie card exists yet, then
+   * optionally re-send the inline result once. Never send after a card is visible.
    * Flood-aware: does not burn waitTimeout during FLOOD_WAIT backoff on GetHistory.
    */
   private async waitForMovieCardMessage(options: {
@@ -499,6 +553,38 @@ export class FindvidService {
         }
       }
 
+      // Any movie card in recent history (even older than afterId) blocks sends —
+      // post-card sendMessage collapses chrome into Вернуться/Скрыть.
+      const cardAnywhere = recent
+        .slice()
+        .reverse()
+        .find(
+          (m) =>
+            looksLikeMovieCardButtons(m.buttons) &&
+            (m.hasInlineMarkup ||
+              looksLikeChromeMenu(m.buttons) ||
+              looksLikeVoiceoverButtons(m.buttons) ||
+              looksLikeQualityButtons(m.buttons)),
+        );
+      if (cardAnywhere) {
+        this.state.lastBotMessageId = cardAnywhere.id;
+        return cardAnywhere;
+      }
+
+      const collapsedAnywhere = recent
+        .slice()
+        .reverse()
+        .find((m) => looksLikeNavOnlyKeyboard(m.buttons));
+      if (collapsedAnywhere) {
+        throw new FindvidError(
+          "Findvid movie card keyboard collapsed to navigation only (Вернуться/Скрыть) " +
+            "while waiting for chrome. Refusing sendMessage recovery. " +
+            formatKeyboardDebug(collapsedAnywhere.buttons, {
+              messageId: collapsedAnywhere.id,
+            }),
+        );
+      }
+
       const latestWithButtons = [...recent].reverse().find((m) => m.buttons.length > 0);
       if (
         latestWithButtons &&
@@ -523,6 +609,12 @@ export class FindvidService {
         this.state.queryId &&
         elapsed >= Math.floor(this.config.waitTimeoutMs / 3)
       ) {
+        // Re-check: never SendInlineBotResult if a card appeared mid-wait.
+        const cardNow = await this.findExistingMovieCardMessage();
+        if (cardNow) {
+          this.state.lastBotMessageId = cardNow.id;
+          return cardNow;
+        }
         triedResend = true;
         const resent = await this.telegram.sendInlineResult({
           botUsername: this.config.findvidInlineBotUsername,
