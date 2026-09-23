@@ -382,7 +382,76 @@ describe("FindvidService flow", () => {
     expect(voiceovers.voiceovers.every((v) => !/вернуться|скрыть/i.test(v.text))).toBe(true);
   });
 
-  it("list_voiceovers refuses send when card keyboard already collapsed to Вернуться/Скрыть", async () => {
+  it("list_voiceovers does not steal another film’s озвучки from history", async () => {
+    const telegram = new FakeTelegram();
+    telegram.inline = {
+      queryId: "wrong-film",
+      results: [
+        { id: "121666", title: "Достать ножи (Knives Out) (2019)", description: "Смотреть" },
+      ],
+    };
+
+    // Live bug: Knives Out collapsed; Look Both Ways still shows studio buttons.
+    const lookBothWaysStudios: ButtonLike[] = [
+      { text: "✔ OnisFilms", kind: "inline", dataBytes: Buffer.from("onis") },
+      { text: "✔ AlphaProject", kind: "inline", dataBytes: Buffer.from("alpha") },
+      { text: "✔ [EN] Original", kind: "inline", dataBytes: Buffer.from("en") },
+      { text: "✔ [UA] Дублированный", kind: "inline", dataBytes: Buffer.from("ua") },
+      { text: "🔙 Назад", kind: "inline", dataBytes: Buffer.from("back") },
+    ];
+    telegram.history = [
+      msg({
+        id: 100,
+        text: "Достать ножи (Back Board Cinema [1080p])",
+        hasVideo: true,
+        buttons: [
+          { text: "⏮ Вернуться", kind: "inline", dataBytes: Buffer.from("back") },
+          { text: "✖ Скрыть", kind: "inline", dataBytes: Buffer.from("hide") },
+        ],
+      }),
+      msg({
+        id: 200,
+        text: "Посмотри в обе стороны (OnisFilms [1080p])",
+        hasVideo: true,
+        buttons: lookBothWaysStudios,
+      }),
+    ];
+
+    const knivesChrome = msg({
+      id: 300,
+      text: "Достать ножи (Back Board Cinema [1080p])",
+      hasVideo: true,
+      buttons: chromeButtons,
+    });
+    telegram.afterSend = knivesChrome;
+    telegram.onClick = (button) => {
+      if (/озвучк/i.test(button.text)) {
+        const idx = telegram.history.findIndex((m) => m.id === 300);
+        telegram.history[idx] = msg({
+          id: 300,
+          text: knivesChrome.text,
+          hasVideo: true,
+          buttons: voiceoverButtons,
+        });
+      }
+    };
+
+    const service = new FindvidService(config(), telegram);
+    await service.search("Knives Out");
+    const voiceovers = await service.listVoiceovers({ resultId: "121666" });
+
+    expect(telegram.inlineSends).toBe(1);
+    expect(telegram.textSends).toEqual([]);
+    expect(voiceovers.voiceovers.map((v) => v.text)).toEqual([
+      "✔️ Back Board Cinema",
+      "✔️ Дублированный",
+      "✔️ AlexFilm",
+      "✔️ [EN] Original",
+    ]);
+    expect(voiceovers.voiceovers.some((v) => /OnisFilms|AlphaProject/i.test(v.text))).toBe(false);
+  });
+
+  it("list_voiceovers bootstraps when own-film card is only Вернуться/Скрыть", async () => {
     const telegram = new FakeTelegram();
     telegram.inline = {
       queryId: "collapsed",
@@ -399,15 +468,27 @@ describe("FindvidService flow", () => {
         ],
       }),
     ];
-    telegram.afterSend = telegram.history[0];
+    const chromeMsg = msg({ id: 78, text: "Film (studio [1080p])", buttons: chromeButtons });
+    telegram.afterSend = chromeMsg;
+    telegram.onClick = (button) => {
+      if (/озвучк/i.test(button.text)) {
+        const idx = telegram.history.findIndex((m) => m.id === 78);
+        telegram.history[idx] = msg({
+          id: 78,
+          text: "Film (studio [1080p])",
+          buttons: voiceoverButtons,
+        });
+      }
+    };
 
     const service = new FindvidService(config(), telegram);
     await service.search("Film");
-    await expect(service.listVoiceovers({ resultId: "1" })).rejects.toThrow(
-      /collapsed|Refusing to sendMessage|Вернуться\/Скрыть/i,
-    );
-    expect(telegram.inlineSends).toBe(0);
+    const voiceovers = await service.listVoiceovers({ resultId: "1" });
+    expect(telegram.inlineSends).toBe(1);
     expect(telegram.textSends).toEqual([]);
+    expect(voiceovers.voiceovers.some((v) => /Back Board|Дублирован|AlexFilm|Original/i.test(v.text))).toBe(
+      true,
+    );
   });
 
   it("list_voiceovers bootstraps via SendInlineBotResult only when no card exists", async () => {

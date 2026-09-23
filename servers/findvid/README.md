@@ -22,6 +22,8 @@ Do **not** confuse the sticky bot-home **reply keyboard** (`Подборки`, `
 
 **Post-Озвучка:** Real озвучки may arrive on a **new message** (not only an in-place chrome edit). Keyboards that are only `Вернуться` / `Скрыть` are treated as a nav dead-end (fail fast), not waited out for the full timeout.
 
+**Card identity:** When reusing a card already in chat history, the caption must match the selected search result (title / English alias). A neighbor film’s озвучки keyboard is never scraped for a different `resultId`. Collapsed `Вернуться`/`Скрыть` is not a usable card — `SendInlineBotResult` for that result is allowed. Once the *correct* card is on screen, only inline callback clicks (no `sendMessage` / re-send).
+
 Preferred agent flow:
 
 1. `search` `{ query }` — inline search. Returns **best match** + short alternatives. Show this to the user.

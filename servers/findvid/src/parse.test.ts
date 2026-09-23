@@ -15,6 +15,8 @@ import {
   looksLikeNavOnlyKeyboard,
   looksLikeQualityButtons,
   looksLikeVoiceoverButtons,
+  messageMatchesSelectedFilm,
+  filmIdentityNeedles,
   normalizeText,
   parseMovieMeta,
   pickQualityButton,
@@ -307,6 +309,40 @@ describe("looksLikeGuideMedia", () => {
         durationSeconds: 6372,
       }),
     ).toBe(false);
+  });
+});
+
+describe("messageMatchesSelectedFilm", () => {
+  const knives = {
+    title: "Достать ножи (Knives Out)",
+    rawTitle: "Достать ножи (Knives Out) (2019)",
+  };
+
+  it("matches caption with studio suffix to search title", () => {
+    expect(
+      messageMatchesSelectedFilm(
+        { text: "Достать ножи (Back Board Cinema [1080p])" },
+        knives,
+      ),
+    ).toBe(true);
+    expect(filmIdentityNeedles(knives)).toEqual(
+      expect.arrayContaining(["достать ножи", "knives out"]),
+    );
+  });
+
+  it("rejects a different film’s caption", () => {
+    expect(
+      messageMatchesSelectedFilm(
+        { text: "Посмотри в обе стороны (OnisFilms [1080p])" },
+        knives,
+      ),
+    ).toBe(false);
+  });
+
+  it("matches English alias when caption uses Russian primary title", () => {
+    expect(
+      messageMatchesSelectedFilm({ text: "Knives Out (studio [1080p])" }, knives),
+    ).toBe(true);
   });
 });
 
