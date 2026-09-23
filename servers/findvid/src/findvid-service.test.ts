@@ -33,6 +33,29 @@ function msg(partial: Partial<ChatMessageSnapshot> & { id: number }): ChatMessag
   };
 }
 
+const chromeButtons: ButtonLike[] = [
+  { text: "🎶 Озвучка", kind: "inline", data: "vo" },
+  { text: "🔮 Качество", kind: "inline", data: "q" },
+  { text: "🔔 Уведомлять", kind: "inline", data: "n" },
+  { text: "⭐ В избранное", kind: "inline", data: "f" },
+  { text: "🔍 Поиск", kind: "inline", data: "search" },
+  { text: "🔼 Свернуть меню", kind: "inline", data: "collapse" },
+];
+
+const voiceoverButtons: ButtonLike[] = [
+  { text: "✔️ Back Board Cinema", kind: "inline", data: "bbc" },
+  { text: "✔️ Дублированный", kind: "inline", data: "dub" },
+  { text: "✔️ AlexFilm", kind: "inline", data: "af" },
+  { text: "✔️ [EN] Original", kind: "inline", data: "en" },
+  { text: "🔙 Назад", kind: "inline", data: "back" },
+];
+
+const qualityButtons: ButtonLike[] = [
+  { text: "720p", kind: "inline", data: "720" },
+  { text: "1080p", kind: "inline", data: "1080" },
+  { text: "🔙 Назад", kind: "inline", data: "back" },
+];
+
 class FakeTelegram implements TelegramPort {
   connected = false;
   forwarded: Array<{ username: string; messageId: number }> = [];
@@ -40,6 +63,8 @@ class FakeTelegram implements TelegramPort {
   history: ChatMessageSnapshot[] = [];
   inline: InlineSearchResponse = { queryId: "qid", results: [] };
   afterSend: ChatMessageSnapshot | null = null;
+  /** Optional handler to mutate history after a click (in-place edit or new msg). */
+  onClick?: (button: ButtonLike) => void;
 
   async connect(): Promise<void> {
     this.connected = true;
@@ -51,24 +76,38 @@ class FakeTelegram implements TelegramPort {
     return this.inline;
   }
   async sendInlineResult(): Promise<ChatMessageSnapshot | null> {
-    if (this.afterSend) this.history.push(this.afterSend);
+    if (this.afterSend) {
+      const already = this.history.some((m) => m.id === this.afterSend!.id);
+      if (!already) this.history.push(this.afterSend);
+      else {
+        // Refresh buttons on the existing snapshot (simulate send replacing UI).
+        const idx = this.history.findIndex((m) => m.id === this.afterSend!.id);
+        this.history[idx] = this.afterSend;
+      }
+    }
     return this.afterSend;
   }
   async clickButton(button: ButtonLike): Promise<void> {
     this.clicks.push(button);
+    this.onClick?.(button);
   }
   async getRecentMessages(): Promise<ChatMessageSnapshot[]> {
     return [...this.history].sort((a, b) => a.id - b.id);
   }
   async waitForMessage(
     predicate: (m: ChatMessageSnapshot) => boolean,
-    options: { afterMessageId?: number },
+    options: { afterMessageId?: number; timeoutMs?: number; pollIntervalMs?: number },
   ): Promise<ChatMessageSnapshot> {
-    const found = this.history.find(
-      (m) => m.id > (options.afterMessageId ?? 0) && predicate(m),
+    const deadline = Date.now() + (options.timeoutMs ?? 50);
+    const afterId = options.afterMessageId ?? 0;
+    while (Date.now() < deadline) {
+      const found = this.history.find((m) => m.id > afterId && predicate(m));
+      if (found) return found;
+      await new Promise((r) => setTimeout(r, options.pollIntervalMs ?? 1));
+    }
+    throw new Error(
+      `Timed out waiting for Findvid bot reply (afterMessageId=${afterId})`,
     );
-    if (!found) throw new Error("waitForMessage: nothing matched in fake history");
-    return found;
   }
   async forwardMessageTo(username: string, messageId: number) {
     this.forwarded.push({ username, messageId });
@@ -90,6 +129,22 @@ describe("isFinalVideoMessage", () => {
         }),
       ),
     ).toBe(true);
+  });
+
+  it("rejects tiny Видео-гайд clips", () => {
+    expect(
+      isFinalVideoMessage(
+        msg({
+          id: 2,
+          hasDocument: true,
+          hasVideo: true,
+          fileSize: Math.round(8.4 * 1024 * 1024),
+          durationSeconds: 90,
+          fileName: "guide.mp4",
+          text: "Видео-гайд",
+        }),
+      ),
+    ).toBe(false);
   });
 });
 
@@ -144,9 +199,7 @@ describe("FindvidService flow", () => {
     telegram.afterSend = voiceoverMsg;
     telegram.history = [voiceoverMsg];
 
-    const originalClick = telegram.clickButton.bind(telegram);
-    telegram.clickButton = async (button) => {
-      await originalClick(button);
+    telegram.onClick = (button) => {
       if (button.text === "Дублированный") {
         telegram.history.push(qualityMsg);
       }
@@ -169,29 +222,128 @@ describe("FindvidService flow", () => {
     expect(telegram.forwarded).toEqual([{ username: "CreaDownloader", messageId: 12 }]);
   });
 
-  it("list_voiceovers returns озвучки after selecting match", async () => {
+  it("list_voiceovers clicks Озвучка chrome before returning real озвучки", async () => {
     const telegram = new FakeTelegram();
     telegram.inline = {
       queryId: "1",
+      results: [{ id: "r1", title: "Невидимый гость (2016)", description: "Смотреть" }],
+    };
+
+    const chromeMsg = msg({
+      id: 5,
+      text: "Невидимый гость (Back Board Cinema [1080p])",
+      buttons: chromeButtons,
+    });
+    telegram.afterSend = chromeMsg;
+    telegram.history = [chromeMsg];
+
+    // In-place keyboard edit (same message id) — matches live VIP behavior.
+    telegram.onClick = (button) => {
+      if (/озвучк/i.test(button.text)) {
+        const idx = telegram.history.findIndex((m) => m.id === 5);
+        telegram.history[idx] = msg({
+          id: 5,
+          text: chromeMsg.text,
+          buttons: voiceoverButtons,
+        });
+      }
+    };
+
+    const service = new FindvidService(config(), telegram);
+    await service.search("Невидимый гость");
+    const voiceovers = await service.listVoiceovers();
+
+    expect(telegram.clicks.map((c) => c.text)).toEqual(["🎶 Озвучка"]);
+    expect(voiceovers.voiceovers.map((v) => v.text)).toEqual([
+      "✔️ Back Board Cinema",
+      "✔️ Дублированный",
+      "✔️ AlexFilm",
+      "✔️ [EN] Original",
+    ]);
+    expect(voiceovers.voiceovers.some((v) => /озвучк|качеств|уведомл|поиск/i.test(v.text))).toBe(
+      false,
+    );
+  });
+
+  it("list_qualities opens Качество from chrome and ignores guide labels", async () => {
+    const telegram = new FakeTelegram();
+    telegram.inline = {
+      queryId: "2",
       results: [{ id: "r1", title: "Inception (2010)", description: "Смотреть" }],
     };
-    telegram.afterSend = msg({
-      id: 5,
-      buttons: [
-        { text: "Дублированный", kind: "reply" },
-        { text: "HDrezka", kind: "reply" },
-      ],
-    });
-    telegram.history = [telegram.afterSend];
+
+    const chromeMsg = msg({ id: 20, buttons: chromeButtons });
+    telegram.afterSend = chromeMsg;
+    telegram.history = [chromeMsg];
+
+    telegram.onClick = (button) => {
+      if (/озвучк/i.test(button.text)) {
+        const idx = telegram.history.findIndex((m) => m.id === 20);
+        telegram.history[idx] = msg({ id: 20, buttons: voiceoverButtons });
+      }
+      if (/дублирован/i.test(button.text)) {
+        telegram.history.push(msg({ id: 21, buttons: chromeButtons }));
+      }
+      if (/качеств/i.test(button.text)) {
+        const idx = telegram.history.findIndex((m) => m.id === 21);
+        if (idx >= 0) {
+          telegram.history[idx] = msg({ id: 21, buttons: qualityButtons });
+        } else {
+          telegram.history.push(msg({ id: 21, buttons: qualityButtons }));
+        }
+      }
+    };
 
     const service = new FindvidService(config(), telegram);
     await service.search("Inception");
-    const voiceovers = await service.listVoiceovers();
-    expect(voiceovers.voiceovers.map((v) => v.text)).toEqual([
-      "Дублированный",
-      "HDrezka",
-    ]);
+    await service.listVoiceovers();
+    const qualities = await service.listQualities({ voiceover: "Дублированный" });
+
+    expect(qualities.selectedVoiceover).toMatch(/Дублированный/);
+    expect(qualities.qualities.map((q) => q.text)).toEqual(["720p", "1080p"]);
+    expect(telegram.clicks.some((c) => /озвучк/i.test(c.text))).toBe(true);
+    expect(telegram.clicks.some((c) => /качеств/i.test(c.text))).toBe(true);
   });
+
+  it("confirm_and_forward refuses to forward tiny guide videos", async () => {
+    const telegram = new FakeTelegram();
+    telegram.inline = {
+      queryId: "3",
+      results: [{ id: "r1", title: "Inception (2010)", description: "Смотреть" }],
+    };
+
+    const chromeMsg = msg({ id: 30, buttons: chromeButtons });
+    telegram.afterSend = chromeMsg;
+    telegram.history = [chromeMsg];
+
+    const guideMsg = msg({
+      id: 99,
+      text: "Видео-гайд",
+      hasVideo: true,
+      hasDocument: true,
+      fileName: "guide.mp4",
+      fileSize: Math.round(8.4 * 1024 * 1024),
+      durationSeconds: 120,
+    });
+
+    telegram.onClick = (button) => {
+      if (/озвучк/i.test(button.text)) {
+        telegram.history[0] = msg({ id: 30, buttons: voiceoverButtons });
+      }
+      if (/дублирован/i.test(button.text)) {
+        telegram.history.push(msg({ id: 31, buttons: qualityButtons }));
+      }
+      if (button.text === "1080p") {
+        telegram.history.push(guideMsg);
+      }
+    };
+
+    const service = new FindvidService(config({ waitTimeoutMs: 80 }), telegram);
+    await service.search("Inception");
+    await expect(service.confirmAndForward({ voiceover: "Дублированный", quality: "1080p" }))
+      .rejects.toThrow(/guide|гайд|Timed out|multi-GB|quality|video/i);
+    expect(telegram.forwarded).toEqual([]);
+  }, 10_000);
 });
 
 describe("telemetry classify smoke", () => {

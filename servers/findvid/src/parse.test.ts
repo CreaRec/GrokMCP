@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   extractButtonsFromMarkup,
+  findQualityMenuButton,
+  findVoiceoverMenuButton,
   formatBytes,
+  isChoiceButton,
+  looksLikeChromeMenu,
+  looksLikeGuideMedia,
   looksLikeQualityButtons,
   looksLikeVoiceoverButtons,
   normalizeText,
@@ -77,6 +82,41 @@ describe("rankInlineResults", () => {
   });
 });
 
+/** Live Findvid VIP chrome row (screenshot 1). */
+const chromeMenu: ButtonLike[] = [
+  { text: "🎶 Озвучка", kind: "inline", data: "vo" },
+  { text: "🔮 Качество", kind: "inline", data: "q" },
+  { text: "🔔 Уведомлять", kind: "inline", data: "n" },
+  { text: "⭐ В избранное", kind: "inline", data: "f" },
+  { text: "💬 Обсуждения", kind: "inline", data: "d" },
+  { text: "⤴️ Поделиться", kind: "inline", data: "s" },
+  { text: "❤️ Оценить текущую озвучку", kind: "inline", data: "r" },
+  { text: "😭 Ошибка в видео", kind: "inline", data: "e" },
+  { text: "📱 Наши проекты", kind: "inline", data: "p" },
+  { text: "📺 TV Cast", kind: "inline", data: "c" },
+  { text: "ℹ️ Подробнее", kind: "inline", data: "i" },
+  { text: "👌 Рекомендации", kind: "inline", data: "rec" },
+  { text: "🕔 История", kind: "inline", data: "h" },
+  { text: "🔍 Поиск", kind: "inline", data: "search" },
+  { text: "🔼 Свернуть меню", kind: "inline", data: "collapse" },
+];
+
+/** Live Findvid VIP voiceover list after clicking Озвучка (screenshot 2). */
+const voiceoverList: ButtonLike[] = [
+  { text: "✔️ Back Board Cinema", kind: "inline", data: "v1" },
+  { text: "✔️ Back Board Cinema | Студийная Банда", kind: "inline", data: "v2" },
+  { text: "✔️ Дублированный", kind: "inline", data: "v3" },
+  { text: "✔️ AlexFilm", kind: "inline", data: "v4" },
+  { text: "✔️ Перевод", kind: "inline", data: "v5" },
+  { text: "✔️ Синема УС", kind: "inline", data: "v6" },
+  { text: "✔️ Одноголосый", kind: "inline", data: "v7" },
+  { text: "✔️ Малиновский Сергей | Vaxywod", kind: "inline", data: "v8" },
+  { text: "✔️ iTunes", kind: "inline", data: "v9" },
+  { text: "✔️ Хихикающий доктор | Xixidok", kind: "inline", data: "v10" },
+  { text: "✔️ [EN] Original", kind: "inline", data: "v11" },
+  { text: "🔙 Назад", kind: "inline", data: "back" },
+];
+
 describe("button selection", () => {
   const voiceovers: ButtonLike[] = [
     { text: "HDrezka", kind: "reply" },
@@ -126,6 +166,76 @@ describe("button selection", () => {
     });
     expect(buttons.map((b) => b.text)).toEqual(["1080p", "720p", "Вернуться"]);
     expect(buttons[0].kind).toBe("inline");
+  });
+});
+
+describe("chrome menu vs voiceover/quality lists", () => {
+  it("detects live chrome menu and finds Озвучка / Качество openers", () => {
+    expect(looksLikeChromeMenu(chromeMenu)).toBe(true);
+    expect(looksLikeVoiceoverButtons(chromeMenu)).toBe(false);
+    expect(looksLikeQualityButtons(chromeMenu)).toBe(false);
+    expect(findVoiceoverMenuButton(chromeMenu)?.text).toBe("🎶 Озвучка");
+    expect(findQualityMenuButton(chromeMenu)?.text).toBe("🔮 Качество");
+  });
+
+  it("excludes chrome labels from choice buttons and picks", () => {
+    expect(chromeMenu.every((b) => !isChoiceButton(b))).toBe(true);
+    expect(pickVoiceoverButton(chromeMenu, "Дублированный")?.text).toBeUndefined();
+    expect(pickQualityButton(chromeMenu)?.text).toBeUndefined();
+  });
+
+  it("treats post-Озвучка list as real voiceovers, not chrome", () => {
+    expect(looksLikeChromeMenu(voiceoverList)).toBe(false);
+    expect(looksLikeVoiceoverButtons(voiceoverList)).toBe(true);
+    expect(looksLikeQualityButtons(voiceoverList)).toBe(false);
+    expect(pickVoiceoverButton(voiceoverList)?.text).toBe("✔️ Дублированный");
+    expect(pickVoiceoverButton(voiceoverList, "Дублированный", "AlexFilm")?.text).toBe(
+      "✔️ AlexFilm",
+    );
+    // Nav / chrome must not appear in choice list.
+    const choices = voiceoverList.filter(isChoiceButton).map((b) => b.text);
+    expect(choices).not.toContain("🔙 Назад");
+    expect(choices.some((t) => /озвучк/i.test(t))).toBe(false);
+  });
+
+  it("keeps Back Board Cinema as a voiceover (not nav «back»)", () => {
+    expect(isChoiceButton({ text: "✔️ Back Board Cinema", kind: "inline", data: "x" })).toBe(
+      true,
+    );
+    expect(isChoiceButton({ text: "🔙 Назад", kind: "inline", data: "b" })).toBe(false);
+  });
+
+  it("does not treat Инструкция / Видео-гайд as qualities", () => {
+    const junk: ButtonLike[] = [
+      { text: "Инструкция", kind: "inline", data: "i" },
+      { text: "Видео-гайд", kind: "inline", data: "g" },
+      { text: "Поддержка", kind: "inline", data: "s" },
+    ];
+    expect(junk.every((b) => !isChoiceButton(b))).toBe(true);
+    expect(looksLikeQualityButtons(junk)).toBe(false);
+    expect(pickQualityButton(junk)).toBeNull();
+  });
+});
+
+describe("looksLikeGuideMedia", () => {
+  it("flags tiny Видео-гайд clips", () => {
+    expect(
+      looksLikeGuideMedia({
+        fileName: "video-guide.mp4",
+        fileSize: Math.round(8.4 * 1024 * 1024),
+        text: "Видео-гайд по использованию",
+      }),
+    ).toBe(true);
+  });
+
+  it("accepts multi-GB film sizes", () => {
+    expect(
+      looksLikeGuideMedia({
+        fileName: "movie.mkv",
+        fileSize: Math.round(2.4 * 1024 ** 3),
+        durationSeconds: 6372,
+      }),
+    ).toBe(false);
   });
 });
 
