@@ -20,6 +20,8 @@ Do **not** confuse the sticky bot-home **reply keyboard** (`Подборки`, `
 
 **Flood waits:** GetHistory polling backs off on `FLOOD_WAIT` (serves a short cache, extends the wait budget by flood-sleep time) instead of hammering every ~1.5s.
 
+**Post-Озвучка:** Real озвучки may arrive on a **new message** (not only an in-place chrome edit). Keyboards that are only `Вернуться` / `Скрыть` are treated as a nav dead-end (fail fast), not waited out for the full timeout.
+
 Preferred agent flow:
 
 1. `search` `{ query }` — inline search. Returns **best match** + short alternatives. Show this to the user.
