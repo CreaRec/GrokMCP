@@ -251,7 +251,7 @@ describe("FindvidService flow", () => {
     });
 
     telegram.afterSend = voiceoverMsg;
-    telegram.history = [voiceoverMsg];
+    telegram.history = [];
 
     telegram.onClick = (button) => {
       if (button.text === "Дублированный") {
@@ -276,28 +276,35 @@ describe("FindvidService flow", () => {
     expect(telegram.forwarded).toEqual([{ username: "CreaDownloader", messageId: 12 }]);
   });
 
-  it("list_voiceovers clicks Озвучка chrome before returning real озвучки", async () => {
+  it("list_voiceovers always SendInlineBotResult then clicks Озвучка (even if old card in history)", async () => {
     const telegram = new FakeTelegram();
     telegram.inline = {
       queryId: "1",
       results: [{ id: "r1", title: "Невидимый гость (2016)", description: "Смотреть" }],
     };
 
-    const chromeMsg = msg({
+    // Stale card in history must NOT be reused — fresh send required.
+    telegram.history = [
+      msg({
+        id: 4,
+        text: "Невидимый гость (Back Board Cinema [1080p])",
+        buttons: chromeButtons,
+      }),
+    ];
+    const freshChrome = msg({
       id: 5,
       text: "Невидимый гость (Back Board Cinema [1080p])",
       buttons: chromeButtons,
     });
-    // Card already on screen (e.g. prior select) — must not SendInlineBotResult.
-    telegram.history = [chromeMsg];
+    telegram.afterSend = freshChrome;
 
-    // In-place keyboard edit (same message id) — matches live VIP behavior.
+    // In-place keyboard edit on the *fresh* message id.
     telegram.onClick = (button) => {
       if (/озвучк/i.test(button.text)) {
         const idx = telegram.history.findIndex((m) => m.id === 5);
         telegram.history[idx] = msg({
           id: 5,
-          text: chromeMsg.text,
+          text: freshChrome.text,
           buttons: voiceoverButtons,
         });
       }
@@ -307,7 +314,7 @@ describe("FindvidService flow", () => {
     await service.search("Невидимый гость");
     const voiceovers = await service.listVoiceovers();
 
-    expect(telegram.inlineSends).toBe(0);
+    expect(telegram.inlineSends).toBe(1);
     expect(telegram.clicks.map((c) => c.text)).toEqual(["🎶 Озвучка"]);
     expect(telegram.clicks[0]?.dataBytes?.equals(Buffer.from("vo"))).toBe(true);
     expect(telegram.clicks[0]?.messageId).toBe(5);
@@ -325,20 +332,20 @@ describe("FindvidService flow", () => {
     expect(voiceoverButtons.some((b) => /назад/i.test(b.text))).toBe(true);
   });
 
-  it("list_voiceovers on existing movie card never sendMessage / SendInlineBotResult", async () => {
+  it("list_voiceovers always one SendInlineBotResult then clicks only (no sendMessage)", async () => {
     const telegram = new FakeTelegram();
     telegram.inline = {
       queryId: "preexisting",
       results: [{ id: "121666", title: "Достать ножи (Knives Out) (2019)", description: "Смотреть" }],
     };
 
-    const chromeMsg = msg({
+    const oldChrome = msg({
       id: 961905,
       text: "Достать ножи (Back Board Cinema [1080p])",
       buttons: chromeButtons,
       hasVideo: true,
     });
-    // Film already shown — sticky bot-home may also sit older in history.
+    // Old matching card + bot-home in history — still must SendInlineBotResult once.
     telegram.history = [
       msg({
         id: 40,
@@ -349,16 +356,22 @@ describe("FindvidService flow", () => {
         ],
         hasInlineMarkup: false,
       }),
-      chromeMsg,
+      oldChrome,
     ];
-    telegram.afterSend = chromeMsg; // must not be used
+    const freshChrome = msg({
+      id: 961920,
+      text: "Достать ножи (Back Board Cinema [1080p])",
+      buttons: chromeButtons,
+      hasVideo: true,
+    });
+    telegram.afterSend = freshChrome;
 
     telegram.onClick = (button) => {
       if (/озвучк/i.test(button.text)) {
-        const idx = telegram.history.findIndex((m) => m.id === 961905);
+        const idx = telegram.history.findIndex((m) => m.id === 961920);
         telegram.history[idx] = msg({
-          id: 961905,
-          text: chromeMsg.text,
+          id: 961920,
+          text: freshChrome.text,
           hasVideo: true,
           buttons: voiceoverButtons,
         });
@@ -369,10 +382,11 @@ describe("FindvidService flow", () => {
     await service.search("Knives Out");
     const voiceovers = await service.listVoiceovers({ resultId: "121666" });
 
-    expect(telegram.inlineSends).toBe(0);
+    expect(telegram.inlineSends).toBe(1);
     expect(telegram.textSends).toEqual([]);
     expect(telegram.clicks.map((c) => c.text)).toEqual(["🎶 Озвучка"]);
     expect(telegram.clicks[0]?.dataBytes?.equals(Buffer.from("vo"))).toBe(true);
+    expect(telegram.clicks[0]?.messageId).toBe(961920);
     expect(voiceovers.voiceovers.map((v) => v.text)).toEqual([
       "✔️ Back Board Cinema",
       "✔️ Дублированный",
@@ -451,7 +465,7 @@ describe("FindvidService flow", () => {
     expect(voiceovers.voiceovers.some((v) => /OnisFilms|AlphaProject/i.test(v.text))).toBe(false);
   });
 
-  it("list_voiceovers bootstraps when own-film card is only Вернуться/Скрыть", async () => {
+  it("list_voiceovers SendInlineBotResult when own-film card is only Вернуться/Скрыть", async () => {
     const telegram = new FakeTelegram();
     telegram.inline = {
       queryId: "collapsed",
@@ -491,7 +505,7 @@ describe("FindvidService flow", () => {
     );
   });
 
-  it("list_voiceovers bootstraps via SendInlineBotResult only when no card exists", async () => {
+  it("list_voiceovers always SendInlineBotResult for a fresh card", async () => {
     const telegram = new FakeTelegram();
     telegram.inline = {
       queryId: "boot",
@@ -499,12 +513,10 @@ describe("FindvidService flow", () => {
     };
     const chromeMsg = msg({ id: 3, text: "Film", buttons: chromeButtons });
     telegram.afterSend = chromeMsg;
-    telegram.history = []; // no preexisting card
+    telegram.history = [];
 
     telegram.onClick = (button) => {
       if (/озвучк/i.test(button.text)) {
-        telegram.history.push(msg({ id: 3, text: "Film", buttons: voiceoverButtons }));
-        // in-place: replace the sent chrome
         const idx = telegram.history.findIndex((m) => m.id === 3);
         telegram.history[idx] = msg({ id: 3, text: "Film", buttons: voiceoverButtons });
       }
@@ -544,6 +556,12 @@ describe("FindvidService flow", () => {
       { text: "🔙 Назад", kind: "inline", dataBytes: Buffer.from("back") },
     ];
 
+    const oldCard = msg({
+      id: 961900,
+      text: "Достать ножи (Кубик в Кубе [1080p])",
+      hasVideo: true,
+      buttons: chromeButtons,
+    });
     const cardMsg = msg({
       id: 961905,
       text: "Достать ножи (Кубик в Кубе [1080p])",
@@ -554,7 +572,8 @@ describe("FindvidService flow", () => {
       durationSeconds: 45,
       buttons: kubikButtons,
     });
-    telegram.history = [cardMsg];
+    // Old matching card in history — list_voiceovers must still send a fresh one.
+    telegram.history = [oldCard];
     telegram.afterSend = cardMsg;
 
     const qualityMsg = msg({
@@ -577,6 +596,7 @@ describe("FindvidService flow", () => {
     const service = new FindvidService(config({ waitTimeoutMs: 2_000, pollIntervalMs: 10 }), telegram);
     await service.search("Knives Out");
     await service.listVoiceovers({ resultId: "121666" });
+    expect(telegram.inlineSends).toBe(1);
 
     const qualities = await service.listQualities({ voiceover: "Кубик" });
 
@@ -642,7 +662,7 @@ describe("FindvidService flow", () => {
     });
 
     telegram.afterSend = voiceoverMsg;
-    telegram.history = [voiceoverMsg];
+    telegram.history = [];
 
     telegram.onClick = (button) => {
       if (/кубик/i.test(button.text)) {
@@ -657,6 +677,7 @@ describe("FindvidService flow", () => {
     const service = new FindvidService(config({ waitTimeoutMs: 2_000, pollIntervalMs: 10 }), telegram);
     await service.search("Knives Out");
     await service.listVoiceovers({ resultId: "121666" });
+    expect(telegram.inlineSends).toBe(1);
     const qualities = await service.listQualities({ voiceover: "Кубик" });
     expect(qualities.qualities.map((q) => q.text)).toEqual(["720p", "1080p"]);
 
@@ -689,7 +710,7 @@ describe("FindvidService flow", () => {
       buttons: voiceoverButtons,
     });
     telegram.afterSend = voiceoverMsg;
-    telegram.history = [voiceoverMsg];
+    telegram.history = [];
 
     telegram.onClick = (button) => {
       if (/дублирован/i.test(button.text)) {
@@ -711,6 +732,7 @@ describe("FindvidService flow", () => {
     const service = new FindvidService(config({ waitTimeoutMs: 120, pollIntervalMs: 20 }), telegram);
     await service.search("Film");
     await service.listVoiceovers({ resultId: "1" });
+    expect(telegram.inlineSends).toBe(1);
     await expect(service.listQualities({ voiceover: "Дублированный" })).rejects.toThrow(
       /quality|NEW message|preview|Timed out/i,
     );
@@ -725,24 +747,24 @@ describe("FindvidService flow", () => {
       results: [{ id: "r1", title: "Inception (2010)", description: "Смотреть" }],
     };
 
-    const chromeMsg = msg({ id: 20, buttons: chromeButtons });
+    const chromeMsg = msg({ id: 20, text: "Inception", buttons: chromeButtons });
     telegram.afterSend = chromeMsg;
-    telegram.history = [chromeMsg];
+    telegram.history = [];
 
     telegram.onClick = (button) => {
       if (/озвучк/i.test(button.text)) {
         const idx = telegram.history.findIndex((m) => m.id === 20);
-        telegram.history[idx] = msg({ id: 20, buttons: voiceoverButtons });
+        telegram.history[idx] = msg({ id: 20, text: "Inception", buttons: voiceoverButtons });
       }
       if (/дублирован/i.test(button.text)) {
-        telegram.history.push(msg({ id: 21, buttons: chromeButtons }));
+        telegram.history.push(msg({ id: 21, text: "Inception", buttons: chromeButtons }));
       }
       if (/качеств/i.test(button.text)) {
         const idx = telegram.history.findIndex((m) => m.id === 21);
         if (idx >= 0) {
-          telegram.history[idx] = msg({ id: 21, buttons: qualityButtons });
+          telegram.history[idx] = msg({ id: 21, text: "Inception", buttons: qualityButtons });
         } else {
-          telegram.history.push(msg({ id: 21, buttons: qualityButtons }));
+          telegram.history.push(msg({ id: 21, text: "Inception", buttons: qualityButtons }));
         }
       }
     };
@@ -750,6 +772,7 @@ describe("FindvidService flow", () => {
     const service = new FindvidService(config(), telegram);
     await service.search("Inception");
     await service.listVoiceovers();
+    expect(telegram.inlineSends).toBe(1);
     const qualities = await service.listQualities({ voiceover: "Дублированный" });
 
     expect(qualities.selectedVoiceover).toMatch(/Дублированный/);
@@ -765,9 +788,9 @@ describe("FindvidService flow", () => {
       results: [{ id: "r1", title: "Inception (2010)", description: "Смотреть" }],
     };
 
-    const chromeMsg = msg({ id: 30, buttons: chromeButtons });
+    const chromeMsg = msg({ id: 30, text: "Inception", buttons: chromeButtons });
     telegram.afterSend = chromeMsg;
-    telegram.history = [chromeMsg];
+    telegram.history = [];
 
     const guideMsg = msg({
       id: 99,
@@ -781,10 +804,11 @@ describe("FindvidService flow", () => {
 
     telegram.onClick = (button) => {
       if (/озвучк/i.test(button.text)) {
-        telegram.history[0] = msg({ id: 30, buttons: voiceoverButtons });
+        const idx = telegram.history.findIndex((m) => m.id === 30);
+        telegram.history[idx] = msg({ id: 30, text: "Inception", buttons: voiceoverButtons });
       }
       if (/дублирован/i.test(button.text)) {
-        telegram.history.push(msg({ id: 31, buttons: qualityButtons }));
+        telegram.history.push(msg({ id: 31, text: "Inception", buttons: qualityButtons }));
       }
       if (button.text === "1080p") {
         telegram.history.push(guideMsg);
@@ -889,7 +913,7 @@ describe("FindvidService flow", () => {
       buttons: chromeButtons,
     });
     telegram.afterSend = chromeMsg;
-    telegram.history = [chromeMsg];
+    telegram.history = [];
 
     // Live hypothesis: chrome collapses to Back/Hide while studios arrive on a new message.
     const navOnly: ButtonLike[] = [
@@ -934,11 +958,12 @@ describe("FindvidService flow", () => {
 
     const chromeMsg = msg({ id: 50, text: "Film", buttons: chromeButtons });
     telegram.afterSend = chromeMsg;
-    telegram.history = [chromeMsg];
+    telegram.history = [];
 
     telegram.onClick = (button) => {
       if (/озвучк/i.test(button.text)) {
-        telegram.history[0] = msg({
+        const idx = telegram.history.findIndex((m) => m.id === 50);
+        telegram.history[idx] = msg({
           id: 50,
           text: "Film",
           buttons: [

@@ -34,7 +34,8 @@ const toolDefinitions = [
   {
     name: "list_voiceovers",
     description:
-      "Select the search match in Findvid chat, open the Озвучка chrome submenu if needed, " +
+      "Select the search match by always sending a fresh Findvid inline result (never reuse " +
+      "old history cards), open the Озвучка chrome submenu if needed, " +
       "and return real voiceover (озвучки) labels. Does not return chrome items like Озвучка/Качество/Поиск.",
     inputSchema: {
       type: "object" as const,

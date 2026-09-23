@@ -154,28 +154,36 @@ export class FindvidService {
     const selectedMatch = this.resolveSelectedMatch(resultId);
     this.state.selectedResultId = resultId;
 
-    // Nikita: once the *correct* movie card is on screen, never sendMessage /
-    // SendInlineBotResult — only click inline callbacks. Wrong-film cards and
-    // collapsed Вернуться/Скрыть keyboards must not be reused; bootstrap this resultId.
-    let reply = await this.findExistingMovieCardMessage(selectedMatch);
-    if (!reply) {
-      const sent = await this.telegram.sendInlineResult({
-        botUsername: this.config.findvidInlineBotUsername,
-        queryId: this.state.queryId,
-        resultId,
-      });
+    // Nikita: every new film request starts with a FRESH chat message —
+    // always SendInlineBotResult. Do not reuse preexisting history cards
+    // (wrong-film steal / collapsed-card confusion). After this card exists,
+    // only inline callback clicks (no sendMessage).
+    const recentBefore = await this.telegram.getRecentMessages(15);
+    const maxBeforeId = recentBefore.reduce(
+      (max, m) => Math.max(max, m.id),
+      this.state.lastBotMessageId ?? 0,
+    );
 
-      // Trust the message returned for this resultId; title-match only gates
-      // *reuse* of preexisting history cards (wrong-film steal).
-      reply =
-        sent && this.hasMovieCardChrome(sent)
-          ? sent
-          : await this.waitForMovieCardMessage({
-              afterMessageId: Math.max(0, (sent?.id ?? this.state.lastBotMessageId ?? 0) - 1),
-              resultId,
-              match: selectedMatch,
-              allowResend: true,
-            });
+    const sent = await this.telegram.sendInlineResult({
+      botUsername: this.config.findvidInlineBotUsername,
+      queryId: this.state.queryId,
+      resultId,
+    });
+
+    let reply: ChatMessageSnapshot;
+    // Trust the message returned for *this* SendInlineBotResult (same resultId).
+    // Title-match only filters *other* history messages while waiting — not our send.
+    if (sent && this.hasMovieCardChrome(sent) && sent.id > maxBeforeId) {
+      reply = sent;
+    } else {
+      // Wait only for messages newer than pre-send history (never old cards).
+      // afterId = maxBeforeId so an in-place chrome edit of the fresh send is accepted.
+      reply = await this.waitForMovieCardMessage({
+        afterMessageId: maxBeforeId,
+        resultId,
+        match: selectedMatch,
+        allowResend: true,
+      });
     }
 
     this.state.lastBotMessageId = reply.id;
@@ -493,34 +501,18 @@ export class FindvidService {
     match?: RankedMatch,
   ): boolean {
     if (!this.hasMovieCardChrome(msg)) return false;
-    // Without title metadata we cannot safely reuse a preexisting card.
-    if (!match) return false;
+    // Without title metadata, only accept cards that arrived after our send
+    // (caller enforces afterMessageId). With metadata, require film identity.
+    if (!match) return true;
     return messageMatchesSelectedFilm(msg, match);
   }
 
   /**
-   * Prefer an already-visible movie card for the *selected* film
-   * (chrome / озвучки / qualities). Wrong-film cards and nav-only collapsed
-   * keyboards are ignored so callers may SendInlineBotResult for this resultId.
-   * When a matching card is present, callers must not sendMessage / SendInlineBotResult.
-   */
-  private async findExistingMovieCardMessage(
-    match?: RankedMatch,
-  ): Promise<ChatMessageSnapshot | null> {
-    const recent = await this.telegram.getRecentMessages(15);
-    for (let i = recent.length - 1; i >= 0; i -= 1) {
-      const msg = recent[i];
-      if (this.isUsableMovieCardMessage(msg, match)) return msg;
-    }
-    return null;
-  }
-
-  /**
-   * Wait for movie-card chrome (Озвучка/Качество) or nested voiceover/quality lists
-   * that belong to the selected film. Ignores sticky bot-home and other films’ cards.
-   * Recovery: click «Результат поиска» only when no matching card exists yet, then
-   * optionally re-send the inline result once. Never send after a matching card is visible.
-   * Flood-aware: does not burn waitTimeout during FLOOD_WAIT backoff on GetHistory.
+   * Wait for a *new* movie-card message (id > afterMessageId) with chrome /
+   * озвучки / qualities for the selected film. Never returns preexisting
+   * history cards from before this request’s SendInlineBotResult.
+   * Recovery: click «Результат поиска» if sticky bot-home appears; optionally
+   * re-send the inline result once. Flood-aware wait budget.
    */
   private async waitForMovieCardMessage(options: {
     afterMessageId: number;
@@ -535,11 +527,11 @@ export class FindvidService {
     let triedResend = false;
     const match = options.match ?? this.resolveSelectedMatch(options.resultId);
 
-    const acceptsCard = (msg: ChatMessageSnapshot, requireAfterId: boolean): boolean => {
-      if (requireAfterId && msg.id < afterId) return false;
+    const acceptsFreshCard = (msg: ChatMessageSnapshot): boolean => {
+      // Strictly newer than the pre-send watermark / last recovery point.
+      if (msg.id <= afterId) return false;
       if (match) return this.isUsableMovieCardMessage(msg, match);
-      // No title metadata for this resultId: only accept chrome that arrived after our send.
-      return msg.id >= afterId && this.hasMovieCardChrome(msg);
+      return this.hasMovieCardChrome(msg);
     };
 
     while (Date.now() < deadline) {
@@ -548,27 +540,14 @@ export class FindvidService {
 
       for (let i = recent.length - 1; i >= 0; i -= 1) {
         const msg = recent[i];
-        if (acceptsCard(msg, true)) {
+        if (acceptsFreshCard(msg)) {
           this.state.lastBotMessageId = msg.id;
           return msg;
         }
       }
 
-      // Matching card anywhere in recent history (even older than afterId) is enough —
-      // do not SendInlineBotResult again for that film. Without match metadata, skip
-      // this path so we do not steal a neighbor card that predates the send.
-      if (match) {
-        const cardAnywhere = [...recent]
-          .reverse()
-          .find((m) => this.isUsableMovieCardMessage(m, match));
-        if (cardAnywhere) {
-          this.state.lastBotMessageId = cardAnywhere.id;
-          return cardAnywhere;
-        }
-      }
-
-      // Collapsed Вернуться/Скрыть (own film or neighbor) is not usable and must not
-      // block waiting / resend for this resultId.
+      // Collapsed Вернуться/Скрыть and older history cards are ignored —
+      // we only accept messages newer than afterId.
 
       const latestWithButtons = [...recent].reverse().find((m) => m.buttons.length > 0);
       if (
@@ -581,7 +560,7 @@ export class FindvidService {
           triedRecoveryClick = true;
           this.state.lastBotMessageId = latestWithButtons.id;
           await this.telegram.clickButton(recovery);
-          afterId = latestWithButtons.id;
+          afterId = Math.max(afterId, latestWithButtons.id);
           await sleep(this.telegram.nextHistoryPollDelayMs(this.config.pollIntervalMs));
           continue;
         }
@@ -594,12 +573,6 @@ export class FindvidService {
         this.state.queryId &&
         elapsed >= Math.floor(this.config.waitTimeoutMs / 3)
       ) {
-        // Re-check: never SendInlineBotResult if a *matching* card appeared mid-wait.
-        const cardNow = await this.findExistingMovieCardMessage(match);
-        if (cardNow) {
-          this.state.lastBotMessageId = cardNow.id;
-          return cardNow;
-        }
         triedResend = true;
         const resent = await this.telegram.sendInlineResult({
           botUsername: this.config.findvidInlineBotUsername,
@@ -608,8 +581,8 @@ export class FindvidService {
         });
         if (
           resent &&
-          this.hasMovieCardChrome(resent) &&
-          (!match || messageMatchesSelectedFilm(resent, match))
+          resent.id > afterId &&
+          this.hasMovieCardChrome(resent)
         ) {
           this.state.lastBotMessageId = resent.id;
           return resent;
@@ -623,9 +596,9 @@ export class FindvidService {
     const flood = formatFloodStats(this.telegram.getFloodStats());
     const titleHint = match?.rawTitle || match?.title || options.resultId;
     throw new FindvidError(
-      `Timed out waiting for Findvid movie card for "${titleHint}" ` +
-        "(Озвучка/Качество or озвучки list). Other films’ cards and collapsed " +
-        "Вернуться/Скрыть keyboards are ignored — re-select the match or search again. " +
+      `Timed out waiting for a fresh Findvid movie card for "${titleHint}" ` +
+        "(Озвучка/Качество or озвучки list) after SendInlineBotResult. " +
+        "Preexisting history cards are not reused. " +
         `${flood}. VIP/rate-limits or UI changes may block automation.`,
     );
   }

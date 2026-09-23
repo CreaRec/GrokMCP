@@ -79,8 +79,8 @@ function createServer() {
     "list_voiceovers",
     {
       description:
-        "After search: send/select the best (or given) inline result, open the Озвучка chrome " +
-        "submenu when the movie card still shows the top-level menu, and return real озвучки " +
+        "After search: always SendInlineBotResult for a fresh movie card (never reuse history), " +
+        "open the Озвучка chrome submenu when needed, and return real озвучки " +
         "labels (Back Board Cinema, Дублированный, …). Chrome/nav buttons are excluded.",
       inputSchema: {
         resultId: z

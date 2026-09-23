@@ -22,12 +22,12 @@ Do **not** confuse the sticky bot-home **reply keyboard** (`Подборки`, `
 
 **Post-Озвучка:** Real озвучки may arrive on a **new message** (not only an in-place chrome edit). Keyboards that are only `Вернуться` / `Скрыть` are treated as a nav dead-end (fail fast), not waited out for the full timeout.
 
-**Card identity:** When reusing a card already in chat history, the caption must match the selected search result (title / English alias). A neighbor film’s озвучки keyboard is never scraped for a different `resultId`. Collapsed `Вернуться`/`Скрыть` is not a usable card — `SendInlineBotResult` for that result is allowed. Once the *correct* card is on screen, only inline callback clicks (no `sendMessage` / re-send).
+**Fresh card every request:** `list_voiceovers` always `SendInlineBotResult` for the selected `resultId` — it does **not** reuse preexisting movie cards from chat history (avoids wrong-film steal and collapsed-card confusion). After that fresh card is on screen for *this* request, only inline callback clicks (no `sendMessage` / re-send of labels).
 
 Preferred agent flow:
 
 1. `search` `{ query }` — inline search. Returns **best match** + short alternatives. Show this to the user.
-2. `list_voiceovers` — selects the match, opens `Озвучка` if still on chrome, returns **real** озвучки labels (chrome/nav excluded).
+2. `list_voiceovers` — **always** sends a fresh inline result for the match (ignores old history cards), opens `Озвучка` if still on chrome, returns **real** озвучки labels.
 3. Show озвучки to the user → on pick, `list_qualities` `{ voiceover }` — clicks that озвучка and waits for a **new message** with 1080p/720p/… (post-voiceover preview media is **not** the film).
 4. Agent auto-picks the **maximum** quality (no second user confirm) → `confirm_and_forward` `{ voiceover, quality }` immediately — quality click yields the real film message, which is forwarded to the downloader bot.
 
@@ -42,7 +42,7 @@ Do **not** treat `Озвучка` / `Качество` / `Уведомлять` 
 | Tool | Purpose |
 |------|---------|
 | `search` | `messages.getInlineBotResults` against Findvid; persist query/result ids |
-| `list_voiceovers` | Send/select match; open `Озвучка` chrome if needed; return real озвучки |
+| `list_voiceovers` | Always `SendInlineBotResult` (fresh card); open `Озвучка`; return озвучки |
 | `list_qualities` | Select voiceover; wait for **new** quality message (not film preview); return Nx p |
 | `confirm_and_forward` | Quality click → wait for film (not post-voiceover preview) → **forward** |
 
