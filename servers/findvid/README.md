@@ -14,6 +14,8 @@ Findvid’s movie card uses a **two-level menu**:
 1. **Chrome** — top-level actions including `🎶 Озвучка` and `🔮 Качество` (menu openers, **not** voiceover/quality names).
 2. **Nested lists** — only after clicking those openers do real озвучки (Back Board Cinema, Дублированный, …) or qualities (1080p/720p/…) appear.
 
+Do **not** confuse the sticky bot-home **reply keyboard** (`Подборки`, `Фильтр`, `Настройки`, `VIP`, `Результат поиска`) with озвучки — those are ignored and recovered from when selecting a match.
+
 Preferred agent flow:
 
 1. `search` `{ query }` — inline search. Returns **best match** + short alternatives. Show this to the user.

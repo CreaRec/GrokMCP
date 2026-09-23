@@ -344,6 +344,68 @@ describe("FindvidService flow", () => {
       .rejects.toThrow(/guide|гайд|Timed out|multi-GB|quality|video/i);
     expect(telegram.forwarded).toEqual([]);
   }, 10_000);
+
+  it("list_voiceovers skips sticky bot-home keyboard and recovers to movie card", async () => {
+    const telegram = new FakeTelegram();
+    telegram.inline = {
+      queryId: "knives",
+      results: [
+        { id: "radiohead", title: "Radiohead: Knives Out", description: "Клип" },
+        {
+          id: "121666",
+          title: "Достать ножи (Knives Out) (2019)",
+          description: "Смотреть · КП: 8.197",
+        },
+      ],
+    };
+
+    const botHome: ButtonLike[] = [
+      { text: "🗂 Подборки", kind: "reply" },
+      { text: "🌪️ Фильтр", kind: "reply" },
+      { text: "⚙️ Настройки", kind: "reply" },
+      { text: "💝 VIP", kind: "reply" },
+      { text: "🔍 Результат поиска", kind: "reply" },
+    ];
+    const homeMsg = msg({ id: 40, text: "Findvid home", buttons: botHome });
+    const chromeMsg = msg({
+      id: 41,
+      text: "Достать ножи (Back Board Cinema [1080p])",
+      buttons: chromeButtons,
+    });
+
+    // First send returns sticky reply keyboard only (live failure mode).
+    telegram.afterSend = homeMsg;
+    telegram.history = [homeMsg];
+
+    telegram.onClick = (button) => {
+      if (/результат\s*поиска/i.test(button.text)) {
+        telegram.history.push(chromeMsg);
+      }
+      if (/озвучк/i.test(button.text)) {
+        const idx = telegram.history.findIndex((m) => m.id === 41);
+        if (idx >= 0) {
+          telegram.history[idx] = msg({ id: 41, text: chromeMsg.text, buttons: voiceoverButtons });
+        }
+      }
+    };
+
+    const service = new FindvidService(config({ waitTimeoutMs: 500 }), telegram);
+    const searched = await service.search("Knives Out");
+    expect(searched.best.resultId).toBe("121666");
+
+    const voiceovers = await service.listVoiceovers({ resultId: "121666" });
+    expect(telegram.clicks.some((c) => /Результат поиска/i.test(c.text))).toBe(true);
+    expect(telegram.clicks.some((c) => /озвучк/i.test(c.text))).toBe(true);
+    expect(voiceovers.voiceovers.map((v) => v.text)).toEqual([
+      "✔️ Back Board Cinema",
+      "✔️ Дублированный",
+      "✔️ AlexFilm",
+      "✔️ [EN] Original",
+    ]);
+    expect(
+      voiceovers.voiceovers.some((v) => /подборк|фильтр|настройк|vip|результат/i.test(v.text)),
+    ).toBe(false);
+  });
 });
 
 describe("telemetry classify smoke", () => {

@@ -2,11 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   extractButtonsFromMarkup,
   findQualityMenuButton,
+  findSearchResultRecoveryButton,
   findVoiceoverMenuButton,
   formatBytes,
   isChoiceButton,
+  looksLikeBotHomeKeyboard,
   looksLikeChromeMenu,
   looksLikeGuideMedia,
+  looksLikeMovieCardButtons,
   looksLikeQualityButtons,
   looksLikeVoiceoverButtons,
   normalizeText,
@@ -214,6 +217,58 @@ describe("chrome menu vs voiceover/quality lists", () => {
     expect(junk.every((b) => !isChoiceButton(b))).toBe(true);
     expect(looksLikeQualityButtons(junk)).toBe(false);
     expect(pickQualityButton(junk)).toBeNull();
+  });
+});
+
+/** Live Findvid VIP sticky reply keyboard (not movie card). */
+const botHomeKeyboard: ButtonLike[] = [
+  { text: "🗂 Подборки", kind: "reply" },
+  { text: "🌪️ Фильтр", kind: "reply" },
+  { text: "⚙️ Настройки", kind: "reply" },
+  { text: "💝 VIP", kind: "reply" },
+  { text: "🔍 Результат поиска", kind: "reply" },
+];
+
+describe("bot-home reply keyboard", () => {
+  it("excludes Подборки/Фильтр/… from voiceover choices", () => {
+    expect(looksLikeBotHomeKeyboard(botHomeKeyboard)).toBe(true);
+    expect(looksLikeVoiceoverButtons(botHomeKeyboard)).toBe(false);
+    expect(looksLikeChromeMenu(botHomeKeyboard)).toBe(false);
+    expect(looksLikeMovieCardButtons(botHomeKeyboard)).toBe(false);
+    expect(botHomeKeyboard.every((b) => !isChoiceButton(b))).toBe(true);
+    expect(pickVoiceoverButton(botHomeKeyboard)).toBeNull();
+    expect(findSearchResultRecoveryButton(botHomeKeyboard)?.text).toBe("🔍 Результат поиска");
+  });
+});
+
+describe("Knives Out ranking", () => {
+  it("prefers Достать ножи (Knives Out) film over Radiohead: Knives Out", () => {
+    const { best, alternatives } = rankInlineResults("Knives Out", [
+      {
+        id: "radiohead",
+        title: "Radiohead: Knives Out",
+        description: "Клип",
+      },
+      {
+        id: "121666",
+        title: "Достать ножи (Knives Out) (2019)",
+        description: "Смотреть · КП: 8.197",
+      },
+    ]);
+    expect(best?.resultId).toBe("121666");
+    expect(best?.year).toBe(2019);
+    expect(alternatives.some((a) => a.resultId === "radiohead")).toBe(true);
+    expect(scoreMatch("Knives Out", {
+      id: "121666",
+      title: "Достать ножи (Knives Out) (2019)",
+      description: "Смотреть · КП: 8.197",
+    })).toBeGreaterThan(
+      scoreMatch("Knives Out", {
+        id: "radiohead",
+        title: "Radiohead: Knives Out",
+        description: "Клип",
+      }),
+    );
   });
 });
 

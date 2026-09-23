@@ -44,6 +44,9 @@ const IMDB_RE = /(?:IMDb?|IMDB)\s*[:\s]*([0-9]+(?:[.,][0-9]+)?)/i;
 const QUALITY_RE = /^(\d{3,4})\s*p$/i;
 const TRAILER_RE = /трейлер|trailer/i;
 const WATCH_RE = /смотреть|watch/i;
+/** Artist: Track / music-video style titles (e.g. Radiohead: Knives Out). */
+const MUSIC_TITLE_RE = /^[^:]{1,40}:\s+.+/;
+const MUSIC_META_RE = /клип|official\s*video|music\s*video|песня|lyric|audio\s*track|radiohead/i;
 
 /**
  * Top-level Findvid movie-card chrome (not voiceover/quality picks).
@@ -53,6 +56,13 @@ const WATCH_RE = /смотреть|watch/i;
 const CHROME_LABEL_RE =
   /^(?:в\s+)?(озвучк|качеств|уведомл|избранн|обсужден|поделит|оценить|ошибк|наши проект|tv\s*cast|подробнее|рекомендац|истори|поиск|свернуть|развернуть|инструкц|видео.?гайд|гайд|поддержк|помощь|help|projects?|share|notify|favorite|discuss|rate|cast|history|search|collapse|expand|menu)/i;
 
+/**
+ * Persistent bot-home / search reply keyboard (not movie-card chrome).
+ * Live VIP: Подборки, Фильтр, Настройки, VIP, Результат поиска, …
+ */
+const BOT_HOME_LABEL_RE =
+  /^(подборк|фильтр|настройк|vip|результат\s*поиск|поиск\s*фильм|каталог|жанр|коллекц|главн\w*\s*меню|home|settings|filter|collections?|favorites?|профиль|profile)/i;
+
 const NAV_LABEL_RE =
   /^(вернуться|назад|скрыть?|отмена|cancel|back|hide|menu|меню|главн\w*)(\s+меню)?$/i;
 
@@ -60,6 +70,8 @@ const NAV_LABEL_RE =
 const VOICEOVER_MENU_RE = /озвучк/i;
 /** Opens the nested quality list from the chrome menu. */
 const QUALITY_MENU_RE = /качеств/i;
+/** Reply-keyboard recovery: re-open last search / result card. */
+const SEARCH_RESULT_RECOVERY_RE = /результат\s*поиск/i;
 
 /** Tiny howto / support videos must never be treated as the film file. */
 const GUIDE_TEXT_RE = /видео.?гайд|инструкц|howto|how.?to|гайд|туториал|tutorial|поддержк/i;
@@ -116,7 +128,8 @@ export function parseMovieMeta(
 
 export function scoreMatch(query: string, result: InlineResultLike): number {
   const q = normalizeText(query);
-  const title = normalizeText(result.title ?? "");
+  const rawTitle = result.title ?? "";
+  const title = normalizeText(rawTitle);
   const description = normalizeText(result.description ?? "");
   const haystack = `${title} ${description}`;
 
@@ -134,11 +147,34 @@ export function scoreMatch(query: string, result: InlineResultLike): number {
     score += Math.round((hits / qTokens.length) * 35);
   }
 
-  const meta = parseMovieMeta(result.title ?? "", result.description ?? "");
+  // Prefer bilingual film titles where the query is the parenthetical English alias
+  // (e.g. «Достать ножи (Knives Out)» for query "Knives Out").
+  const parenMatches = [...rawTitle.matchAll(/\(([^)]+)\)/g)];
+  for (const m of parenMatches) {
+    const alias = normalizeText(m[1] ?? "");
+    if (!alias || /^\d{4}$/.test(alias)) continue;
+    if (alias === q) {
+      score += 35;
+      break;
+    }
+    if (alias.includes(q) || q.includes(alias)) {
+      score += 20;
+      break;
+    }
+  }
+
+  const meta = parseMovieMeta(rawTitle, result.description ?? "");
   if (meta.kind === "watch") score += 15;
   if (meta.kind === "trailer") score -= 25;
   if (meta.year) score += 2;
   if (meta.kp || meta.imdb) score += 2;
+  // Feature-film signal: year + ratings together beats a bare title match.
+  if (meta.year && (meta.kp || meta.imdb)) score += 12;
+
+  // Demote Artist: Track / music-video style hits that share a song title with a film.
+  if (MUSIC_TITLE_RE.test(rawTitle.trim()) || MUSIC_META_RE.test(haystack)) {
+    score -= 35;
+  }
 
   return score;
 }
@@ -233,6 +269,13 @@ export function isChromeButton(button: ButtonLike): boolean {
   return CHROME_LABEL_RE.test(t);
 }
 
+/** True for persistent bot-home / search reply-keyboard labels. */
+export function isBotHomeButton(button: ButtonLike): boolean {
+  const t = labelCore(button.text);
+  if (!t) return false;
+  return BOT_HOME_LABEL_RE.test(t);
+}
+
 /** True for back / hide / cancel style navigation. */
 export function isNavButton(button: ButtonLike): boolean {
   const t = labelCore(button.text);
@@ -243,7 +286,7 @@ export function isNavButton(button: ButtonLike): boolean {
 }
 
 /**
- * Filter out navigation and chrome buttons that are not content choices.
+ * Filter out navigation, chrome, and bot-home buttons that are not content choices.
  * Voiceover studio names and Nx p quality labels remain.
  */
 export function isChoiceButton(button: ButtonLike): boolean {
@@ -251,6 +294,7 @@ export function isChoiceButton(button: ButtonLike): boolean {
   if (!t) return false;
   if (isNavButton(button)) return false;
   if (isChromeButton(button)) return false;
+  if (isBotHomeButton(button)) return false;
   if (GUIDE_TEXT_RE.test(t)) return false;
   return true;
 }
@@ -259,15 +303,45 @@ export function listChoiceButtons(buttons: ButtonLike[]): ButtonLike[] {
   return buttons.filter(isChoiceButton);
 }
 
+/**
+ * Sticky Findvid reply keyboard (Подборки / Фильтр / Настройки / VIP / …).
+ * Must never be treated as озвучки or movie-card chrome.
+ */
+export function looksLikeBotHomeKeyboard(buttons: ButtonLike[]): boolean {
+  if (buttons.length === 0) return false;
+  // Movie chrome wins if Озвучка/Качество are present.
+  const hasVoiceoverMenu = buttons.some((b) => VOICEOVER_MENU_RE.test(labelCore(b.text)));
+  const hasQualityMenu = buttons.some((b) => QUALITY_MENU_RE.test(labelCore(b.text)));
+  if (hasVoiceoverMenu || hasQualityMenu) return false;
+  const homeHits = buttons.filter(isBotHomeButton).length;
+  if (homeHits === 0) return false;
+  // Majority home labels, or any home labels with zero real content choices.
+  return homeHits >= Math.ceil(buttons.length / 2) || listChoiceButtons(buttons).length === 0;
+}
+
 /** Movie-card chrome menu: contains Озвучка and/or Качество openers. */
 export function looksLikeChromeMenu(buttons: ButtonLike[]): boolean {
   if (buttons.length === 0) return false;
+  if (looksLikeBotHomeKeyboard(buttons)) return false;
   const hasVoiceoverMenu = buttons.some((b) => VOICEOVER_MENU_RE.test(labelCore(b.text)));
   const hasQualityMenu = buttons.some((b) => QUALITY_MENU_RE.test(labelCore(b.text)));
   if (!hasVoiceoverMenu && !hasQualityMenu) return false;
   // Real voiceover lists never include the Озвучка/Качество openers themselves.
   const chromeHits = buttons.filter(isChromeButton).length;
   return chromeHits >= 2 || (chromeHits >= 1 && listChoiceButtons(buttons).length === 0);
+}
+
+/**
+ * Message is usable for voiceover/quality automation (movie chrome or nested lists),
+ * not the sticky bot-home reply keyboard.
+ */
+export function looksLikeMovieCardButtons(buttons: ButtonLike[]): boolean {
+  if (looksLikeBotHomeKeyboard(buttons)) return false;
+  return (
+    looksLikeChromeMenu(buttons) ||
+    looksLikeVoiceoverButtons(buttons) ||
+    looksLikeQualityButtons(buttons)
+  );
 }
 
 export function findVoiceoverMenuButton(buttons: ButtonLike[]): ButtonLike | null {
@@ -284,6 +358,11 @@ export function findQualityMenuButton(buttons: ButtonLike[]): ButtonLike | null 
     buttons.find((b) => QUALITY_MENU_RE.test(labelCore(b.text))) ??
     null
   );
+}
+
+/** Recovery control on the sticky reply keyboard. */
+export function findSearchResultRecoveryButton(buttons: ButtonLike[]): ButtonLike | null {
+  return buttons.find((b) => SEARCH_RESULT_RECOVERY_RE.test(labelCore(b.text))) ?? null;
 }
 
 export function pickPreferredButton(
@@ -309,8 +388,8 @@ export function pickVoiceoverButton(
   preferred = "Дублированный",
   override?: string,
 ): ButtonLike | null {
-  // Never fall back to chrome menu labels as "voiceovers".
-  if (looksLikeChromeMenu(buttons)) return null;
+  // Never fall back to chrome / bot-home labels as "voiceovers".
+  if (looksLikeChromeMenu(buttons) || looksLikeBotHomeKeyboard(buttons)) return null;
   const prefs = override
     ? [override, preferred]
     : [preferred, "дубляж", "дублирован", "official", "hdrezka"];
@@ -322,7 +401,7 @@ export function pickQualityButton(
   preferredQualities: string[] = ["1080p", "720p", "480p"],
   override?: string,
 ): ButtonLike | null {
-  if (looksLikeChromeMenu(buttons)) return null;
+  if (looksLikeChromeMenu(buttons) || looksLikeBotHomeKeyboard(buttons)) return null;
   const choices = listChoiceButtons(buttons);
   if (choices.length === 0) return null;
 
@@ -352,7 +431,7 @@ export function pickQualityButton(
 }
 
 export function looksLikeVoiceoverButtons(buttons: ButtonLike[]): boolean {
-  if (looksLikeChromeMenu(buttons)) return false;
+  if (looksLikeChromeMenu(buttons) || looksLikeBotHomeKeyboard(buttons)) return false;
   const choices = listChoiceButtons(buttons);
   if (choices.length === 0) return false;
   if (looksLikeQualityButtons(buttons)) return false;
@@ -360,7 +439,7 @@ export function looksLikeVoiceoverButtons(buttons: ButtonLike[]): boolean {
 }
 
 export function looksLikeQualityButtons(buttons: ButtonLike[]): boolean {
-  if (looksLikeChromeMenu(buttons)) return false;
+  if (looksLikeChromeMenu(buttons) || looksLikeBotHomeKeyboard(buttons)) return false;
   const choices = listChoiceButtons(buttons);
   if (choices.length === 0) return false;
   const qualityHits = choices.filter((b) =>
