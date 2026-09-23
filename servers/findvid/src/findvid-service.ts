@@ -126,9 +126,10 @@ export class FindvidService {
       queryId,
       note:
         "Show best match to the user. Preferred agent flow: list_voiceovers (real озвучки) → " +
-        "user picks → list_qualities → user picks → confirm_and_forward. " +
+        "user picks voiceover only → list_qualities → agent auto-picks max quality " +
+        "(1080p/…) → confirm_and_forward immediately (no second user OK). " +
+        "After voiceover, qualities arrive on a NEW message — not the film file yet. " +
         "Озвучка/Качество are chrome menu buttons, not voiceover/quality names. " +
-        "Or call confirm_and_forward with optional overrides. " +
         "Findvid VIP / rate-limits / UI changes can break button automation.",
     };
   }
@@ -153,28 +154,36 @@ export class FindvidService {
     const selectedMatch = this.resolveSelectedMatch(resultId);
     this.state.selectedResultId = resultId;
 
-    // Nikita: once the *correct* movie card is on screen, never sendMessage /
-    // SendInlineBotResult — only click inline callbacks. Wrong-film cards and
-    // collapsed Вернуться/Скрыть keyboards must not be reused; bootstrap this resultId.
-    let reply = await this.findExistingMovieCardMessage(selectedMatch);
-    if (!reply) {
-      const sent = await this.telegram.sendInlineResult({
-        botUsername: this.config.findvidInlineBotUsername,
-        queryId: this.state.queryId,
-        resultId,
-      });
+    // Nikita: every new film request starts with a FRESH chat message —
+    // always SendInlineBotResult. Do not reuse preexisting history cards
+    // (wrong-film steal / collapsed-card confusion). After this card exists,
+    // only inline callback clicks (no sendMessage).
+    const recentBefore = await this.telegram.getRecentMessages(15);
+    const maxBeforeId = recentBefore.reduce(
+      (max, m) => Math.max(max, m.id),
+      this.state.lastBotMessageId ?? 0,
+    );
 
-      // Trust the message returned for this resultId; title-match only gates
-      // *reuse* of preexisting history cards (wrong-film steal).
-      reply =
-        sent && this.hasMovieCardChrome(sent)
-          ? sent
-          : await this.waitForMovieCardMessage({
-              afterMessageId: Math.max(0, (sent?.id ?? this.state.lastBotMessageId ?? 0) - 1),
-              resultId,
-              match: selectedMatch,
-              allowResend: true,
-            });
+    const sent = await this.telegram.sendInlineResult({
+      botUsername: this.config.findvidInlineBotUsername,
+      queryId: this.state.queryId,
+      resultId,
+    });
+
+    let reply: ChatMessageSnapshot;
+    // Trust the message returned for *this* SendInlineBotResult (same resultId).
+    // Title-match only filters *other* history messages while waiting — not our send.
+    if (sent && this.hasMovieCardChrome(sent) && sent.id > maxBeforeId) {
+      reply = sent;
+    } else {
+      // Wait only for messages newer than pre-send history (never old cards).
+      // afterId = maxBeforeId so an in-place chrome edit of the fresh send is accepted.
+      reply = await this.waitForMovieCardMessage({
+        afterMessageId: maxBeforeId,
+        resultId,
+        match: selectedMatch,
+        allowResend: true,
+      });
     }
 
     this.state.lastBotMessageId = reply.id;
@@ -268,14 +277,12 @@ export class FindvidService {
       if (!button) {
         throw new FindvidError("No voiceover buttons available to select");
       }
-      const reply = await this.clickAndWaitForButtonsOrVideo(button);
+      // Nikita: clicking an озвучка yields a NEW message with quality buttons.
+      // Intermediate/preview media on the movie card is NOT the downloadable film —
+      // never treat isFinalVideoMessage here as done (that returned empty qualities).
+      const reply = await this.clickVoiceoverAndWaitForQualityStep(button);
       this.state.selectedVoiceover = button.text;
       buttons = reply.buttons;
-
-      if (isFinalVideoMessage(reply) && !looksLikeGuideMedia(reply)) {
-        this.rememberVideo(reply);
-        return { qualities: [], selectedVoiceover: button.text };
-      }
     }
 
     if (looksLikeChromeMenu(buttons)) {
@@ -289,8 +296,10 @@ export class FindvidService {
 
     if (!looksLikeQualityButtons(buttons)) {
       throw new FindvidError(
-        "Expected quality buttons (1080p/720p/…) after voiceover selection. " +
-          "Got chrome/support labels instead — Findvid UI may have changed.",
+        "Expected quality buttons (1080p/720p/…) on a new message after voiceover selection. " +
+          "Post-voiceover preview media is not the film — refusing empty qualities. " +
+          "Findvid UI may have changed, or the quality step did not arrive in time. " +
+          formatKeyboardDebug(buttons, { messageId: this.state.lastBotMessageId }),
       );
     }
 
@@ -362,24 +371,17 @@ export class FindvidService {
         if (!button) {
           throw new FindvidError("Could not pick a voiceover button");
         }
-        const reply = await this.clickAndWaitForButtonsOrVideo(button);
+        // Film arrives only AFTER quality click. Post-voiceover media is preview.
+        const reply = await this.clickVoiceoverAndWaitForQualityStep(button);
         this.state.selectedVoiceover = button.text;
-        if (isFinalVideoMessage(reply) && !looksLikeGuideMedia(reply)) {
-          this.rememberVideo(reply);
-        } else if (looksLikeChromeMenu(reply.buttons)) {
-          this.state.stage = "qualities";
-          // Stay on chrome; quality step opens Качество.
-        } else if (looksLikeQualityButtons(reply.buttons)) {
-          this.state.stage = "qualities";
-          this.state.qualities = summarizeButtons(reply.buttons);
-        } else {
-          this.state.stage = "qualities";
+        this.state.stage = "qualities";
+        if (looksLikeQualityButtons(reply.buttons)) {
           this.state.qualities = summarizeButtons(reply.buttons);
         }
       }
     }
 
-    // Quality step.
+    // Quality step — final film is the message after quality click only.
     if (this.state.stage !== "video_ready" && this.state.stage !== "forwarded") {
       let buttons = await this.latestButtons();
 
@@ -414,15 +416,11 @@ export class FindvidService {
         this.state.selectedQuality = button.text;
         this.rememberVideo(reply);
       } else if (!this.state.videoMessageId) {
-        const reply = await this.telegram.waitForMessage(
-          (msg) => isFinalVideoMessage(msg) && !looksLikeGuideMedia(msg),
-          {
-            timeoutMs: this.config.waitTimeoutMs,
-            pollIntervalMs: this.config.pollIntervalMs,
-            afterMessageId: this.state.lastBotMessageId ?? 0,
-          },
+        throw new FindvidError(
+          "Expected quality buttons (1080p/720p/…) after voiceover before the film file. " +
+            "Refusing to forward a post-voiceover preview. " +
+            formatKeyboardDebug(buttons, { messageId: this.state.lastBotMessageId }),
         );
-        this.rememberVideo(reply);
       }
     }
 
@@ -503,34 +501,18 @@ export class FindvidService {
     match?: RankedMatch,
   ): boolean {
     if (!this.hasMovieCardChrome(msg)) return false;
-    // Without title metadata we cannot safely reuse a preexisting card.
-    if (!match) return false;
+    // Without title metadata, only accept cards that arrived after our send
+    // (caller enforces afterMessageId). With metadata, require film identity.
+    if (!match) return true;
     return messageMatchesSelectedFilm(msg, match);
   }
 
   /**
-   * Prefer an already-visible movie card for the *selected* film
-   * (chrome / озвучки / qualities). Wrong-film cards and nav-only collapsed
-   * keyboards are ignored so callers may SendInlineBotResult for this resultId.
-   * When a matching card is present, callers must not sendMessage / SendInlineBotResult.
-   */
-  private async findExistingMovieCardMessage(
-    match?: RankedMatch,
-  ): Promise<ChatMessageSnapshot | null> {
-    const recent = await this.telegram.getRecentMessages(15);
-    for (let i = recent.length - 1; i >= 0; i -= 1) {
-      const msg = recent[i];
-      if (this.isUsableMovieCardMessage(msg, match)) return msg;
-    }
-    return null;
-  }
-
-  /**
-   * Wait for movie-card chrome (Озвучка/Качество) or nested voiceover/quality lists
-   * that belong to the selected film. Ignores sticky bot-home and other films’ cards.
-   * Recovery: click «Результат поиска» only when no matching card exists yet, then
-   * optionally re-send the inline result once. Never send after a matching card is visible.
-   * Flood-aware: does not burn waitTimeout during FLOOD_WAIT backoff on GetHistory.
+   * Wait for a *new* movie-card message (id > afterMessageId) with chrome /
+   * озвучки / qualities for the selected film. Never returns preexisting
+   * history cards from before this request’s SendInlineBotResult.
+   * Recovery: click «Результат поиска» if sticky bot-home appears; optionally
+   * re-send the inline result once. Flood-aware wait budget.
    */
   private async waitForMovieCardMessage(options: {
     afterMessageId: number;
@@ -545,11 +527,11 @@ export class FindvidService {
     let triedResend = false;
     const match = options.match ?? this.resolveSelectedMatch(options.resultId);
 
-    const acceptsCard = (msg: ChatMessageSnapshot, requireAfterId: boolean): boolean => {
-      if (requireAfterId && msg.id < afterId) return false;
+    const acceptsFreshCard = (msg: ChatMessageSnapshot): boolean => {
+      // Strictly newer than the pre-send watermark / last recovery point.
+      if (msg.id <= afterId) return false;
       if (match) return this.isUsableMovieCardMessage(msg, match);
-      // No title metadata for this resultId: only accept chrome that arrived after our send.
-      return msg.id >= afterId && this.hasMovieCardChrome(msg);
+      return this.hasMovieCardChrome(msg);
     };
 
     while (Date.now() < deadline) {
@@ -558,27 +540,14 @@ export class FindvidService {
 
       for (let i = recent.length - 1; i >= 0; i -= 1) {
         const msg = recent[i];
-        if (acceptsCard(msg, true)) {
+        if (acceptsFreshCard(msg)) {
           this.state.lastBotMessageId = msg.id;
           return msg;
         }
       }
 
-      // Matching card anywhere in recent history (even older than afterId) is enough —
-      // do not SendInlineBotResult again for that film. Without match metadata, skip
-      // this path so we do not steal a neighbor card that predates the send.
-      if (match) {
-        const cardAnywhere = [...recent]
-          .reverse()
-          .find((m) => this.isUsableMovieCardMessage(m, match));
-        if (cardAnywhere) {
-          this.state.lastBotMessageId = cardAnywhere.id;
-          return cardAnywhere;
-        }
-      }
-
-      // Collapsed Вернуться/Скрыть (own film or neighbor) is not usable and must not
-      // block waiting / resend for this resultId.
+      // Collapsed Вернуться/Скрыть and older history cards are ignored —
+      // we only accept messages newer than afterId.
 
       const latestWithButtons = [...recent].reverse().find((m) => m.buttons.length > 0);
       if (
@@ -591,7 +560,7 @@ export class FindvidService {
           triedRecoveryClick = true;
           this.state.lastBotMessageId = latestWithButtons.id;
           await this.telegram.clickButton(recovery);
-          afterId = latestWithButtons.id;
+          afterId = Math.max(afterId, latestWithButtons.id);
           await sleep(this.telegram.nextHistoryPollDelayMs(this.config.pollIntervalMs));
           continue;
         }
@@ -604,12 +573,6 @@ export class FindvidService {
         this.state.queryId &&
         elapsed >= Math.floor(this.config.waitTimeoutMs / 3)
       ) {
-        // Re-check: never SendInlineBotResult if a *matching* card appeared mid-wait.
-        const cardNow = await this.findExistingMovieCardMessage(match);
-        if (cardNow) {
-          this.state.lastBotMessageId = cardNow.id;
-          return cardNow;
-        }
         triedResend = true;
         const resent = await this.telegram.sendInlineResult({
           botUsername: this.config.findvidInlineBotUsername,
@@ -618,8 +581,8 @@ export class FindvidService {
         });
         if (
           resent &&
-          this.hasMovieCardChrome(resent) &&
-          (!match || messageMatchesSelectedFilm(resent, match))
+          resent.id > afterId &&
+          this.hasMovieCardChrome(resent)
         ) {
           this.state.lastBotMessageId = resent.id;
           return resent;
@@ -633,9 +596,9 @@ export class FindvidService {
     const flood = formatFloodStats(this.telegram.getFloodStats());
     const titleHint = match?.rawTitle || match?.title || options.resultId;
     throw new FindvidError(
-      `Timed out waiting for Findvid movie card for "${titleHint}" ` +
-        "(Озвучка/Качество or озвучки list). Other films’ cards and collapsed " +
-        "Вернуться/Скрыть keyboards are ignored — re-select the match or search again. " +
+      `Timed out waiting for a fresh Findvid movie card for "${titleHint}" ` +
+        "(Озвучка/Качество or озвучки list) after SendInlineBotResult. " +
+        "Preexisting history cards are not reused. " +
         `${flood}. VIP/rate-limits or UI changes may block automation.`,
     );
   }
@@ -692,6 +655,11 @@ export class FindvidService {
       acceptVideo?: boolean;
       requireVoiceoverOrQuality?: boolean;
       requireQuality?: boolean;
+      /**
+       * After selecting a studio озвучка: wait for Nx p buttons or chrome with
+       * Качество. Never accept film/preview media as completion of this step.
+       */
+      requireQualityStep?: boolean;
     } = {},
   ): Promise<ChatMessageSnapshot> {
     if (!button) {
@@ -732,7 +700,11 @@ export class FindvidService {
     };
     await this.telegram.clickButton(clickTarget);
 
-    const needsList = Boolean(options.requireVoiceoverOrQuality || options.requireQuality);
+    const needsList = Boolean(
+      options.requireVoiceoverOrQuality ||
+        options.requireQuality ||
+        options.requireQualityStep,
+    );
     /** Grace before treating Вернуться/Скрыть-only as a hard dead-end. */
     const navOnlyFailAfterMs = Math.min(
       8_000,
@@ -756,8 +728,14 @@ export class FindvidService {
 
       for (let i = recent.length - 1; i >= 0; i -= 1) {
         const msg = recent[i];
-        if (options.acceptVideo && isFinalVideoMessage(msg) && !looksLikeGuideMedia(msg)) {
-          if (msg.id >= beforeId) {
+        // acceptVideo is only for post-quality film waits — never after voiceover.
+        if (
+          options.acceptVideo &&
+          !options.requireQualityStep &&
+          isFinalVideoMessage(msg) &&
+          !looksLikeGuideMedia(msg)
+        ) {
+          if (msg.id > beforeId) {
             this.state.lastBotMessageId = msg.id;
             return msg;
           }
@@ -807,6 +785,9 @@ export class FindvidService {
           ? formatKeyboardDebug(latest.buttons, { messageId: latest.id })
           : `no message after msg#${beforeId}`) +
         `. ${formatFloodStats(this.telegram.getFloodStats())}. ` +
+        (options.requireQualityStep
+          ? "Expected a NEW message with quality buttons after voiceover — not film preview. "
+          : "") +
         "VIP/rate-limits or UI changes may block automation.",
     );
   }
@@ -831,7 +812,11 @@ export class FindvidService {
     recent: ChatMessageSnapshot[],
     beforeFingerprints: Map<number, string>,
     beforeId: number,
-    options: { requireVoiceoverOrQuality?: boolean; requireQuality?: boolean },
+    options: {
+      requireVoiceoverOrQuality?: boolean;
+      requireQuality?: boolean;
+      requireQualityStep?: boolean;
+    },
   ): ChatMessageSnapshot | undefined {
     for (let i = recent.length - 1; i >= 0; i -= 1) {
       const msg = recent[i];
@@ -839,6 +824,15 @@ export class FindvidService {
       if (looksLikeBotHomeKeyboard(msg.buttons)) continue;
       if (!this.messageKeyboardChangedSince(msg, beforeFingerprints, beforeId)) continue;
 
+      if (options.requireQualityStep) {
+        // Prefer a *new* message with quality buttons (Nikita live flow).
+        if (looksLikeQualityButtons(msg.buttons)) return msg;
+        // Some titles briefly return chrome; caller opens Качество next.
+        if (looksLikeChromeMenu(msg.buttons) && findQualityMenuButton(msg.buttons)) {
+          return msg;
+        }
+        continue;
+      }
       if (options.requireQuality) {
         if (looksLikeQualityButtons(msg.buttons)) return msg;
         continue;
@@ -880,10 +874,17 @@ export class FindvidService {
     return recent.find((m) => m.id >= beforeId);
   }
 
-  private async clickAndWaitForButtonsOrVideo(
+  /**
+   * Click a studio озвучка and wait for the quality step (Nx p list or chrome
+   * with Качество). Ignores intermediate/preview media — film comes only after
+   * quality click.
+   */
+  private async clickVoiceoverAndWaitForQualityStep(
     button: ButtonLike,
   ): Promise<ChatMessageSnapshot> {
-    return this.clickAndWaitForButtons(button, button.text, { acceptVideo: true });
+    return this.clickAndWaitForButtons(button, button.text, {
+      requireQualityStep: true,
+    });
   }
 
   private async latestButtons(): Promise<ButtonLike[]> {

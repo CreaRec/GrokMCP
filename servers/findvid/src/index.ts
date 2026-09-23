@@ -18,8 +18,10 @@ const toolDefinitions = [
     name: "search",
     description:
       "Search Findvid (Telegram inline bot) for a movie/show. Returns the single best match " +
-      "plus alternatives. Preferred flow: search → show user → list_voiceovers → list_qualities → " +
-      "confirm_and_forward. Озвучка/Качество are chrome menu buttons, not voiceover names. " +
+      "plus alternatives. Preferred flow: search → show user → list_voiceovers → user picks " +
+      "voiceover only → list_qualities → agent picks max quality → confirm_and_forward " +
+      "(no second user OK). After voiceover, qualities arrive on a new message — not the film. " +
+      "Озвучка/Качество are chrome menu buttons, not voiceover names. " +
       "VIP/rate-limits/UI changes on Findvid can break button automation.",
     inputSchema: {
       type: "object" as const,
@@ -32,7 +34,8 @@ const toolDefinitions = [
   {
     name: "list_voiceovers",
     description:
-      "Select the search match in Findvid chat, open the Озвучка chrome submenu if needed, " +
+      "Select the search match by always sending a fresh Findvid inline result (never reuse " +
+      "old history cards), open the Озвучка chrome submenu if needed, " +
       "and return real voiceover (озвучки) labels. Does not return chrome items like Озвучка/Качество/Поиск.",
     inputSchema: {
       type: "object" as const,
@@ -44,8 +47,9 @@ const toolDefinitions = [
   {
     name: "list_qualities",
     description:
-      "Select a voiceover (opens Озвучка/Качество chrome menus when needed) and list real " +
-      "quality buttons (1080p/720p/…). Never returns Инструкция/Видео-гайд chrome as qualities.",
+      "Select a voiceover (studio). Wait for a NEW message with quality buttons (1080p/720p/…). " +
+      "Does not treat post-voiceover preview/media as the film — returns real Nx p options. " +
+      "Agent should then pick max quality and call confirm_and_forward without asking the user again.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -56,8 +60,10 @@ const toolDefinitions = [
   {
     name: "confirm_and_forward",
     description:
-      "Drive two-level Findvid menus (Озвучка → voiceover, Качество → quality), wait for the " +
-      "final film video/document (rejects tiny guide/howto clips), forward to downloader bot. Does not download.",
+      "After voiceover + quality: click quality (film arrives on a NEW message after that click, " +
+      "not after voiceover alone), forward the film video/document to the downloader bot. " +
+      "Rejects tiny guide/howto clips and post-voiceover previews. Does not download. " +
+      "Preferred: user confirmed voiceover only — pick max quality and call this immediately.",
     inputSchema: {
       type: "object" as const,
       properties: {
