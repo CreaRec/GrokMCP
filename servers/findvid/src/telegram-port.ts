@@ -6,6 +6,7 @@ import type { FindvidConfig } from "./config.js";
 import { FindvidError, TelegramError, TimeoutError } from "./errors.js";
 import {
   extractButtonsFromMarkup,
+  looksLikeGuideMedia,
   type ButtonLike,
   type InlineResultLike,
 } from "./parse.js";
@@ -160,6 +161,8 @@ export function snapshotFromGramJsMessage(message: Api.Message): ChatMessageSnap
 
 export function isFinalVideoMessage(msg: ChatMessageSnapshot): boolean {
   if (!(msg.hasVideo || msg.hasDocument)) return false;
+  // Never treat howto / «Видео-гайд» support clips as the film.
+  if (looksLikeGuideMedia(msg)) return false;
   // Prefer large media (movie files); still accept any video/document if size unknown.
   if (msg.fileSize !== undefined && msg.fileSize > 0) return true;
   if (msg.durationSeconds !== undefined && msg.durationSeconds > 60) return true;

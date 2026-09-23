@@ -45,6 +45,29 @@ const QUALITY_RE = /^(\d{3,4})\s*p$/i;
 const TRAILER_RE = /трейлер|trailer/i;
 const WATCH_RE = /смотреть|watch/i;
 
+/**
+ * Top-level Findvid movie-card chrome (not voiceover/quality picks).
+ * Live VIP UI: Озвучка / Качество open nested lists; the rest are menu actions.
+ * Allow optional leading «в » (e.g. «В избранное»).
+ */
+const CHROME_LABEL_RE =
+  /^(?:в\s+)?(озвучк|качеств|уведомл|избранн|обсужден|поделит|оценить|ошибк|наши проект|tv\s*cast|подробнее|рекомендац|истори|поиск|свернуть|развернуть|инструкц|видео.?гайд|гайд|поддержк|помощь|help|projects?|share|notify|favorite|discuss|rate|cast|history|search|collapse|expand|menu)/i;
+
+const NAV_LABEL_RE =
+  /^(вернуться|назад|скрыть?|отмена|cancel|back|hide|menu|меню|главн\w*)(\s+меню)?$/i;
+
+/** Opens the nested voiceover list from the chrome menu. */
+const VOICEOVER_MENU_RE = /озвучк/i;
+/** Opens the nested quality list from the chrome menu. */
+const QUALITY_MENU_RE = /качеств/i;
+
+/** Tiny howto / support videos must never be treated as the film file. */
+const GUIDE_TEXT_RE = /видео.?гайд|инструкц|howto|how.?to|гайд|туториал|tutorial|поддержк/i;
+
+/** Below this size, media is treated as a guide unless duration is movie-length. */
+export const MIN_FILM_FILE_BYTES = 80 * 1024 * 1024; // 80 MB
+export const MIN_FILM_DURATION_SECONDS = 20 * 60; // 20 min
+
 export function normalizeText(value: string): string {
   return value
     .toLowerCase()
@@ -192,19 +215,75 @@ export function extractButtonsFromMarkup(markup: unknown): ButtonLike[] {
   return buttons;
 }
 
-/** Filter out navigation / chrome buttons that are not content choices. */
-export function isChoiceButton(button: ButtonLike): boolean {
-  const t = normalizeText(button.text);
+/** Strip leading selection / status emoji so labels normalize cleanly. */
+export function stripButtonDecorators(text: string): string {
+  return text
+    .replace(/^[\s✔️✅☑️✓✔☑️●○◆◇▶►⭐️⭐🔔🎶🔮❤️😭📱📺ℹ️👌🕔🔍🔼🔽🔙⬅️➡️⏭️◀️▶️✖️❌]+/u, "")
+    .trim();
+}
+
+function labelCore(text: string): string {
+  return normalizeText(stripButtonDecorators(text));
+}
+
+/** True for top-level chrome / support labels (Озвучка, Качество, Поиск, …). */
+export function isChromeButton(button: ButtonLike): boolean {
+  const t = labelCore(button.text);
   if (!t) return false;
-  if (/^(вернуться|назад|скрыт|отмена|cancel|back|hide|menu|меню|главн)/i.test(t)) {
-    return false;
-  }
-  if (/^[✖️❌⬅️➡️⏭️◀️▶️]+$/u.test(button.text.trim())) return false;
+  return CHROME_LABEL_RE.test(t);
+}
+
+/** True for back / hide / cancel style navigation. */
+export function isNavButton(button: ButtonLike): boolean {
+  const t = labelCore(button.text);
+  if (!t) return false;
+  if (NAV_LABEL_RE.test(t)) return true;
+  if (/^[✖️❌⬅️➡️⏭️◀️▶️🔙🔼🔽]+$/u.test(button.text.trim())) return true;
+  return false;
+}
+
+/**
+ * Filter out navigation and chrome buttons that are not content choices.
+ * Voiceover studio names and Nx p quality labels remain.
+ */
+export function isChoiceButton(button: ButtonLike): boolean {
+  const t = labelCore(button.text);
+  if (!t) return false;
+  if (isNavButton(button)) return false;
+  if (isChromeButton(button)) return false;
+  if (GUIDE_TEXT_RE.test(t)) return false;
   return true;
 }
 
 export function listChoiceButtons(buttons: ButtonLike[]): ButtonLike[] {
   return buttons.filter(isChoiceButton);
+}
+
+/** Movie-card chrome menu: contains Озвучка and/or Качество openers. */
+export function looksLikeChromeMenu(buttons: ButtonLike[]): boolean {
+  if (buttons.length === 0) return false;
+  const hasVoiceoverMenu = buttons.some((b) => VOICEOVER_MENU_RE.test(labelCore(b.text)));
+  const hasQualityMenu = buttons.some((b) => QUALITY_MENU_RE.test(labelCore(b.text)));
+  if (!hasVoiceoverMenu && !hasQualityMenu) return false;
+  // Real voiceover lists never include the Озвучка/Качество openers themselves.
+  const chromeHits = buttons.filter(isChromeButton).length;
+  return chromeHits >= 2 || (chromeHits >= 1 && listChoiceButtons(buttons).length === 0);
+}
+
+export function findVoiceoverMenuButton(buttons: ButtonLike[]): ButtonLike | null {
+  return (
+    buttons.find((b) => VOICEOVER_MENU_RE.test(labelCore(b.text)) && isChromeButton(b)) ??
+    buttons.find((b) => VOICEOVER_MENU_RE.test(labelCore(b.text))) ??
+    null
+  );
+}
+
+export function findQualityMenuButton(buttons: ButtonLike[]): ButtonLike | null {
+  return (
+    buttons.find((b) => QUALITY_MENU_RE.test(labelCore(b.text)) && isChromeButton(b)) ??
+    buttons.find((b) => QUALITY_MENU_RE.test(labelCore(b.text))) ??
+    null
+  );
 }
 
 export function pickPreferredButton(
@@ -217,9 +296,9 @@ export function pickPreferredButton(
   for (const pref of preferences) {
     const nPref = normalizeText(pref);
     if (!nPref) continue;
-    const exact = choices.find((b) => normalizeText(b.text) === nPref);
+    const exact = choices.find((b) => labelCore(b.text) === nPref);
     if (exact) return exact;
-    const partial = choices.find((b) => normalizeText(b.text).includes(nPref));
+    const partial = choices.find((b) => labelCore(b.text).includes(nPref));
     if (partial) return partial;
   }
   return choices[0] ?? null;
@@ -230,6 +309,8 @@ export function pickVoiceoverButton(
   preferred = "Дублированный",
   override?: string,
 ): ButtonLike | null {
+  // Never fall back to chrome menu labels as "voiceovers".
+  if (looksLikeChromeMenu(buttons)) return null;
   const prefs = override
     ? [override, preferred]
     : [preferred, "дубляж", "дублирован", "official", "hdrezka"];
@@ -241,6 +322,7 @@ export function pickQualityButton(
   preferredQualities: string[] = ["1080p", "720p", "480p"],
   override?: string,
 ): ButtonLike | null {
+  if (looksLikeChromeMenu(buttons)) return null;
   const choices = listChoiceButtons(buttons);
   if (choices.length === 0) return null;
 
@@ -258,28 +340,51 @@ export function pickQualityButton(
   // Fallback: highest Nx p among buttons.
   const withQuality = choices
     .map((b) => {
-      const m = b.text.trim().match(QUALITY_RE);
+      const m = stripButtonDecorators(b.text).match(QUALITY_RE);
       return { button: b, height: m ? Number.parseInt(m[1], 10) : 0 };
     })
     .filter((x) => x.height > 0)
     .sort((a, b) => b.height - a.height);
 
   if (withQuality.length > 0) return withQuality[0].button;
-  return choices[0] ?? null;
+  // Do not fall back to non-quality chrome leftovers (e.g. Инструкция).
+  return null;
 }
 
 export function looksLikeVoiceoverButtons(buttons: ButtonLike[]): boolean {
+  if (looksLikeChromeMenu(buttons)) return false;
   const choices = listChoiceButtons(buttons);
   if (choices.length === 0) return false;
-  const qualityOnly = choices.every((b) => QUALITY_RE.test(b.text.trim()));
-  return !qualityOnly;
+  if (looksLikeQualityButtons(buttons)) return false;
+  return true;
 }
 
 export function looksLikeQualityButtons(buttons: ButtonLike[]): boolean {
+  if (looksLikeChromeMenu(buttons)) return false;
   const choices = listChoiceButtons(buttons);
   if (choices.length === 0) return false;
-  const qualityHits = choices.filter((b) => QUALITY_RE.test(b.text.trim())).length;
+  const qualityHits = choices.filter((b) =>
+    QUALITY_RE.test(stripButtonDecorators(b.text)),
+  ).length;
   return qualityHits >= Math.ceil(choices.length / 2) || qualityHits >= 1;
+}
+
+/** Heuristic: reject tiny howto / guide videos when a multi-GB film was expected. */
+export function looksLikeGuideMedia(options: {
+  fileName?: string;
+  fileSize?: number;
+  durationSeconds?: number;
+  captionPreview?: string;
+  text?: string;
+}): boolean {
+  const blob = `${options.fileName ?? ""} ${options.captionPreview ?? ""} ${options.text ?? ""}`;
+  if (GUIDE_TEXT_RE.test(blob)) return true;
+  const size = options.fileSize;
+  const duration = options.durationSeconds;
+  if (size !== undefined && size > 0 && size < MIN_FILM_FILE_BYTES) {
+    if (duration === undefined || duration < MIN_FILM_DURATION_SECONDS) return true;
+  }
+  return false;
 }
 
 export function formatBytes(bytes: number | undefined): string | undefined {

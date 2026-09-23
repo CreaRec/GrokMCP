@@ -18,7 +18,8 @@ const toolDefinitions = [
     name: "search",
     description:
       "Search Findvid (Telegram inline bot) for a movie/show. Returns the single best match " +
-      "plus alternatives. Agent flow: search → show user → confirm_and_forward. " +
+      "plus alternatives. Preferred flow: search → show user → list_voiceovers → list_qualities → " +
+      "confirm_and_forward. Озвучка/Качество are chrome menu buttons, not voiceover names. " +
       "VIP/rate-limits/UI changes on Findvid can break button automation.",
     inputSchema: {
       type: "object" as const,
@@ -31,7 +32,8 @@ const toolDefinitions = [
   {
     name: "list_voiceovers",
     description:
-      "Select the search match in Findvid chat and list voiceover (озвучки) buttons.",
+      "Select the search match in Findvid chat, open the Озвучка chrome submenu if needed, " +
+      "and return real voiceover (озвучки) labels. Does not return chrome items like Озвучка/Качество/Поиск.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -42,7 +44,8 @@ const toolDefinitions = [
   {
     name: "list_qualities",
     description:
-      "Select a voiceover and list quality buttons (1080p/720p/…).",
+      "Select a voiceover (opens Озвучка/Качество chrome menus when needed) and list real " +
+      "quality buttons (1080p/720p/…). Never returns Инструкция/Видео-гайд chrome as qualities.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -53,7 +56,8 @@ const toolDefinitions = [
   {
     name: "confirm_and_forward",
     description:
-      "Pick preferred voiceover+quality, wait for final video/document, forward to downloader bot. Does not download.",
+      "Drive two-level Findvid menus (Озвучка → voiceover, Качество → quality), wait for the " +
+      "final film video/document (rejects tiny guide/howto clips), forward to downloader bot. Does not download.",
     inputSchema: {
       type: "object" as const,
       properties: {

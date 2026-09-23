@@ -10,18 +10,29 @@ Automates **Findvid VIP** Telegram search UX (inline search → озвучка �
 
 ## Agent tool flow
 
-1. `search` `{ query }` — inline search via `@fvidBot` (configurable). Returns **best match** + short alternatives. Show this to Nikita.
-2. On OK → `confirm_and_forward` (optional `voiceover` / `quality` / `resultId`). Defaults prefer **«Дублированный»** then **1080p**.
-3. Optional browse tools: `list_voiceovers`, `list_qualities` if you want Nikita to pick before confirm.
+Findvid’s movie card uses a **two-level menu**:
+1. **Chrome** — top-level actions including `🎶 Озвучка` and `🔮 Качество` (menu openers, **not** voiceover/quality names).
+2. **Nested lists** — only after clicking those openers do real озвучки (Back Board Cinema, Дублированный, …) or qualities (1080p/720p/…) appear.
+
+Preferred agent flow:
+
+1. `search` `{ query }` — inline search. Returns **best match** + short alternatives. Show this to the user.
+2. `list_voiceovers` — selects the match, opens `Озвучка` if still on chrome, returns **real** озвучки labels (chrome/nav excluded).
+3. Show озвучки to the user → on pick, `list_qualities` `{ voiceover }` — selects that озвучка, opens `Качество` when needed, returns 1080p/720p/….
+4. Show qualities → on pick, `confirm_and_forward` `{ voiceover, quality }` — drives the same two-step menu and forwards the film file to the downloader bot.
+
+Shortcuts: after search + user OK, you may call `confirm_and_forward` with optional overrides (defaults prefer **«Дублированный»** then **1080p**). It still opens chrome submenus internally.
+
+Do **not** treat `Озвучка` / `Качество` / `Уведомлять` / `Поиск` / guide labels as selectable озвучки or qualities.
 
 ## Tools
 
 | Tool | Purpose |
 |------|---------|
 | `search` | `messages.getInlineBotResults` against Findvid; persist query/result ids |
-| `list_voiceovers` | Send/select match; return озвучки buttons |
-| `list_qualities` | Select voiceover; return quality buttons |
-| `confirm_and_forward` | Drive defaults/overrides → wait for final video → **forward** to downloader bot |
+| `list_voiceovers` | Send/select match; open `Озвучка` chrome if needed; return real озвучки |
+| `list_qualities` | Select voiceover; open `Качество` chrome if needed; return Nx p buttons |
+| `confirm_and_forward` | Same two-step menu → wait for film video (rejects tiny guides) → **forward** |
 
 Return shape is always JSON text: `{ ok: true, data }` / `{ ok: false, error }`.
 

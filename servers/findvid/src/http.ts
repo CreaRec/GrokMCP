@@ -53,8 +53,9 @@ function createServer() {
         "Search Findvid (Telegram inline bot) for a movie/show. Returns the single best match " +
         "(title, year, kp/imdb meta, thumb URL when available) plus a short alternatives list. " +
         "Persists query/result ids for follow-up tools. " +
-        "Agent flow: search → show best match to Nikita → on OK call confirm_and_forward " +
-        "(optional voiceover/quality). VIP/rate-limits/UI changes on Findvid can break automation.",
+        "Preferred agent flow: search → show best match → list_voiceovers (real озвучки) → " +
+        "list_qualities → confirm_and_forward. Озвучка/Качество are chrome menu openers, not picks. " +
+        "VIP/rate-limits/UI changes on Findvid can break automation.",
       inputSchema: {
         query: z.string().describe("Movie or series search query (e.g. Russian or English title)."),
       },
@@ -76,8 +77,9 @@ function createServer() {
     "list_voiceovers",
     {
       description:
-        "After search: send/select the best (or given) inline result in the Findvid bot chat " +
-        "and return озвучки (voiceover) buttons. Optional — confirm_and_forward can pick defaults.",
+        "After search: send/select the best (or given) inline result, open the Озвучка chrome " +
+        "submenu when the movie card still shows the top-level menu, and return real озвучки " +
+        "labels (Back Board Cinema, Дублированный, …). Chrome/nav buttons are excluded.",
       inputSchema: {
         resultId: z
           .string()
@@ -102,8 +104,9 @@ function createServer() {
     "list_qualities",
     {
       description:
-        "After a voiceover is available: select voiceover (preferred «Дублированный» or override) " +
-        "and return quality buttons (1080p/720p/…). Optional — confirm_and_forward can pick defaults.",
+        "Select voiceover (preferred «Дублированный» or override), opening Озвучка/Качество chrome " +
+        "menus when needed, and return quality buttons (1080p/720p/…). " +
+        "Does not return Инструкция / Видео-гайд / support chrome as qualities.",
       inputSchema: {
         voiceover: z
           .string()
@@ -128,9 +131,10 @@ function createServer() {
     "confirm_and_forward",
     {
       description:
-        "After Nikita confirms the search match: select preferred voiceover+quality " +
-        "(defaults: «Дублированный» then 1080p when present), wait for the final video/document " +
-        "message, and forward it to CreaVideoDownloaderBot. Does NOT download the multi-GB file.",
+        "After the user confirms the search match: walk Findvid’s two-level menus " +
+        "(Озвучка → voiceover, Качество → quality; defaults «Дублированный» then 1080p), " +
+        "wait for the final film video/document (refuses tiny guide/howto clips), " +
+        "and forward it to CreaVideoDownloaderBot. Does NOT download the multi-GB file.",
       inputSchema: {
         resultId: z
           .string()
