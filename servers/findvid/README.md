@@ -18,6 +18,8 @@ Do **not** confuse the sticky bot-home **reply keyboard** (`Подборки`, `
 
 **Critical:** `Озвучка` / `Качество` / studio / quality picks are **inline callback clicks** (`GetBotCallbackAnswer` / GramJS `Message.click`). The MCP must never send those labels as chat text messages. Callback payloads are kept as **opaque bytes** (no UTF-8 round-trip).
 
+**Flood waits:** GetHistory polling backs off on `FLOOD_WAIT` (serves a short cache, extends the wait budget by flood-sleep time) instead of hammering every ~1.5s.
+
 Preferred agent flow:
 
 1. `search` `{ query }` — inline search. Returns **best match** + short alternatives. Show this to the user.

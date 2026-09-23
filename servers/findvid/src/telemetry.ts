@@ -136,6 +136,13 @@ export function logToolCall(opts: {
   result: ToolResult;
   durationMs: number;
   errorType?: McpErrorType;
+  errorMessage?: string;
+  flood?: {
+    getHistoryCalls?: number;
+    floodWaitSeconds?: number;
+    floodWaitEvents?: number;
+    lastFloodWaitSeconds?: number;
+  };
 }): void {
   const tel = telemetry;
   if (!tel) return;
@@ -148,6 +155,25 @@ export function logToolCall(opts: {
     if (opts.errorType) {
       attrs.error_type = opts.errorType;
     }
+    if (opts.errorMessage) {
+      attrs.error_message = opts.errorMessage.slice(0, 500);
+      const parsed = parseFloodAttrsFromMessage(opts.errorMessage);
+      Object.assign(attrs, parsed);
+    }
+    if (opts.flood) {
+      if (opts.flood.getHistoryCalls !== undefined) {
+        attrs.getHistory_calls = opts.flood.getHistoryCalls;
+      }
+      if (opts.flood.floodWaitSeconds !== undefined) {
+        attrs.flood_wait_seconds = opts.flood.floodWaitSeconds;
+      }
+      if (opts.flood.floodWaitEvents !== undefined) {
+        attrs.flood_wait_events = opts.flood.floodWaitEvents;
+      }
+      if (opts.flood.lastFloodWaitSeconds !== undefined) {
+        attrs.last_flood_wait_seconds = opts.flood.lastFloodWaitSeconds;
+      }
+    }
     tel.logger.emit({
       severityNumber: opts.result === "error" ? 17 : 9,
       severityText: opts.result === "error" ? "ERROR" : "INFO",
@@ -157,6 +183,20 @@ export function logToolCall(opts: {
   } catch {
     // Never throw from telemetry
   }
+}
+
+/** Pull flood/history counters out of FindvidError timeout messages. */
+export function parseFloodAttrsFromMessage(message: string): Record<string, number> {
+  const attrs: Record<string, number> = {};
+  const calls = message.match(/getHistory_calls=(\d+)/);
+  const events = message.match(/flood_wait_events=(\d+)/);
+  const seconds = message.match(/flood_wait_seconds=(\d+)/);
+  const last = message.match(/last_flood_wait_seconds=(\d+)/);
+  if (calls) attrs.getHistory_calls = Number(calls[1]);
+  if (events) attrs.flood_wait_events = Number(events[1]);
+  if (seconds) attrs.flood_wait_seconds = Number(seconds[1]);
+  if (last) attrs.last_flood_wait_seconds = Number(last[1]);
+  return attrs;
 }
 
 export interface McpToolResponse {
@@ -208,8 +248,15 @@ export async function withToolTelemetry<T extends McpToolResponse>(
     const durationMs = performance.now() - startTime;
     const durationSeconds = durationMs / 1000;
     const errorType = classifyError(err);
+    const errorMessage = err instanceof Error ? err.message : String(err);
     recordToolCall({ tool: toolName, result: "error", durationSeconds, errorType });
-    logToolCall({ tool: toolName, result: "error", durationMs, errorType });
+    logToolCall({
+      tool: toolName,
+      result: "error",
+      durationMs,
+      errorType,
+      errorMessage,
+    });
     throw err;
   }
 
@@ -218,9 +265,28 @@ export async function withToolTelemetry<T extends McpToolResponse>(
   const isError = isErrorResponse(response);
   const result: ToolResult = isError ? "error" : "success";
   const errorType = isError ? extractErrorType(response, caughtError) : undefined;
+  const errorMessage = isError ? extractErrorMessage(response) : undefined;
 
   recordToolCall({ tool: toolName, result, durationSeconds, errorType });
-  logToolCall({ tool: toolName, result, durationMs, errorType });
+  logToolCall({
+    tool: toolName,
+    result,
+    durationMs,
+    errorType,
+    errorMessage,
+  });
 
   return response;
+}
+
+function extractErrorMessage(response: McpToolResponse): string | undefined {
+  if (response.content.length === 0) return undefined;
+  const first = response.content[0];
+  if (first.type !== "text") return undefined;
+  try {
+    const parsed = JSON.parse(first.text) as { error?: unknown };
+    return typeof parsed.error === "string" ? parsed.error : undefined;
+  } catch {
+    return undefined;
+  }
 }

@@ -13,6 +13,12 @@ import {
   type ButtonLike,
   type InlineResultLike,
 } from "./parse.js";
+import {
+  extractFloodWaitSeconds,
+  FloodWaitTracker,
+  formatFloodStats,
+  type FloodStats,
+} from "./flood.js";
 
 export interface ChatMessageSnapshot {
   id: number;
@@ -55,6 +61,13 @@ export interface TelegramPort {
   ): Promise<ChatMessageSnapshot>;
   getRecentMessages(limit?: number): Promise<ChatMessageSnapshot[]>;
   forwardMessageTo(username: string, messageId: number): Promise<{ forwardedMessageId?: number }>;
+  /** Flood / GetHistory poll stats for timeout errors and OTEL. */
+  getFloodStats(): FloodStats;
+  resetFloodStats(): void;
+  /** ms to wait before the next GetHistory-backed poll (flood backoff). */
+  nextHistoryPollDelayMs(pollIntervalMs: number): number;
+  /** Flood-sleep ms to exclude from waitTimeout budget (clears pending). */
+  consumeFloodSleepMs(): number;
 }
 
 function className(value: unknown): string {
@@ -295,8 +308,27 @@ export function isFinalVideoMessage(msg: ChatMessageSnapshot): boolean {
 export class GramJsTelegramPort implements TelegramPort {
   private client: TelegramClient | null = null;
   private findvidEntity: Api.TypeInputPeer | null = null;
+  private readonly flood = new FloodWaitTracker();
+  private historyCache: ChatMessageSnapshot[] = [];
+  private chatUpdateWaiters: Array<() => void> = [];
 
   constructor(private readonly config: FindvidConfig) {}
+
+  getFloodStats(): FloodStats {
+    return this.flood.snapshot();
+  }
+
+  resetFloodStats(): void {
+    this.flood.reset();
+  }
+
+  nextHistoryPollDelayMs(pollIntervalMs: number): number {
+    return this.flood.nextPollDelayMs(pollIntervalMs);
+  }
+
+  consumeFloodSleepMs(): number {
+    return this.flood.consumePendingFloodSleepMs();
+  }
 
   async connect(): Promise<void> {
     if (this.client?.connected) return;
@@ -305,7 +337,12 @@ export class GramJsTelegramPort implements TelegramPort {
       new StringSession(this.config.session),
       this.config.apiId,
       this.config.apiHash,
-      { connectionRetries: 5 },
+      {
+        connectionRetries: 5,
+        // Handle FLOOD_WAIT ourselves so wait loops can back off instead of
+        // stacking GramJS auto-sleeps on every GetHistory poll.
+        floodSleepThreshold: 0,
+      },
     );
 
     try {
@@ -318,12 +355,47 @@ export class GramJsTelegramPort implements TelegramPort {
       const entity = await client.getEntity(`@${this.config.findvidBotUsername}`);
       this.findvidEntity = await client.getInputEntity(entity);
       this.client = client;
+      this.installChatUpdateWakeups(client);
     } catch (err) {
       await client.disconnect().catch(() => undefined);
       if (err instanceof TelegramError) throw err;
       const message = err instanceof Error ? err.message : String(err);
       throw new TelegramError(`Failed to connect GramJS: ${message}`);
     }
+  }
+
+  private installChatUpdateWakeups(client: TelegramClient): void {
+    const wake = () => {
+      const waiters = this.chatUpdateWaiters.splice(0);
+      for (const w of waiters) w();
+    };
+    // Prefer update-driven wakeups over tight GetHistory polling.
+    Promise.all([
+      import("telegram/events/NewMessage.js"),
+      import("telegram/events/EditedMessage.js"),
+    ])
+      .then(([newMsg, edited]) => {
+        client.addEventHandler(wake, new newMsg.NewMessage({}));
+        client.addEventHandler(wake, new edited.EditedMessage({}));
+      })
+      .catch(() => {
+        // Events optional — flood-aware polling still works.
+      });
+  }
+
+  /** Sleep until poll delay elapses or a chat update arrives (whichever first). */
+  private async sleepOrChatUpdate(ms: number): Promise<void> {
+    if (ms <= 0) return;
+    await new Promise<void>((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        resolve();
+      };
+      this.chatUpdateWaiters.push(finish);
+      setTimeout(finish, ms).unref?.();
+    });
   }
 
   async disconnect(): Promise<void> {
@@ -464,6 +536,50 @@ export class GramJsTelegramPort implements TelegramPort {
   }
 
   async getRecentMessages(limit = 20): Promise<ChatMessageSnapshot[]> {
+    const now = Date.now();
+    const backoffMs = this.flood.msUntilHistoryAllowed(now);
+    if (backoffMs > 0) {
+      // Do not hammer GetHistory during FLOOD_WAIT — serve cache when possible.
+      if (this.historyCache.length > 0) {
+        return this.historyCache.slice(-limit);
+      }
+      await sleep(backoffMs);
+    }
+
+    this.flood.recordHistoryCall();
+    try {
+      const messages = await this.fetchHistory(limit);
+      this.historyCache = messages;
+      this.flood.noteSuccessfulFetch({
+        minIntervalMs: Math.max(this.config.pollIntervalMs, 1_500),
+      });
+      return messages;
+    } catch (err) {
+      const seconds = extractFloodWaitSeconds(err);
+      if (seconds !== undefined) {
+        this.flood.recordFloodWait(seconds);
+        const stats = this.flood.snapshot();
+        console.warn(
+          `[findvid] flood wait ${seconds}s on messages.GetHistory; backing off ` +
+            `(${formatFloodStats(stats)})`,
+        );
+        if (this.historyCache.length > 0) {
+          return this.historyCache.slice(-limit);
+        }
+        await sleep(seconds * 1000 + 1_000);
+        this.flood.recordHistoryCall();
+        const messages = await this.fetchHistory(limit);
+        this.historyCache = messages;
+        this.flood.noteSuccessfulFetch({
+          minIntervalMs: Math.max(this.config.pollIntervalMs, 1_500),
+        });
+        return messages;
+      }
+      throw err;
+    }
+  }
+
+  private async fetchHistory(limit: number): Promise<ChatMessageSnapshot[]> {
     const client = this.requireClient();
     const peer = this.requireFindvidPeer();
     const history = await client.invoke(
@@ -497,21 +613,26 @@ export class GramJsTelegramPort implements TelegramPort {
     predicate: (msg: ChatMessageSnapshot) => boolean,
     options: { timeoutMs: number; pollIntervalMs: number; afterMessageId?: number },
   ): Promise<ChatMessageSnapshot> {
-    const deadline = Date.now() + options.timeoutMs;
+    let deadline = Date.now() + options.timeoutMs;
     let lastSeenId = options.afterMessageId ?? 0;
 
     while (Date.now() < deadline) {
       const messages = await this.getRecentMessages(25);
+      deadline += this.flood.consumePendingFloodSleepMs();
       for (const msg of messages) {
         if (msg.id <= lastSeenId) continue;
         lastSeenId = Math.max(lastSeenId, msg.id);
         if (predicate(msg)) return msg;
       }
-      await sleep(options.pollIntervalMs);
+      await this.sleepOrChatUpdate(
+        this.flood.nextPollDelayMs(options.pollIntervalMs),
+      );
     }
 
     throw new TimeoutError(
-      `Timed out after ${options.timeoutMs}ms waiting for Findvid bot reply. VIP/rate-limits or UI changes may block automation.`,
+      `Timed out after ${options.timeoutMs}ms waiting for Findvid bot reply. ` +
+        `${formatFloodStats(this.flood.snapshot())}. ` +
+        "VIP/rate-limits or UI changes may block automation.",
     );
   }
 
