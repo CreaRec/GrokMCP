@@ -25,6 +25,7 @@ import {
   type ChatMessageSnapshot,
   type TelegramPort,
 } from "./telegram-port.js";
+import { formatFloodStats } from "./flood.js";
 
 export type FlowStage =
   | "idle"
@@ -150,6 +151,8 @@ export class FindvidService {
       queryId: this.state.queryId,
       resultId,
     });
+
+    this.telegram.resetFloodStats();
 
     let reply =
       sent && looksLikeMovieCardButtons(sent.buttons)
@@ -461,13 +464,14 @@ export class FindvidService {
    * Wait for movie-card chrome (Озвучка/Качество) or nested voiceover/quality lists.
    * Ignores the sticky bot-home reply keyboard (Подборки/Фильтр/…).
    * Recovery: click «Результат поиска», then optionally re-send the inline result once.
+   * Flood-aware: does not burn waitTimeout during FLOOD_WAIT backoff on GetHistory.
    */
   private async waitForMovieCardMessage(options: {
     afterMessageId: number;
     resultId: string;
     allowResend: boolean;
   }): Promise<ChatMessageSnapshot> {
-    const deadline = Date.now() + this.config.waitTimeoutMs;
+    let deadline = Date.now() + this.config.waitTimeoutMs;
     const startedAt = Date.now();
     let afterId = options.afterMessageId;
     let triedRecoveryClick = false;
@@ -475,6 +479,8 @@ export class FindvidService {
 
     while (Date.now() < deadline) {
       const recent = await this.telegram.getRecentMessages(15);
+      deadline += this.telegram.consumeFloodSleepMs();
+
       for (let i = recent.length - 1; i >= 0; i -= 1) {
         const msg = recent[i];
         if (msg.id < afterId) continue;
@@ -499,7 +505,7 @@ export class FindvidService {
           this.state.lastBotMessageId = latestWithButtons.id;
           await this.telegram.clickButton(recovery);
           afterId = latestWithButtons.id;
-          await sleep(this.config.pollIntervalMs);
+          await sleep(this.telegram.nextHistoryPollDelayMs(this.config.pollIntervalMs));
           continue;
         }
       }
@@ -524,13 +530,14 @@ export class FindvidService {
         afterId = Math.max(afterId, resent?.id ?? afterId);
       }
 
-      await sleep(this.config.pollIntervalMs);
+      await sleep(this.telegram.nextHistoryPollDelayMs(this.config.pollIntervalMs));
     }
 
+    const flood = formatFloodStats(this.telegram.getFloodStats());
     throw new FindvidError(
       "Timed out waiting for Findvid movie card (Озвучка/Качество or озвучки list). " +
         "Saw only the sticky bot-home reply keyboard (Подборки/Фильтр/…) or no buttons. " +
-        "VIP/rate-limits or UI changes may block automation.",
+        `${flood}. VIP/rate-limits or UI changes may block automation.`,
     );
   }
 
@@ -617,8 +624,10 @@ export class FindvidService {
     await this.telegram.clickButton(clickTarget);
 
     const deadline = Date.now() + this.config.waitTimeoutMs;
-    while (Date.now() < deadline) {
+    let deadlineMs = deadline;
+    while (Date.now() < deadlineMs) {
       const recent = await this.telegram.getRecentMessages(15);
+      deadlineMs += this.telegram.consumeFloodSleepMs();
       for (let i = recent.length - 1; i >= 0; i -= 1) {
         const msg = recent[i];
         if (options.acceptVideo && isFinalVideoMessage(msg) && !looksLikeGuideMedia(msg)) {
@@ -650,7 +659,7 @@ export class FindvidService {
         this.state.lastBotMessageId = msg.id;
         return msg;
       }
-      await sleep(this.config.pollIntervalMs);
+      await sleep(this.telegram.nextHistoryPollDelayMs(this.config.pollIntervalMs));
     }
 
     const latest = (await this.telegram.getRecentMessages(8)).find((m) => m.id >= beforeId);
@@ -659,7 +668,8 @@ export class FindvidService {
         (latest
           ? formatKeyboardDebug(latest.buttons, { messageId: latest.id })
           : `no message after msg#${beforeId}`) +
-        ". VIP/rate-limits or UI changes may block automation.",
+        `. ${formatFloodStats(this.telegram.getFloodStats())}. ` +
+        "VIP/rate-limits or UI changes may block automation.",
     );
   }
 

@@ -129,6 +129,21 @@ class FakeTelegram implements TelegramPort {
     this.forwarded.push({ username, messageId });
     return { forwardedMessageId: 9000 + messageId };
   }
+  getFloodStats() {
+    return {
+      getHistoryCalls: 0,
+      floodWaitEvents: 0,
+      totalFloodWaitSeconds: 0,
+      nextHistoryAllowedAtMs: 0,
+    };
+  }
+  resetFloodStats(): void {}
+  nextHistoryPollDelayMs(pollIntervalMs: number): number {
+    return pollIntervalMs;
+  }
+  consumeFloodSleepMs(): number {
+    return 0;
+  }
 }
 
 describe("isFinalVideoMessage", () => {
@@ -366,6 +381,16 @@ describe("FindvidService flow", () => {
 
   it("list_voiceovers skips sticky bot-home keyboard and recovers to movie card", async () => {
     const telegram = new FakeTelegram();
+    let historyCalls = 0;
+    const originalGetRecent = telegram.getRecentMessages.bind(telegram);
+    telegram.getRecentMessages = async () => {
+      historyCalls += 1;
+      return originalGetRecent();
+    };
+    // After a simulated flood, next poll delay jumps so we do not thrash GetHistory.
+    telegram.nextHistoryPollDelayMs = (pollIntervalMs: number) =>
+      historyCalls >= 1 ? Math.max(pollIntervalMs, 50) : pollIntervalMs;
+
     telegram.inline = {
       queryId: "knives",
       results: [
@@ -429,6 +454,47 @@ describe("FindvidService flow", () => {
     expect(
       voiceovers.voiceovers.some((v) => /подборк|фильтр|настройк|vip|результат/i.test(v.text)),
     ).toBe(false);
+  });
+
+  it("movie-card wait extends deadline by flood sleep and reports flood stats on timeout", async () => {
+    const telegram = new FakeTelegram();
+    let pollDelays: number[] = [];
+    let floodRemainingMs = 80;
+    telegram.consumeFloodSleepMs = () => {
+      const ms = floodRemainingMs;
+      floodRemainingMs = 0;
+      return ms;
+    };
+    telegram.nextHistoryPollDelayMs = (pollIntervalMs: number) => {
+      const delay = Math.max(pollIntervalMs, 40);
+      pollDelays.push(delay);
+      return delay;
+    };
+    telegram.getFloodStats = () => ({
+      getHistoryCalls: 4,
+      floodWaitEvents: 2,
+      totalFloodWaitSeconds: 11,
+      lastFloodWaitSeconds: 5,
+      nextHistoryAllowedAtMs: Date.now() + 1_000,
+    });
+
+    const botHome: ButtonLike[] = [
+      { text: "🗂 Подборки", kind: "reply" },
+      { text: "🌪️ Фильтр", kind: "reply" },
+    ];
+    telegram.history = [msg({ id: 1, text: "home", buttons: botHome, hasInlineMarkup: false })];
+    telegram.inline = {
+      queryId: "q",
+      results: [{ id: "1", title: "Film (2019)", description: "Смотреть" }],
+    };
+    telegram.afterSend = telegram.history[0];
+
+    const service = new FindvidService(config({ waitTimeoutMs: 120, pollIntervalMs: 20 }), telegram);
+    await service.search("Film");
+    await expect(service.listVoiceovers({ resultId: "1" })).rejects.toThrow(
+      /getHistory_calls=4.*flood_wait_events=2.*flood_wait_seconds=11.*last_flood_wait_seconds=5/,
+    );
+    expect(pollDelays.some((d) => d >= 40)).toBe(true);
   });
 });
 
