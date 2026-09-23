@@ -69,6 +69,35 @@ describe("resolveClickAction", () => {
     });
     expect(action).toEqual({ type: "reply_text", text: "🗂 Подборки" });
   });
+
+  it("allows sendMessage for Результат поиска even if mis-tagged inline without data", () => {
+    // Live post-#70 deadlock: recovery button had kind=inline + no callback data.
+    const action = resolveClickAction({
+      text: "🔍 Результат поиска",
+      kind: "inline",
+      messageId: 10,
+    });
+    expect(action).toEqual({ type: "reply_text", text: "🔍 Результат поиска" });
+  });
+
+  it("allows sendMessage for Результат поиска with empty callback data string", () => {
+    const action = resolveClickAction({
+      text: "🔍 Результат поиска",
+      kind: "inline",
+      data: "",
+      messageId: 10,
+    });
+    expect(action).toEqual({ type: "reply_text", text: "🔍 Результат поиска" });
+  });
+
+  it("still refuses sendMessage for Озвучка without callback data", () => {
+    const action = resolveClickAction({
+      text: "🎶 Озвучка",
+      kind: "inline",
+      messageId: 42,
+    });
+    expect(action.type).toBe("error");
+  });
 });
 
 describe("snapshotFromGramJsMessage markup kinds", () => {

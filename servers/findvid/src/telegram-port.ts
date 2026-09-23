@@ -6,6 +6,7 @@ import type { FindvidConfig } from "./config.js";
 import { FindvidError, TelegramError, TimeoutError } from "./errors.js";
 import {
   extractButtonsFromMarkup,
+  isBotHomeButton,
   looksLikeGuideMedia,
   type ButtonLike,
   type InlineResultLike,
@@ -141,9 +142,8 @@ function extractButtonsFromRows(
       if (!btnText) continue;
 
       const rawData = "data" in button ? (button as { data?: unknown }).data : undefined;
-      const data = bufferToUtf8(rawData);
-
       if (options.markupKind === "inline") {
+        const data = usableCallbackData(bufferToUtf8(rawData));
         buttons.push({
           text: btnText,
           data,
@@ -165,18 +165,36 @@ function extractButtonsFromRows(
 
 /**
  * How to invoke a Findvid button.
- * Movie-card chrome / studios / qualities → callback only (never sendMessage).
- * Sticky reply-keyboard (Подборки/…) → sendMessage of the label.
+ * - Movie-card chrome / studios / qualities (inline + callback data) → GetBotCallbackAnswer only.
+ * - Sticky bot-home reply keyboard (Подборки / Результат поиска / …) → sendMessage OK.
  */
 export type ClickAction =
   | { type: "callback"; data: string; messageId: number; text: string }
   | { type: "reply_text"; text: string }
   | { type: "error"; reason: string; text: string };
 
+function usableCallbackData(data: string | undefined): string | undefined {
+  if (data === undefined) return undefined;
+  const trimmed = data.trim();
+  return trimmed === "" ? undefined : trimmed;
+}
+
 export function resolveClickAction(button: ButtonLike): ClickAction {
-  // Inline / callback path — NEVER degrade to sendMessage.
-  if (button.kind === "inline" || button.data !== undefined) {
-    if (!button.data) {
+  const callbackData = usableCallbackData(button.data);
+
+  // Sticky bot-home reply keyboard: sendMessage is required when there is no callback data.
+  // Live post-#70: «Результат поиска» was kind=inline/data-missing and recovery deadlocked.
+  if (isBotHomeButton(button) && !callbackData) {
+    return { type: "reply_text", text: button.text };
+  }
+
+  if (button.kind === "reply" && !callbackData) {
+    return { type: "reply_text", text: button.text };
+  }
+
+  // Movie-card inline path — NEVER degrade to sendMessage for Озвучка/studios/qualities.
+  if (button.kind === "inline" || callbackData !== undefined) {
+    if (!callbackData) {
       return {
         type: "error",
         text: button.text,
@@ -196,13 +214,12 @@ export function resolveClickAction(button: ButtonLike): ClickAction {
     }
     return {
       type: "callback",
-      data: button.data,
+      data: callbackData,
       messageId: button.messageId,
       text: button.text,
     };
   }
 
-  // True ReplyKeyboardMarkup buttons (bot-home).
   return { type: "reply_text", text: button.text };
 }
 

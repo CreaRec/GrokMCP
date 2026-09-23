@@ -3,7 +3,7 @@ import type { FindvidConfig } from "./config.js";
 import { FindvidService } from "./findvid-service.js";
 import type { ButtonLike } from "./parse.js";
 import type { ChatMessageSnapshot, InlineSearchResponse, TelegramPort } from "./telegram-port.js";
-import { isFinalVideoMessage } from "./telegram-port.js";
+import { isFinalVideoMessage, resolveClickAction } from "./telegram-port.js";
 
 function config(overrides: Partial<FindvidConfig> = {}): FindvidConfig {
   return {
@@ -96,20 +96,13 @@ class FakeTelegram implements TelegramPort {
     return this.afterSend;
   }
   async clickButton(button: ButtonLike): Promise<void> {
-    // Mirror resolveClickAction: inline without data must not become a text send.
-    if (button.kind === "inline" || button.data !== undefined) {
-      if (!button.data) {
-        throw new Error(
-          `Inline button "${button.text}" has no callback data. Refusing to sendMessage.`,
-        );
-      }
-      if (button.messageId === undefined) {
-        throw new Error(
-          `Inline button "${button.text}" missing messageId for GetBotCallbackAnswer.`,
-        );
-      }
-    } else {
-      this.textSends.push(button.text);
+    // Mirror production resolveClickAction rules.
+    const action = resolveClickAction(button);
+    if (action.type === "error") {
+      throw new Error(action.reason);
+    }
+    if (action.type === "reply_text") {
+      this.textSends.push(action.text);
     }
     this.clicks.push(button);
     this.onClick?.(button);
@@ -390,9 +383,10 @@ describe("FindvidService flow", () => {
       { text: "🌪️ Фильтр", kind: "reply" },
       { text: "⚙️ Настройки", kind: "reply" },
       { text: "💝 VIP", kind: "reply" },
-      { text: "🔍 Результат поиска", kind: "reply" },
+      // Live post-#70: recovery key sometimes arrives as inline without callback data.
+      { text: "🔍 Результат поиска", kind: "inline", messageId: 40 },
     ];
-    const homeMsg = msg({ id: 40, text: "Findvid home", buttons: botHome });
+    const homeMsg = msg({ id: 40, text: "Findvid home", buttons: botHome, hasInlineMarkup: false });
     const chromeMsg = msg({
       id: 41,
       text: "Достать ножи (Back Board Cinema [1080p])",
@@ -420,7 +414,7 @@ describe("FindvidService flow", () => {
     expect(searched.best.resultId).toBe("121666");
 
     const voiceovers = await service.listVoiceovers({ resultId: "121666" });
-    expect(telegram.clicks.some((c) => /Результат поиска/i.test(c.text))).toBe(true);
+    expect(telegram.textSends.some((t) => /Результат поиска/i.test(t))).toBe(true);
     expect(telegram.clicks.some((c) => /озвучк/i.test(c.text))).toBe(true);
     const ozv = telegram.clicks.find((c) => /озвучк/i.test(c.text));
     expect(ozv?.data).toBeTruthy();
