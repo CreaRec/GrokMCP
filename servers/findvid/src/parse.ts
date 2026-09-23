@@ -405,6 +405,75 @@ export function looksLikeMovieCardButtons(buttons: ButtonLike[]): boolean {
 }
 
 /**
+ * Title needles used to verify a chat caption belongs to a selected inline result.
+ * Search titles look like «Достать ножи (Knives Out) (2019)»; card captions often
+ * look like «Достать ножи (Back Board Cinema [1080p])».
+ */
+export function filmIdentityNeedles(match: {
+  title?: string;
+  rawTitle?: string;
+}): string[] {
+  const needles = new Set<string>();
+  const raw = (match.rawTitle ?? match.title ?? "").trim();
+  if (!raw && !match.title) return [];
+
+  const add = (value: string | undefined) => {
+    const n = normalizeText(value ?? "");
+    if (n.length >= 3) needles.add(n);
+  };
+
+  // Text before the first parenthesis is usually the primary localized title.
+  const withoutYears = raw.replace(/\(\s*\d{4}\s*\)/g, " ").replace(/\s+/g, " ").trim();
+  const primary = withoutYears.split("(")[0]?.trim() ?? "";
+  add(primary);
+
+  for (const m of raw.matchAll(/\(([^)]+)\)/g)) {
+    const inner = (m[1] ?? "").trim();
+    if (!inner) continue;
+    if (/^\d{4}$/.test(inner)) continue;
+    // Caption studio/quality tails like «OnisFilms [1080p]» are not film identity.
+    if (/\[[^\]]*\]/.test(inner)) continue;
+    if (/^\d{3,4}\s*p$/i.test(inner)) continue;
+    add(inner);
+  }
+
+  if (match.title) {
+    add(match.title.replace(/\(\s*\d{4}\s*\)/g, " ").replace(/\s+/g, " ").trim());
+  }
+
+  return [...needles];
+}
+
+/**
+ * True when a chat message caption/filename belongs to the selected search result.
+ * Prevents reusing another film’s chrome/озвучки keyboard from recent history.
+ */
+export function messageMatchesSelectedFilm(
+  message: { text?: string; fileName?: string },
+  match: { title?: string; rawTitle?: string },
+): boolean {
+  const hay = normalizeText(`${message.text ?? ""} ${message.fileName ?? ""}`);
+  if (!hay) return false;
+
+  const needles = filmIdentityNeedles(match);
+  if (needles.length === 0) return false;
+
+  for (const needle of needles) {
+    if (hay.includes(needle)) return true;
+  }
+
+  // Multi-word primary title: require most significant tokens (handles minor caption edits).
+  const primary = needles[0] ?? "";
+  const tokens = primary.split(" ").filter((t) => t.length > 2);
+  if (tokens.length >= 2) {
+    const hits = tokens.filter((t) => hay.includes(t)).length;
+    if (hits >= Math.ceil(tokens.length * 0.75)) return true;
+  }
+
+  return false;
+}
+
+/**
  * Keyboard is only navigation (Вернуться / Скрыть / Назад) with no content choices.
  * Live post-Озвучка failure: chrome collapses to these two instead of studios.
  */

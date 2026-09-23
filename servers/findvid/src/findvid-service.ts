@@ -15,6 +15,7 @@ import {
   looksLikeNavOnlyKeyboard,
   looksLikeQualityButtons,
   looksLikeVoiceoverButtons,
+  messageMatchesSelectedFilm,
   pickQualityButton,
   pickVoiceoverButton,
   rankInlineResults,
@@ -149,33 +150,29 @@ export class FindvidService {
 
     this.telegram.resetFloodStats();
 
-    // Nikita: once the movie card is on screen, ANY sendMessage / SendInlineBotResult
-    // collapses the keyboard to «Вернуться/Скрыть». Prefer the existing card and
-    // only click inline callbacks — never send text to "recover".
-    let reply = await this.findExistingMovieCardMessage();
-    if (!reply) {
-      const collapsed = await this.findCollapsedMovieCardMessage();
-      if (collapsed) {
-        throw new FindvidError(
-          "Findvid movie card is on screen but its keyboard collapsed to navigation only " +
-            "(Вернуться/Скрыть). Refusing to sendMessage/SendInlineBotResult — that makes it worse. " +
-            "Click existing inline buttons only, or start a fresh search. " +
-            formatKeyboardDebug(collapsed.buttons, { messageId: collapsed.id }),
-        );
-      }
+    const selectedMatch = this.resolveSelectedMatch(resultId);
+    this.state.selectedResultId = resultId;
 
+    // Nikita: once the *correct* movie card is on screen, never sendMessage /
+    // SendInlineBotResult — only click inline callbacks. Wrong-film cards and
+    // collapsed Вернуться/Скрыть keyboards must not be reused; bootstrap this resultId.
+    let reply = await this.findExistingMovieCardMessage(selectedMatch);
+    if (!reply) {
       const sent = await this.telegram.sendInlineResult({
         botUsername: this.config.findvidInlineBotUsername,
         queryId: this.state.queryId,
         resultId,
       });
 
+      // Trust the message returned for this resultId; title-match only gates
+      // *reuse* of preexisting history cards (wrong-film steal).
       reply =
-        sent && looksLikeMovieCardButtons(sent.buttons)
+        sent && this.hasMovieCardChrome(sent)
           ? sent
           : await this.waitForMovieCardMessage({
               afterMessageId: Math.max(0, (sent?.id ?? this.state.lastBotMessageId ?? 0) - 1),
               resultId,
+              match: selectedMatch,
               allowResend: true,
             });
     }
@@ -482,53 +479,63 @@ export class FindvidService {
     };
   }
 
+  /** Resolve RankedMatch metadata for a resultId (best or alternatives). */
+  private resolveSelectedMatch(resultId?: string): RankedMatch | undefined {
+    const id = resultId ?? this.state.selectedResultId;
+    if (!id) return this.state.best;
+    if (this.state.best?.resultId === id) return this.state.best;
+    return this.state.alternatives?.find((a) => a.resultId === id);
+  }
+
+  private hasMovieCardChrome(msg: ChatMessageSnapshot): boolean {
+    if (!looksLikeMovieCardButtons(msg.buttons)) return false;
+    if (looksLikeNavOnlyKeyboard(msg.buttons)) return false;
+    return (
+      msg.hasInlineMarkup ||
+      looksLikeChromeMenu(msg.buttons) ||
+      looksLikeVoiceoverButtons(msg.buttons) ||
+      looksLikeQualityButtons(msg.buttons)
+    );
+  }
+
+  private isUsableMovieCardMessage(
+    msg: ChatMessageSnapshot,
+    match?: RankedMatch,
+  ): boolean {
+    if (!this.hasMovieCardChrome(msg)) return false;
+    // Without title metadata we cannot safely reuse a preexisting card.
+    if (!match) return false;
+    return messageMatchesSelectedFilm(msg, match);
+  }
+
   /**
-   * Prefer an already-visible movie card (chrome / озвучки / qualities).
-   * When present, callers must not sendMessage or SendInlineBotResult.
+   * Prefer an already-visible movie card for the *selected* film
+   * (chrome / озвучки / qualities). Wrong-film cards and nav-only collapsed
+   * keyboards are ignored so callers may SendInlineBotResult for this resultId.
+   * When a matching card is present, callers must not sendMessage / SendInlineBotResult.
    */
-  private async findExistingMovieCardMessage(): Promise<ChatMessageSnapshot | null> {
+  private async findExistingMovieCardMessage(
+    match?: RankedMatch,
+  ): Promise<ChatMessageSnapshot | null> {
     const recent = await this.telegram.getRecentMessages(15);
     for (let i = recent.length - 1; i >= 0; i -= 1) {
       const msg = recent[i];
-      if (!looksLikeMovieCardButtons(msg.buttons)) continue;
-      if (
-        msg.hasInlineMarkup ||
-        looksLikeChromeMenu(msg.buttons) ||
-        looksLikeVoiceoverButtons(msg.buttons) ||
-        looksLikeQualityButtons(msg.buttons)
-      ) {
-        return msg;
-      }
+      if (this.isUsableMovieCardMessage(msg, match)) return msg;
     }
     return null;
   }
 
   /**
-   * Film/card media still in chat but keyboard collapsed to Вернуться/Скрыть
-   * (typical after any post-card text send). Do not send to "fix".
-   */
-  private async findCollapsedMovieCardMessage(): Promise<ChatMessageSnapshot | null> {
-    const recent = await this.telegram.getRecentMessages(15);
-    for (let i = recent.length - 1; i >= 0; i -= 1) {
-      const msg = recent[i];
-      if (!looksLikeNavOnlyKeyboard(msg.buttons)) continue;
-      if (msg.hasVideo || msg.hasDocument || Boolean(msg.fileName) || Boolean(msg.text?.trim())) {
-        return msg;
-      }
-    }
-    return null;
-  }
-
-  /**
-   * Wait for movie-card chrome (Озвучка/Качество) or nested voiceover/quality lists.
-   * Ignores the sticky bot-home reply keyboard (Подборки/Фильтр/…).
-   * Recovery: click «Результат поиска» only when no movie card exists yet, then
-   * optionally re-send the inline result once. Never send after a card is visible.
+   * Wait for movie-card chrome (Озвучка/Качество) or nested voiceover/quality lists
+   * that belong to the selected film. Ignores sticky bot-home and other films’ cards.
+   * Recovery: click «Результат поиска» only when no matching card exists yet, then
+   * optionally re-send the inline result once. Never send after a matching card is visible.
    * Flood-aware: does not burn waitTimeout during FLOOD_WAIT backoff on GetHistory.
    */
   private async waitForMovieCardMessage(options: {
     afterMessageId: number;
     resultId: string;
+    match?: RankedMatch;
     allowResend: boolean;
   }): Promise<ChatMessageSnapshot> {
     let deadline = Date.now() + this.config.waitTimeoutMs;
@@ -536,6 +543,14 @@ export class FindvidService {
     let afterId = options.afterMessageId;
     let triedRecoveryClick = false;
     let triedResend = false;
+    const match = options.match ?? this.resolveSelectedMatch(options.resultId);
+
+    const acceptsCard = (msg: ChatMessageSnapshot, requireAfterId: boolean): boolean => {
+      if (requireAfterId && msg.id < afterId) return false;
+      if (match) return this.isUsableMovieCardMessage(msg, match);
+      // No title metadata for this resultId: only accept chrome that arrived after our send.
+      return msg.id >= afterId && this.hasMovieCardChrome(msg);
+    };
 
     while (Date.now() < deadline) {
       const recent = await this.telegram.getRecentMessages(15);
@@ -543,47 +558,27 @@ export class FindvidService {
 
       for (let i = recent.length - 1; i >= 0; i -= 1) {
         const msg = recent[i];
-        if (msg.id < afterId) continue;
-        if (looksLikeMovieCardButtons(msg.buttons)) {
-          // Prefer messages that actually carry ReplyInlineMarkup (movie card).
-          if (msg.hasInlineMarkup || looksLikeChromeMenu(msg.buttons) || looksLikeVoiceoverButtons(msg.buttons) || looksLikeQualityButtons(msg.buttons)) {
-            this.state.lastBotMessageId = msg.id;
-            return msg;
-          }
+        if (acceptsCard(msg, true)) {
+          this.state.lastBotMessageId = msg.id;
+          return msg;
         }
       }
 
-      // Any movie card in recent history (even older than afterId) blocks sends —
-      // post-card sendMessage collapses chrome into Вернуться/Скрыть.
-      const cardAnywhere = recent
-        .slice()
-        .reverse()
-        .find(
-          (m) =>
-            looksLikeMovieCardButtons(m.buttons) &&
-            (m.hasInlineMarkup ||
-              looksLikeChromeMenu(m.buttons) ||
-              looksLikeVoiceoverButtons(m.buttons) ||
-              looksLikeQualityButtons(m.buttons)),
-        );
-      if (cardAnywhere) {
-        this.state.lastBotMessageId = cardAnywhere.id;
-        return cardAnywhere;
+      // Matching card anywhere in recent history (even older than afterId) is enough —
+      // do not SendInlineBotResult again for that film. Without match metadata, skip
+      // this path so we do not steal a neighbor card that predates the send.
+      if (match) {
+        const cardAnywhere = [...recent]
+          .reverse()
+          .find((m) => this.isUsableMovieCardMessage(m, match));
+        if (cardAnywhere) {
+          this.state.lastBotMessageId = cardAnywhere.id;
+          return cardAnywhere;
+        }
       }
 
-      const collapsedAnywhere = recent
-        .slice()
-        .reverse()
-        .find((m) => looksLikeNavOnlyKeyboard(m.buttons));
-      if (collapsedAnywhere) {
-        throw new FindvidError(
-          "Findvid movie card keyboard collapsed to navigation only (Вернуться/Скрыть) " +
-            "while waiting for chrome. Refusing sendMessage recovery. " +
-            formatKeyboardDebug(collapsedAnywhere.buttons, {
-              messageId: collapsedAnywhere.id,
-            }),
-        );
-      }
+      // Collapsed Вернуться/Скрыть (own film or neighbor) is not usable and must not
+      // block waiting / resend for this resultId.
 
       const latestWithButtons = [...recent].reverse().find((m) => m.buttons.length > 0);
       if (
@@ -609,8 +604,8 @@ export class FindvidService {
         this.state.queryId &&
         elapsed >= Math.floor(this.config.waitTimeoutMs / 3)
       ) {
-        // Re-check: never SendInlineBotResult if a card appeared mid-wait.
-        const cardNow = await this.findExistingMovieCardMessage();
+        // Re-check: never SendInlineBotResult if a *matching* card appeared mid-wait.
+        const cardNow = await this.findExistingMovieCardMessage(match);
         if (cardNow) {
           this.state.lastBotMessageId = cardNow.id;
           return cardNow;
@@ -621,7 +616,11 @@ export class FindvidService {
           queryId: this.state.queryId,
           resultId: options.resultId,
         });
-        if (resent && looksLikeMovieCardButtons(resent.buttons)) {
+        if (
+          resent &&
+          this.hasMovieCardChrome(resent) &&
+          (!match || messageMatchesSelectedFilm(resent, match))
+        ) {
           this.state.lastBotMessageId = resent.id;
           return resent;
         }
@@ -632,9 +631,11 @@ export class FindvidService {
     }
 
     const flood = formatFloodStats(this.telegram.getFloodStats());
+    const titleHint = match?.rawTitle || match?.title || options.resultId;
     throw new FindvidError(
-      "Timed out waiting for Findvid movie card (Озвучка/Качество or озвучки list). " +
-        "Saw only the sticky bot-home reply keyboard (Подборки/Фильтр/…) or no buttons. " +
+      `Timed out waiting for Findvid movie card for "${titleHint}" ` +
+        "(Озвучка/Качество or озвучки list). Other films’ cards and collapsed " +
+        "Вернуться/Скрыть keyboards are ignored — re-select the match or search again. " +
         `${flood}. VIP/rate-limits or UI changes may block automation.`,
     );
   }
@@ -887,10 +888,35 @@ export class FindvidService {
 
   private async latestButtons(): Promise<ButtonLike[]> {
     const recent = await this.telegram.getRecentMessages(15);
+
+    // Prefer the message we already selected for this film (avoid neighbor cards).
+    if (this.state.lastBotMessageId) {
+      const pinned = recent.find((m) => m.id === this.state.lastBotMessageId);
+      if (
+        pinned &&
+        pinned.buttons.length > 0 &&
+        !looksLikeBotHomeKeyboard(pinned.buttons) &&
+        !looksLikeNavOnlyKeyboard(pinned.buttons)
+      ) {
+        return pinned.buttons;
+      }
+    }
+
+    const match = this.resolveSelectedMatch();
+    if (match) {
+      for (let i = recent.length - 1; i >= 0; i -= 1) {
+        const msg = recent[i];
+        if (!this.isUsableMovieCardMessage(msg, match)) continue;
+        this.state.lastBotMessageId = msg.id;
+        return msg.buttons;
+      }
+    }
+
     for (let i = recent.length - 1; i >= 0; i -= 1) {
       const msg = recent[i];
       if (msg.buttons.length === 0) continue;
       if (looksLikeBotHomeKeyboard(msg.buttons)) continue;
+      if (looksLikeNavOnlyKeyboard(msg.buttons)) continue;
       this.state.lastBotMessageId = msg.id;
       return msg.buttons;
     }
