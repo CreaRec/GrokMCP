@@ -33,11 +33,19 @@ export interface RankedMatch extends ParsedMovieMeta {
 
 export interface ButtonLike {
   text: string;
-  /** Present for inline callback buttons (KeyboardButtonCallback.data). */
-  data?: string;
+  /**
+   * Opaque KeyboardButtonCallback.data bytes.
+   * Must not be UTF-8 round-tripped (Telegram payloads are often non-text).
+   */
+  dataBytes?: Buffer;
   kind: "reply" | "inline";
   /** Host message id for GetBotCallbackAnswer (inline only). */
   messageId?: number;
+}
+
+/** True when the button carries a non-empty callback payload. */
+export function hasCallbackData(button: ButtonLike): boolean {
+  return Buffer.isBuffer(button.dataBytes) && button.dataBytes.length > 0;
 }
 
 const YEAR_RE = /\((\d{4})\)/;
@@ -239,20 +247,17 @@ export function extractButtonsFromMarkup(
           : "";
       if (!text) continue;
 
-      const data =
-        typeof (cell as { data?: unknown }).data === "string"
-          ? (cell as { data: string }).data
-          : typeof (cell as { callbackData?: unknown }).callbackData === "string"
-            ? (cell as { callbackData: string }).callbackData
-            : Buffer.isBuffer((cell as { data?: unknown }).data)
-              ? (cell as { data: Buffer }).data.toString("utf8")
-              : undefined;
+      const rawData =
+        (cell as { data?: unknown }).data !== undefined
+          ? (cell as { data?: unknown }).data
+          : (cell as { callbackData?: unknown }).callbackData;
+      const dataBytes = copyCallbackBytes(rawData);
 
       const inferredKind: ButtonLike["kind"] =
-        options.markupKind ?? (data !== undefined ? "inline" : "reply");
+        options.markupKind ?? (dataBytes ? "inline" : "reply");
       buttons.push({
         text,
-        data,
+        dataBytes,
         kind: inferredKind,
         messageId: options.messageId,
       });
@@ -260,6 +265,34 @@ export function extractButtonsFromMarkup(
   }
 
   return buttons;
+}
+
+/** Copy opaque callback bytes without UTF-8 encode/decode. */
+export function copyCallbackBytes(data: unknown): Buffer | undefined {
+  if (data === undefined || data === null) return undefined;
+  if (typeof data === "string") {
+    // Fixtures / JSON only — live GramJS data is bytes.
+    if (data.length === 0) return undefined;
+    return Buffer.from(data, "utf8");
+  }
+  if (Buffer.isBuffer(data)) {
+    return data.length === 0 ? undefined : Buffer.from(data);
+  }
+  if (data instanceof Uint8Array) {
+    return data.length === 0 ? undefined : Buffer.from(data);
+  }
+  if (data && typeof data === "object") {
+    const maybe = data as { buffer?: ArrayBuffer };
+    if (maybe.buffer instanceof ArrayBuffer) {
+      const buf = Buffer.from(new Uint8Array(maybe.buffer));
+      return buf.length === 0 ? undefined : buf;
+    }
+    if (Array.isArray(data)) {
+      const buf = Buffer.from(data as number[]);
+      return buf.length === 0 ? undefined : buf;
+    }
+  }
+  return undefined;
 }
 
 /** Compact keyboard dump for FindvidError messages (live debug). */
@@ -270,7 +303,9 @@ export function formatKeyboardDebug(
   const idPart = options.messageId !== undefined ? `msg#${options.messageId} ` : "";
   if (buttons.length === 0) return `${idPart}buttons=[]`;
   const parts = buttons.map((b) => {
-    const dataFlag = b.data !== undefined && b.data !== "" ? "data=yes" : "data=no";
+    const dataFlag = hasCallbackData(b)
+      ? `data=${b.dataBytes!.length}b`
+      : "data=no";
     return `"${b.text}"(${b.kind},${dataFlag})`;
   });
   return `${idPart}buttons=[${parts.join(", ")}]`;
