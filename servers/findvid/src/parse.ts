@@ -33,9 +33,11 @@ export interface RankedMatch extends ParsedMovieMeta {
 
 export interface ButtonLike {
   text: string;
-  /** Present for inline callback buttons. */
+  /** Present for inline callback buttons (KeyboardButtonCallback.data). */
   data?: string;
   kind: "reply" | "inline";
+  /** Host message id for GetBotCallbackAnswer (inline only). */
+  messageId?: number;
 }
 
 const YEAR_RE = /\((\d{4})\)/;
@@ -204,7 +206,10 @@ export function rankInlineResults(
   return { best, alternatives };
 }
 
-export function extractButtonsFromMarkup(markup: unknown): ButtonLike[] {
+export function extractButtonsFromMarkup(
+  markup: unknown,
+  options: { messageId?: number; markupKind?: "inline" | "reply" } = {},
+): ButtonLike[] {
   if (!markup || typeof markup !== "object") return [];
 
   const buttons: ButtonLike[] = [];
@@ -243,12 +248,32 @@ export function extractButtonsFromMarkup(markup: unknown): ButtonLike[] {
               ? (cell as { data: Buffer }).data.toString("utf8")
               : undefined;
 
-      const kind: ButtonLike["kind"] = data !== undefined ? "inline" : "reply";
-      buttons.push({ text, data, kind });
+      const inferredKind: ButtonLike["kind"] =
+        options.markupKind ?? (data !== undefined ? "inline" : "reply");
+      buttons.push({
+        text,
+        data,
+        kind: inferredKind,
+        messageId: options.messageId,
+      });
     }
   }
 
   return buttons;
+}
+
+/** Compact keyboard dump for FindvidError messages (live debug). */
+export function formatKeyboardDebug(
+  buttons: ButtonLike[],
+  options: { messageId?: number } = {},
+): string {
+  const idPart = options.messageId !== undefined ? `msg#${options.messageId} ` : "";
+  if (buttons.length === 0) return `${idPart}buttons=[]`;
+  const parts = buttons.map((b) => {
+    const dataFlag = b.data !== undefined && b.data !== "" ? "data=yes" : "data=no";
+    return `"${b.text}"(${b.kind},${dataFlag})`;
+  });
+  return `${idPart}buttons=[${parts.join(", ")}]`;
 }
 
 /** Strip leading selection / status emoji so labels normalize cleanly. */

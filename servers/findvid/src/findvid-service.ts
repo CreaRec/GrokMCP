@@ -5,6 +5,7 @@ import {
   findSearchResultRecoveryButton,
   findVoiceoverMenuButton,
   formatBytes,
+  formatKeyboardDebug,
   listChoiceButtons,
   looksLikeBotHomeKeyboard,
   looksLikeChromeMenu,
@@ -181,14 +182,15 @@ export class FindvidService {
     if (looksLikeChromeMenu(reply.buttons) || looksLikeBotHomeKeyboard(reply.buttons)) {
       throw new FindvidError(
         "Findvid did not show a voiceover list after selecting the match. " +
-          "Still on chrome/bot-home keyboard — VIP/UI changes may have renamed Озвучка.",
+          "Still on chrome/bot-home keyboard — VIP/UI changes may have renamed Озвучка. " +
+          formatKeyboardDebug(reply.buttons, { messageId: reply.id }),
       );
     }
 
     if (!looksLikeVoiceoverButtons(reply.buttons)) {
       throw new FindvidError(
         "Findvid buttons after match select are neither voiceovers nor qualities. " +
-          "Got unexpected keyboard (possibly sticky reply keyboard). Retry search or check VIP UI.",
+          formatKeyboardDebug(reply.buttons, { messageId: reply.id }),
       );
     }
 
@@ -476,8 +478,11 @@ export class FindvidService {
         const msg = recent[i];
         if (msg.id < afterId) continue;
         if (looksLikeMovieCardButtons(msg.buttons)) {
-          this.state.lastBotMessageId = msg.id;
-          return msg;
+          // Prefer messages that actually carry ReplyInlineMarkup (movie card).
+          if (msg.hasInlineMarkup || looksLikeChromeMenu(msg.buttons) || looksLikeVoiceoverButtons(msg.buttons) || looksLikeQualityButtons(msg.buttons)) {
+            this.state.lastBotMessageId = msg.id;
+            return msg;
+          }
         }
       }
 
@@ -537,14 +542,25 @@ export class FindvidService {
       which === "voiceover"
         ? findVoiceoverMenuButton(reply.buttons)
         : findQualityMenuButton(reply.buttons);
+    // Ensure callback metadata is present (never sendMessage Озвучка as chat text).
+    if (menuButton && (menuButton.kind !== "inline" || !menuButton.data || menuButton.messageId === undefined)) {
+      throw new FindvidError(
+        `Cannot click ${which === "voiceover" ? "Озвучка" : "Качество"}: missing inline callback data. ` +
+          formatKeyboardDebug(reply.buttons, { messageId: reply.id }),
+      );
+    }
     return this.clickAndWaitForButtons(
       menuButton,
       which === "voiceover" ? "Озвучка chrome menu" : "Качество chrome menu",
+      {
+        requireVoiceoverOrQuality: which === "voiceover",
+        requireQuality: which === "quality",
+      },
     );
   }
 
   private buttonFingerprint(buttons: ButtonLike[]): string {
-    return buttons.map((b) => b.text).join("\n");
+    return buttons.map((b) => `${b.kind}:${b.data ? "d" : "-"}:${b.text}`).join("\n");
   }
 
   /**
@@ -554,7 +570,11 @@ export class FindvidService {
   private async clickAndWaitForButtons(
     button: ButtonLike | null,
     label: string,
-    options: { acceptVideo?: boolean } = {},
+    options: {
+      acceptVideo?: boolean;
+      requireVoiceoverOrQuality?: boolean;
+      requireQuality?: boolean;
+    } = {},
   ): Promise<ChatMessageSnapshot> {
     if (!button) {
       throw new FindvidError(`Could not find ${label} button on Findvid message`);
@@ -562,12 +582,20 @@ export class FindvidService {
     // Prefer the message we just received when lastBotMessageId is not set yet.
     const recentBefore = await this.telegram.getRecentMessages(8);
     const host =
+      recentBefore.find((m) => m.id === (button.messageId ?? this.state.lastBotMessageId)) ??
       recentBefore.find((m) => m.id === this.state.lastBotMessageId) ??
-      [...recentBefore].reverse().find((m) => m.buttons.some((b) => b.text === button.text)) ??
+      [...recentBefore].reverse().find((m) => m.buttons.some((b) => b.data === button.data || b.text === button.text)) ??
       recentBefore[recentBefore.length - 1];
-    const beforeId = host?.id ?? this.state.lastBotMessageId ?? 0;
+    const beforeId = button.messageId ?? host?.id ?? this.state.lastBotMessageId ?? 0;
     const beforeFingerprint = this.buttonFingerprint(host?.buttons ?? []);
-    await this.telegram.clickButton(button);
+
+    // Stamp messageId so clickButton can GetBotCallbackAnswer without sendMessage fallback.
+    const clickTarget: ButtonLike = {
+      ...button,
+      messageId: button.messageId ?? beforeId,
+      kind: button.data !== undefined ? "inline" : button.kind,
+    };
+    await this.telegram.clickButton(clickTarget);
 
     const deadline = Date.now() + this.config.waitTimeoutMs;
     while (Date.now() < deadline) {
@@ -583,24 +611,36 @@ export class FindvidService {
         if (msg.buttons.length === 0) continue;
         // Ignore sticky bot-home keyboard updates.
         if (looksLikeBotHomeKeyboard(msg.buttons)) continue;
-        if (msg.id > beforeId) {
-          this.state.lastBotMessageId = msg.id;
-          return msg;
-        }
-        if (msg.id === beforeId) {
-          const nextFingerprint = this.buttonFingerprint(msg.buttons);
-          if (nextFingerprint && nextFingerprint !== beforeFingerprint) {
-            this.state.lastBotMessageId = msg.id;
-            return msg;
+
+        const changed =
+          msg.id > beforeId ||
+          (msg.id === beforeId && this.buttonFingerprint(msg.buttons) !== beforeFingerprint);
+        if (!changed) continue;
+
+        if (options.requireQuality) {
+          if (!looksLikeQualityButtons(msg.buttons)) continue;
+        } else if (options.requireVoiceoverOrQuality) {
+          if (
+            !looksLikeVoiceoverButtons(msg.buttons) &&
+            !looksLikeQualityButtons(msg.buttons)
+          ) {
+            continue;
           }
         }
+
+        this.state.lastBotMessageId = msg.id;
+        return msg;
       }
       await sleep(this.config.pollIntervalMs);
     }
 
+    const latest = (await this.telegram.getRecentMessages(8)).find((m) => m.id >= beforeId);
     throw new FindvidError(
       `Timed out waiting for Findvid keyboard update after clicking ${label}. ` +
-        "VIP/rate-limits or UI changes may block automation.",
+        (latest
+          ? formatKeyboardDebug(latest.buttons, { messageId: latest.id })
+          : `no message after msg#${beforeId}`) +
+        ". VIP/rate-limits or UI changes may block automation.",
     );
   }
 

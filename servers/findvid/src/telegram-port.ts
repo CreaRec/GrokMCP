@@ -15,7 +15,14 @@ export interface ChatMessageSnapshot {
   id: number;
   date: number;
   text: string;
+  /**
+   * Buttons used for movie-card automation.
+   * Prefer ReplyInlineMarkup (Озвучка / studios / Nx p). ReplyKeyboardMarkup
+   * (Подборки/…) is only used when no inline markup is present on the message.
+   */
   buttons: ButtonLike[];
+  /** True when `buttons` came from ReplyInlineMarkup. */
+  hasInlineMarkup: boolean;
   hasVideo: boolean;
   hasDocument: boolean;
   fileName?: string;
@@ -55,10 +62,21 @@ function className(value: unknown): string {
   return String(ctor);
 }
 
-function bufferToUtf8(data: unknown): string | undefined {
+/** Decode GramJS callback `bytes` (Buffer, Uint8Array, or string). */
+export function bufferToUtf8(data: unknown): string | undefined {
   if (typeof data === "string") return data;
   if (Buffer.isBuffer(data)) return data.toString("utf8");
   if (data instanceof Uint8Array) return Buffer.from(data).toString("utf8");
+  // Some GramJS builds expose bytes as { buffer: ArrayBuffer } / number[].
+  if (data && typeof data === "object") {
+    const maybe = data as { buffer?: ArrayBuffer };
+    if (maybe.buffer instanceof ArrayBuffer) {
+      return Buffer.from(new Uint8Array(maybe.buffer)).toString("utf8");
+    }
+    if (Array.isArray(data)) {
+      return Buffer.from(data as number[]).toString("utf8");
+    }
+  }
   return undefined;
 }
 
@@ -93,29 +111,132 @@ function mapInlineResult(result: Api.TypeBotInlineResult): InlineResultLike {
   };
 }
 
-export function snapshotFromGramJsMessage(message: Api.Message): ChatMessageSnapshot {
-  const text = message.message ?? "";
-  const buttons: ButtonLike[] = [];
+function isInlineMarkup(markup: unknown): boolean {
+  const name = className(markup);
+  return name.includes("ReplyInlineMarkup") || name.includes("InlineKeyboard");
+}
 
-  const replyMarkup = message.replyMarkup;
-  if (replyMarkup && "rows" in replyMarkup) {
-    for (const row of (replyMarkup as Api.ReplyInlineMarkup | Api.ReplyKeyboardMarkup).rows ?? []) {
-      for (const button of row.buttons ?? []) {
-        const btnText = "text" in button && typeof button.text === "string" ? button.text.trim() : "";
-        if (!btnText) continue;
-        const data =
-          "data" in button ? bufferToUtf8((button as { data?: unknown }).data) : undefined;
+function isReplyKeyboardMarkup(markup: unknown): boolean {
+  const name = className(markup);
+  return name.includes("ReplyKeyboardMarkup") && !name.includes("Inline");
+}
+
+function extractButtonsFromRows(
+  rows: unknown[] | undefined,
+  options: { messageId: number; markupKind: "inline" | "reply" },
+): ButtonLike[] {
+  const buttons: ButtonLike[] = [];
+  for (const row of rows ?? []) {
+    const cells = row && typeof row === "object" && "buttons" in row
+      ? ((row as { buttons?: unknown[] }).buttons ?? [])
+      : Array.isArray(row)
+        ? row
+        : [];
+    for (const button of cells) {
+      if (!button || typeof button !== "object") continue;
+      const btnText =
+        "text" in button && typeof (button as { text?: unknown }).text === "string"
+          ? (button as { text: string }).text.trim()
+          : "";
+      if (!btnText) continue;
+
+      const rawData = "data" in button ? (button as { data?: unknown }).data : undefined;
+      const data = bufferToUtf8(rawData);
+
+      if (options.markupKind === "inline") {
         buttons.push({
           text: btnText,
           data,
-          kind: data !== undefined ? "inline" : "reply",
+          kind: "inline",
+          messageId: options.messageId,
+        });
+      } else {
+        buttons.push({
+          text: btnText,
+          data: undefined,
+          kind: "reply",
+          messageId: options.messageId,
         });
       }
     }
   }
+  return buttons;
+}
 
-  if (buttons.length === 0) {
-    buttons.push(...extractButtonsFromMarkup(replyMarkup));
+/**
+ * How to invoke a Findvid button.
+ * Movie-card chrome / studios / qualities → callback only (never sendMessage).
+ * Sticky reply-keyboard (Подборки/…) → sendMessage of the label.
+ */
+export type ClickAction =
+  | { type: "callback"; data: string; messageId: number; text: string }
+  | { type: "reply_text"; text: string }
+  | { type: "error"; reason: string; text: string };
+
+export function resolveClickAction(button: ButtonLike): ClickAction {
+  // Inline / callback path — NEVER degrade to sendMessage.
+  if (button.kind === "inline" || button.data !== undefined) {
+    if (!button.data) {
+      return {
+        type: "error",
+        text: button.text,
+        reason:
+          `Inline button "${button.text}" has no callback data. ` +
+          "Refusing to sendMessage the label (Озвучка/studios must be GetBotCallbackAnswer).",
+      };
+    }
+    if (button.messageId === undefined) {
+      return {
+        type: "error",
+        text: button.text,
+        reason:
+          `Inline button "${button.text}" has callback data but no host messageId. ` +
+          "Cannot invoke GetBotCallbackAnswer.",
+      };
+    }
+    return {
+      type: "callback",
+      data: button.data,
+      messageId: button.messageId,
+      text: button.text,
+    };
+  }
+
+  // True ReplyKeyboardMarkup buttons (bot-home).
+  return { type: "reply_text", text: button.text };
+}
+
+export function snapshotFromGramJsMessage(message: Api.Message): ChatMessageSnapshot {
+  const text = message.message ?? "";
+  const messageId = message.id;
+  const replyMarkup = message.replyMarkup;
+
+  let buttons: ButtonLike[] = [];
+  let hasInlineMarkup = false;
+
+  if (replyMarkup && "rows" in replyMarkup) {
+    const rows = (replyMarkup as { rows?: unknown[] }).rows;
+    if (isInlineMarkup(replyMarkup)) {
+      hasInlineMarkup = true;
+      buttons = extractButtonsFromRows(rows, { messageId, markupKind: "inline" });
+    } else if (isReplyKeyboardMarkup(replyMarkup)) {
+      // Sticky bot-home keyboard only — never treat as movie-card inline.
+      buttons = extractButtonsFromRows(rows, { messageId, markupKind: "reply" });
+    } else {
+      // Unknown markup: extract with data when present, prefer inline if any callback data.
+      const extracted = extractButtonsFromMarkup(replyMarkup, { messageId });
+      const anyData = extracted.some((b) => b.data);
+      hasInlineMarkup = anyData;
+      buttons = extracted.map((b) => ({
+        ...b,
+        kind: b.data !== undefined ? "inline" : b.kind,
+        messageId,
+      }));
+    }
+  }
+
+  if (buttons.length === 0 && replyMarkup) {
+    buttons = extractButtonsFromMarkup(replyMarkup, { messageId });
   }
 
   const media = message.media;
@@ -146,10 +267,11 @@ export function snapshotFromGramJsMessage(message: Api.Message): ChatMessageSnap
   }
 
   return {
-    id: message.id,
+    id: messageId,
     date: message.date,
     text,
     buttons,
+    hasInlineMarkup,
     hasVideo,
     hasDocument,
     fileName,
@@ -279,22 +401,22 @@ export class GramJsTelegramPort implements TelegramPort {
     }
   }
 
+  /**
+   * Click a button. Movie-card inline buttons (Озвучка / studios / quality) use
+   * GetBotCallbackAnswer only — never sendMessage of the label.
+   * Sticky reply-keyboard bot-home may sendMessage the label.
+   */
   async clickButton(button: ButtonLike): Promise<void> {
     const client = this.requireClient();
     const peer = this.requireFindvidPeer();
+    const action = resolveClickAction(button);
 
-    if (button.kind === "reply" || !button.data) {
-      await client.sendMessage(peer, { message: button.text });
-      return;
+    if (action.type === "error") {
+      throw new TelegramError(action.reason);
     }
 
-    const recent = await this.getRecentMessages(8);
-    const host = recent.find((m) =>
-      m.buttons.some((b) => b.data === button.data || b.text === button.text),
-    );
-    if (!host) {
-      // Fall back to sending the visible label as text (works for many reply-style UIs).
-      await client.sendMessage(peer, { message: button.text });
+    if (action.type === "reply_text") {
+      await client.sendMessage(peer, { message: action.text });
       return;
     }
 
@@ -302,17 +424,20 @@ export class GramJsTelegramPort implements TelegramPort {
       await client.invoke(
         new Api.messages.GetBotCallbackAnswer({
           peer,
-          msgId: host.id,
-          data: Buffer.from(button.data, "utf8"),
+          msgId: action.messageId,
+          data: Buffer.from(action.data, "utf8"),
         }),
       );
     } catch (err) {
-      // Some bots return "success" as an exception-like RPC; still try text fallback.
+      // GramJS often surfaces a successful answer as an RPC "error" with success text.
       const message = err instanceof Error ? err.message : String(err);
       if (/success|QUERY_ID_INVALID/i.test(message)) {
         return;
       }
-      await client.sendMessage(peer, { message: button.text });
+      // Do NOT fall back to sendMessage for inline callbacks (Озвучка must be a real click).
+      throw new TelegramError(
+        `GetBotCallbackAnswer failed for "${action.text}" on msg#${action.messageId}: ${message}`,
+      );
     }
   }
 

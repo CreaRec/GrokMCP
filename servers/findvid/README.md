@@ -16,6 +16,8 @@ Findvid’s movie card uses a **two-level menu**:
 
 Do **not** confuse the sticky bot-home **reply keyboard** (`Подборки`, `Фильтр`, `Настройки`, `VIP`, `Результат поиска`) with озвучки — those are ignored and recovered from when selecting a match.
 
+**Critical:** `Озвучка` / `Качество` / studio / quality picks are **inline callback clicks** (`GetBotCallbackAnswer`). The MCP must never send those labels as chat text messages.
+
 Preferred agent flow:
 
 1. `search` `{ query }` — inline search. Returns **best match** + short alternatives. Show this to the user.
