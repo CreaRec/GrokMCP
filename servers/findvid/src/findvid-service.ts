@@ -126,9 +126,10 @@ export class FindvidService {
       queryId,
       note:
         "Show best match to the user. Preferred agent flow: list_voiceovers (real озвучки) → " +
-        "user picks → list_qualities → user picks → confirm_and_forward. " +
+        "user picks voiceover only → list_qualities → agent auto-picks max quality " +
+        "(1080p/…) → confirm_and_forward immediately (no second user OK). " +
+        "After voiceover, qualities arrive on a NEW message — not the film file yet. " +
         "Озвучка/Качество are chrome menu buttons, not voiceover/quality names. " +
-        "Or call confirm_and_forward with optional overrides. " +
         "Findvid VIP / rate-limits / UI changes can break button automation.",
     };
   }
@@ -268,14 +269,12 @@ export class FindvidService {
       if (!button) {
         throw new FindvidError("No voiceover buttons available to select");
       }
-      const reply = await this.clickAndWaitForButtonsOrVideo(button);
+      // Nikita: clicking an озвучка yields a NEW message with quality buttons.
+      // Intermediate/preview media on the movie card is NOT the downloadable film —
+      // never treat isFinalVideoMessage here as done (that returned empty qualities).
+      const reply = await this.clickVoiceoverAndWaitForQualityStep(button);
       this.state.selectedVoiceover = button.text;
       buttons = reply.buttons;
-
-      if (isFinalVideoMessage(reply) && !looksLikeGuideMedia(reply)) {
-        this.rememberVideo(reply);
-        return { qualities: [], selectedVoiceover: button.text };
-      }
     }
 
     if (looksLikeChromeMenu(buttons)) {
@@ -289,8 +288,10 @@ export class FindvidService {
 
     if (!looksLikeQualityButtons(buttons)) {
       throw new FindvidError(
-        "Expected quality buttons (1080p/720p/…) after voiceover selection. " +
-          "Got chrome/support labels instead — Findvid UI may have changed.",
+        "Expected quality buttons (1080p/720p/…) on a new message after voiceover selection. " +
+          "Post-voiceover preview media is not the film — refusing empty qualities. " +
+          "Findvid UI may have changed, or the quality step did not arrive in time. " +
+          formatKeyboardDebug(buttons, { messageId: this.state.lastBotMessageId }),
       );
     }
 
@@ -362,24 +363,17 @@ export class FindvidService {
         if (!button) {
           throw new FindvidError("Could not pick a voiceover button");
         }
-        const reply = await this.clickAndWaitForButtonsOrVideo(button);
+        // Film arrives only AFTER quality click. Post-voiceover media is preview.
+        const reply = await this.clickVoiceoverAndWaitForQualityStep(button);
         this.state.selectedVoiceover = button.text;
-        if (isFinalVideoMessage(reply) && !looksLikeGuideMedia(reply)) {
-          this.rememberVideo(reply);
-        } else if (looksLikeChromeMenu(reply.buttons)) {
-          this.state.stage = "qualities";
-          // Stay on chrome; quality step opens Качество.
-        } else if (looksLikeQualityButtons(reply.buttons)) {
-          this.state.stage = "qualities";
-          this.state.qualities = summarizeButtons(reply.buttons);
-        } else {
-          this.state.stage = "qualities";
+        this.state.stage = "qualities";
+        if (looksLikeQualityButtons(reply.buttons)) {
           this.state.qualities = summarizeButtons(reply.buttons);
         }
       }
     }
 
-    // Quality step.
+    // Quality step — final film is the message after quality click only.
     if (this.state.stage !== "video_ready" && this.state.stage !== "forwarded") {
       let buttons = await this.latestButtons();
 
@@ -414,15 +408,11 @@ export class FindvidService {
         this.state.selectedQuality = button.text;
         this.rememberVideo(reply);
       } else if (!this.state.videoMessageId) {
-        const reply = await this.telegram.waitForMessage(
-          (msg) => isFinalVideoMessage(msg) && !looksLikeGuideMedia(msg),
-          {
-            timeoutMs: this.config.waitTimeoutMs,
-            pollIntervalMs: this.config.pollIntervalMs,
-            afterMessageId: this.state.lastBotMessageId ?? 0,
-          },
+        throw new FindvidError(
+          "Expected quality buttons (1080p/720p/…) after voiceover before the film file. " +
+            "Refusing to forward a post-voiceover preview. " +
+            formatKeyboardDebug(buttons, { messageId: this.state.lastBotMessageId }),
         );
-        this.rememberVideo(reply);
       }
     }
 
@@ -692,6 +682,11 @@ export class FindvidService {
       acceptVideo?: boolean;
       requireVoiceoverOrQuality?: boolean;
       requireQuality?: boolean;
+      /**
+       * After selecting a studio озвучка: wait for Nx p buttons or chrome with
+       * Качество. Never accept film/preview media as completion of this step.
+       */
+      requireQualityStep?: boolean;
     } = {},
   ): Promise<ChatMessageSnapshot> {
     if (!button) {
@@ -732,7 +727,11 @@ export class FindvidService {
     };
     await this.telegram.clickButton(clickTarget);
 
-    const needsList = Boolean(options.requireVoiceoverOrQuality || options.requireQuality);
+    const needsList = Boolean(
+      options.requireVoiceoverOrQuality ||
+        options.requireQuality ||
+        options.requireQualityStep,
+    );
     /** Grace before treating Вернуться/Скрыть-only as a hard dead-end. */
     const navOnlyFailAfterMs = Math.min(
       8_000,
@@ -756,8 +755,14 @@ export class FindvidService {
 
       for (let i = recent.length - 1; i >= 0; i -= 1) {
         const msg = recent[i];
-        if (options.acceptVideo && isFinalVideoMessage(msg) && !looksLikeGuideMedia(msg)) {
-          if (msg.id >= beforeId) {
+        // acceptVideo is only for post-quality film waits — never after voiceover.
+        if (
+          options.acceptVideo &&
+          !options.requireQualityStep &&
+          isFinalVideoMessage(msg) &&
+          !looksLikeGuideMedia(msg)
+        ) {
+          if (msg.id > beforeId) {
             this.state.lastBotMessageId = msg.id;
             return msg;
           }
@@ -807,6 +812,9 @@ export class FindvidService {
           ? formatKeyboardDebug(latest.buttons, { messageId: latest.id })
           : `no message after msg#${beforeId}`) +
         `. ${formatFloodStats(this.telegram.getFloodStats())}. ` +
+        (options.requireQualityStep
+          ? "Expected a NEW message with quality buttons after voiceover — not film preview. "
+          : "") +
         "VIP/rate-limits or UI changes may block automation.",
     );
   }
@@ -831,7 +839,11 @@ export class FindvidService {
     recent: ChatMessageSnapshot[],
     beforeFingerprints: Map<number, string>,
     beforeId: number,
-    options: { requireVoiceoverOrQuality?: boolean; requireQuality?: boolean },
+    options: {
+      requireVoiceoverOrQuality?: boolean;
+      requireQuality?: boolean;
+      requireQualityStep?: boolean;
+    },
   ): ChatMessageSnapshot | undefined {
     for (let i = recent.length - 1; i >= 0; i -= 1) {
       const msg = recent[i];
@@ -839,6 +851,15 @@ export class FindvidService {
       if (looksLikeBotHomeKeyboard(msg.buttons)) continue;
       if (!this.messageKeyboardChangedSince(msg, beforeFingerprints, beforeId)) continue;
 
+      if (options.requireQualityStep) {
+        // Prefer a *new* message with quality buttons (Nikita live flow).
+        if (looksLikeQualityButtons(msg.buttons)) return msg;
+        // Some titles briefly return chrome; caller opens Качество next.
+        if (looksLikeChromeMenu(msg.buttons) && findQualityMenuButton(msg.buttons)) {
+          return msg;
+        }
+        continue;
+      }
       if (options.requireQuality) {
         if (looksLikeQualityButtons(msg.buttons)) return msg;
         continue;
@@ -880,10 +901,17 @@ export class FindvidService {
     return recent.find((m) => m.id >= beforeId);
   }
 
-  private async clickAndWaitForButtonsOrVideo(
+  /**
+   * Click a studio озвучка and wait for the quality step (Nx p list or chrome
+   * with Качество). Ignores intermediate/preview media — film comes only after
+   * quality click.
+   */
+  private async clickVoiceoverAndWaitForQualityStep(
     button: ButtonLike,
   ): Promise<ChatMessageSnapshot> {
-    return this.clickAndWaitForButtons(button, button.text, { acceptVideo: true });
+    return this.clickAndWaitForButtons(button, button.text, {
+      requireQualityStep: true,
+    });
   }
 
   private async latestButtons(): Promise<ButtonLike[]> {

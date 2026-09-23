@@ -53,8 +53,10 @@ function createServer() {
         "Search Findvid (Telegram inline bot) for a movie/show. Returns the single best match " +
         "(title, year, kp/imdb meta, thumb URL when available) plus a short alternatives list. " +
         "Persists query/result ids for follow-up tools. " +
-        "Preferred agent flow: search → show best match → list_voiceovers (real озвучки) → " +
-        "list_qualities → confirm_and_forward. Озвучка/Качество are chrome menu openers, not picks. " +
+        "Preferred agent flow: search → show best match → list_voiceovers → user picks voiceover " +
+        "only → list_qualities → agent picks max quality → confirm_and_forward immediately " +
+        "(no second user OK). After voiceover, qualities arrive on a new message — not the film. " +
+        "Озвучка/Качество are chrome menu openers, not picks. " +
         "VIP/rate-limits/UI changes on Findvid can break automation.",
       inputSchema: {
         query: z.string().describe("Movie or series search query (e.g. Russian or English title)."),
@@ -104,9 +106,9 @@ function createServer() {
     "list_qualities",
     {
       description:
-        "Select voiceover (preferred «Дублированный» or override), opening Озвучка/Качество chrome " +
-        "menus when needed, and return quality buttons (1080p/720p/…). " +
-        "Does not return Инструкция / Видео-гайд / support chrome as qualities.",
+        "Select voiceover (studio). Wait for a NEW message with quality buttons (1080p/720p/…). " +
+        "Does not treat post-voiceover preview/media as the film. Returns real Nx p options. " +
+        "Agent should pick max quality and call confirm_and_forward without asking again.",
       inputSchema: {
         voiceover: z
           .string()
@@ -131,10 +133,10 @@ function createServer() {
     "confirm_and_forward",
     {
       description:
-        "After the user confirms the search match: walk Findvid’s two-level menus " +
-        "(Озвучка → voiceover, Качество → quality; defaults «Дублированный» then 1080p), " +
-        "wait for the final film video/document (refuses tiny guide/howto clips), " +
-        "and forward it to CreaVideoDownloaderBot. Does NOT download the multi-GB file.",
+        "After voiceover + quality: click quality (film arrives on a NEW message after that click, " +
+        "not after voiceover alone), forward to CreaVideoDownloaderBot. Rejects tiny guides and " +
+        "post-voiceover previews. Does NOT download. Preferred: user confirmed voiceover only — " +
+        "pick max quality and call this immediately.",
       inputSchema: {
         resultId: z
           .string()

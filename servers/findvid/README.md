@@ -28,10 +28,12 @@ Preferred agent flow:
 
 1. `search` `{ query }` — inline search. Returns **best match** + short alternatives. Show this to the user.
 2. `list_voiceovers` — selects the match, opens `Озвучка` if still on chrome, returns **real** озвучки labels (chrome/nav excluded).
-3. Show озвучки to the user → on pick, `list_qualities` `{ voiceover }` — selects that озвучка, opens `Качество` when needed, returns 1080p/720p/….
-4. Show qualities → on pick, `confirm_and_forward` `{ voiceover, quality }` — drives the same two-step menu and forwards the film file to the downloader bot.
+3. Show озвучки to the user → on pick, `list_qualities` `{ voiceover }` — clicks that озвучка and waits for a **new message** with 1080p/720p/… (post-voiceover preview media is **not** the film).
+4. Agent auto-picks the **maximum** quality (no second user confirm) → `confirm_and_forward` `{ voiceover, quality }` immediately — quality click yields the real film message, which is forwarded to the downloader bot.
 
-Shortcuts: after search + user OK, you may call `confirm_and_forward` with optional overrides (defaults prefer **«Дублированный»** then **1080p**). It still opens chrome submenus internally.
+Do **not** ask the user to confirm quality or forward again after the voiceover pick. Do **not** treat media that appears right after the voiceover click as downloadable — qualities come first.
+
+Shortcuts: after search you may still call `confirm_and_forward` with optional overrides (defaults prefer **«Дублированный»** then **1080p**). It still opens chrome submenus and requires the quality step before forwarding.
 
 Do **not** treat `Озвучка` / `Качество` / `Уведомлять` / `Поиск` / guide labels as selectable озвучки or qualities.
 
@@ -41,8 +43,8 @@ Do **not** treat `Озвучка` / `Качество` / `Уведомлять` 
 |------|---------|
 | `search` | `messages.getInlineBotResults` against Findvid; persist query/result ids |
 | `list_voiceovers` | Send/select match; open `Озвучка` chrome if needed; return real озвучки |
-| `list_qualities` | Select voiceover; open `Качество` chrome if needed; return Nx p buttons |
-| `confirm_and_forward` | Same two-step menu → wait for film video (rejects tiny guides) → **forward** |
+| `list_qualities` | Select voiceover; wait for **new** quality message (not film preview); return Nx p |
+| `confirm_and_forward` | Quality click → wait for film (not post-voiceover preview) → **forward** |
 
 Return shape is always JSON text: `{ ok: true, data }` / `{ ok: false, error }`.
 

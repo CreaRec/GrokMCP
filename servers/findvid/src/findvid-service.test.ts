@@ -521,6 +521,203 @@ describe("FindvidService flow", () => {
     expect(voiceovers.voiceovers.every((v) => !/вернуться|скрыть/i.test(v.text))).toBe(true);
   });
 
+  it("list_qualities waits for NEW quality message after voiceover (not early video_ready)", async () => {
+    // Live Knives Out / «Кубик в Кубе» bug: movie card already hasVideo; after
+    // clicking the studio, Findvid posts a *new* message with 1080p/720p.
+    // Old logic treated isFinalVideoMessage(card) as done → qualities: [].
+    const telegram = new FakeTelegram();
+    telegram.inline = {
+      queryId: "kubik",
+      results: [
+        {
+          id: "121666",
+          title: "Достать ножи (Knives Out) (2019)",
+          description: "Смотреть · КП: 8.197",
+        },
+      ],
+    };
+
+    const kubikButtons: ButtonLike[] = [
+      { text: "✔ Кубик в Кубе | Kubik³", kind: "inline", dataBytes: Buffer.from("kubik") },
+      { text: "✔ Dual | Кубадубль", kind: "inline", dataBytes: Buffer.from("dual") },
+      { text: "✔ [EN] Original", kind: "inline", dataBytes: Buffer.from("en") },
+      { text: "🔙 Назад", kind: "inline", dataBytes: Buffer.from("back") },
+    ];
+
+    const cardMsg = msg({
+      id: 961905,
+      text: "Достать ножи (Кубик в Кубе [1080p])",
+      hasVideo: true,
+      hasDocument: true,
+      fileName: "knives-preview.mp4",
+      fileSize: Math.round(120 * 1024 * 1024),
+      durationSeconds: 45,
+      buttons: kubikButtons,
+    });
+    telegram.history = [cardMsg];
+    telegram.afterSend = cardMsg;
+
+    const qualityMsg = msg({
+      id: 961910,
+      text: "Выберите качество",
+      buttons: [
+        { text: "720p", kind: "inline", dataBytes: Buffer.from("720") },
+        { text: "1080p", kind: "inline", dataBytes: Buffer.from("1080") },
+        { text: "🔙 Назад", kind: "inline", dataBytes: Buffer.from("back") },
+      ],
+    });
+
+    telegram.onClick = (button) => {
+      if (/кубик/i.test(button.text)) {
+        // Preview-ish media may linger on the old card; qualities arrive newer.
+        telegram.history.push(qualityMsg);
+      }
+    };
+
+    const service = new FindvidService(config({ waitTimeoutMs: 2_000, pollIntervalMs: 10 }), telegram);
+    await service.search("Knives Out");
+    await service.listVoiceovers({ resultId: "121666" });
+
+    const qualities = await service.listQualities({ voiceover: "Кубик" });
+
+    expect(qualities.qualities.map((q) => q.text)).toEqual(["720p", "1080p"]);
+    expect(qualities.qualities.length).toBeGreaterThan(0);
+    expect(qualities.selectedVoiceover).toMatch(/Кубик/);
+    expect(service.getState().stage).toBe("qualities");
+    expect(service.getState().videoMessageId).toBeUndefined();
+    expect(service.getState().stage).not.toBe("video_ready");
+  });
+
+  it("confirm_and_forward uses film after quality click, not post-voiceover preview", async () => {
+    const telegram = new FakeTelegram();
+    telegram.inline = {
+      queryId: "film-after-q",
+      results: [
+        {
+          id: "121666",
+          title: "Достать ножи (Knives Out) (2019)",
+          description: "Смотреть",
+        },
+      ],
+    };
+
+    const voiceoverMsg = msg({
+      id: 100,
+      text: "Достать ножи (Кубик в Кубе [1080p])",
+      hasVideo: true,
+      fileSize: Math.round(150 * 1024 * 1024),
+      durationSeconds: 60,
+      buttons: [
+        { text: "✔ Кубик в Кубе | Kubik³", kind: "inline", dataBytes: Buffer.from("kubik") },
+        { text: "✔ Dual", kind: "inline", dataBytes: Buffer.from("dual") },
+        { text: "🔙 Назад", kind: "inline", dataBytes: Buffer.from("back") },
+      ],
+    });
+    const previewAfterVoiceover = msg({
+      id: 101,
+      text: "Достать ножи preview",
+      hasVideo: true,
+      hasDocument: true,
+      fileName: "preview.mp4",
+      fileSize: Math.round(200 * 1024 * 1024),
+      durationSeconds: 90,
+      buttons: [],
+    });
+    const qualityMsg = msg({
+      id: 102,
+      text: "Качество",
+      buttons: [
+        { text: "720p", kind: "inline", dataBytes: Buffer.from("720") },
+        { text: "1080p", kind: "inline", dataBytes: Buffer.from("1080") },
+      ],
+    });
+    const filmMsg = msg({
+      id: 103,
+      text: "@fvid_try_bot • Knives Out",
+      hasDocument: true,
+      hasVideo: true,
+      fileName: "knives-out.mkv",
+      fileSize: Math.round(4.2 * 1024 ** 3),
+      durationSeconds: 7800,
+    });
+
+    telegram.afterSend = voiceoverMsg;
+    telegram.history = [voiceoverMsg];
+
+    telegram.onClick = (button) => {
+      if (/кубик/i.test(button.text)) {
+        telegram.history.push(previewAfterVoiceover);
+        telegram.history.push(qualityMsg);
+      }
+      if (button.text === "1080p") {
+        telegram.history.push(filmMsg);
+      }
+    };
+
+    const service = new FindvidService(config({ waitTimeoutMs: 2_000, pollIntervalMs: 10 }), telegram);
+    await service.search("Knives Out");
+    await service.listVoiceovers({ resultId: "121666" });
+    const qualities = await service.listQualities({ voiceover: "Кубик" });
+    expect(qualities.qualities.map((q) => q.text)).toEqual(["720p", "1080p"]);
+
+    const result = await service.confirmAndForward({
+      voiceover: "Кубик",
+      quality: "1080p",
+    });
+
+    expect(result.video?.messageId).toBe(103);
+    expect(result.video?.fileName).toBe("knives-out.mkv");
+    expect(result.selected.quality).toBe("1080p");
+    expect(telegram.forwarded).toEqual([{ username: "CreaDownloader", messageId: 103 }]);
+    expect(telegram.forwarded.some((f) => f.messageId === 100 || f.messageId === 101)).toBe(
+      false,
+    );
+  });
+
+  it("list_qualities fails clearly when only post-voiceover preview arrives (no qualities)", async () => {
+    const telegram = new FakeTelegram();
+    telegram.inline = {
+      queryId: "preview-only",
+      results: [{ id: "1", title: "Film (2019)", description: "Смотреть" }],
+    };
+
+    const voiceoverMsg = msg({
+      id: 50,
+      text: "Film",
+      hasVideo: true,
+      fileSize: Math.round(100 * 1024 * 1024),
+      buttons: voiceoverButtons,
+    });
+    telegram.afterSend = voiceoverMsg;
+    telegram.history = [voiceoverMsg];
+
+    telegram.onClick = (button) => {
+      if (/дублирован/i.test(button.text)) {
+        telegram.history.push(
+          msg({
+            id: 51,
+            text: "preview only",
+            hasVideo: true,
+            hasDocument: true,
+            fileName: "preview.mp4",
+            fileSize: Math.round(250 * 1024 * 1024),
+            durationSeconds: 120,
+            buttons: [],
+          }),
+        );
+      }
+    };
+
+    const service = new FindvidService(config({ waitTimeoutMs: 120, pollIntervalMs: 20 }), telegram);
+    await service.search("Film");
+    await service.listVoiceovers({ resultId: "1" });
+    await expect(service.listQualities({ voiceover: "Дублированный" })).rejects.toThrow(
+      /quality|NEW message|preview|Timed out/i,
+    );
+    expect(service.getState().videoMessageId).toBeUndefined();
+    expect(telegram.forwarded).toEqual([]);
+  });
+
   it("list_qualities opens Качество from chrome and ignores guide labels", async () => {
     const telegram = new FakeTelegram();
     telegram.inline = {
