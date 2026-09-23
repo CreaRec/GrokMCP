@@ -456,6 +456,91 @@ describe("FindvidService flow", () => {
     ).toBe(false);
   });
 
+  it("list_voiceovers accepts озвучки on a newer message id after Озвучка", async () => {
+    const telegram = new FakeTelegram();
+    telegram.inline = {
+      queryId: "new-msg",
+      results: [{ id: "121666", title: "Достать ножи (Knives Out) (2019)", description: "Смотреть" }],
+    };
+
+    const chromeMsg = msg({
+      id: 961905,
+      text: "Достать ножи (Back Board Cinema [1080p])",
+      buttons: chromeButtons,
+    });
+    telegram.afterSend = chromeMsg;
+    telegram.history = [chromeMsg];
+
+    // Live hypothesis: chrome collapses to Back/Hide while studios arrive on a new message.
+    const navOnly: ButtonLike[] = [
+      { text: "⏭ Вернуться", kind: "inline", dataBytes: Buffer.from("x".repeat(33)) },
+      { text: "✖️ Скрыть", kind: "inline", dataBytes: Buffer.from("y".repeat(9)) },
+    ];
+    telegram.onClick = (button) => {
+      if (/озвучк/i.test(button.text)) {
+        const idx = telegram.history.findIndex((m) => m.id === 961905);
+        telegram.history[idx] = msg({
+          id: 961905,
+          text: chromeMsg.text,
+          buttons: navOnly,
+        });
+        telegram.history.push(
+          msg({
+            id: 961906,
+            text: "Озвучки",
+            buttons: voiceoverButtons,
+          }),
+        );
+      }
+    };
+
+    const service = new FindvidService(config({ waitTimeoutMs: 2_000, pollIntervalMs: 20 }), telegram);
+    await service.search("Knives Out");
+    const voiceovers = await service.listVoiceovers({ resultId: "121666" });
+    expect(voiceovers.voiceovers.map((v) => v.text)).toEqual([
+      "✔️ Back Board Cinema",
+      "✔️ Дублированный",
+      "✔️ AlexFilm",
+      "✔️ [EN] Original",
+    ]);
+  });
+
+  it("list_voiceovers fails fast when post-Озвучка keyboard is only Вернуться/Скрыть", async () => {
+    const telegram = new FakeTelegram();
+    telegram.inline = {
+      queryId: "nav-only",
+      results: [{ id: "1", title: "Film (2019)", description: "Смотреть" }],
+    };
+
+    const chromeMsg = msg({ id: 50, text: "Film", buttons: chromeButtons });
+    telegram.afterSend = chromeMsg;
+    telegram.history = [chromeMsg];
+
+    telegram.onClick = (button) => {
+      if (/озвучк/i.test(button.text)) {
+        telegram.history[0] = msg({
+          id: 50,
+          text: "Film",
+          buttons: [
+            { text: "⏭ Вернуться", kind: "inline", dataBytes: Buffer.from("back") },
+            { text: "✖️ Скрыть", kind: "inline", dataBytes: Buffer.from("hide") },
+          ],
+        });
+      }
+    };
+
+    const service = new FindvidService(
+      config({ waitTimeoutMs: 30_000, pollIntervalMs: 50 }),
+      telegram,
+    );
+    await service.search("Film");
+    const started = Date.now();
+    await expect(service.listVoiceovers({ resultId: "1" })).rejects.toThrow(
+      /only navigation.*(Вернуться\/Скрыть)|Вернуться.*Скрыть/i,
+    );
+    expect(Date.now() - started).toBeLessThan(12_000);
+  });
+
   it("movie-card wait extends deadline by flood sleep and reports flood stats on timeout", async () => {
     const telegram = new FakeTelegram();
     let pollDelays: number[] = [];

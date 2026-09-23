@@ -7,10 +7,12 @@ import {
   formatBytes,
   formatKeyboardDebug,
   isChoiceButton,
+  isNavButton,
   looksLikeBotHomeKeyboard,
   looksLikeChromeMenu,
   looksLikeGuideMedia,
   looksLikeMovieCardButtons,
+  looksLikeNavOnlyKeyboard,
   looksLikeQualityButtons,
   looksLikeVoiceoverButtons,
   normalizeText,
@@ -208,6 +210,18 @@ describe("chrome menu vs voiceover/quality lists", () => {
       true,
     );
     expect(isChoiceButton({ text: "🔙 Назад", kind: "inline", dataBytes: Buffer.from("b") })).toBe(false);
+  });
+
+  it("detects post-Озвучка Вернуться/Скрыть-only as nav dead-end", () => {
+    const navOnly: ButtonLike[] = [
+      { text: "⏭ Вернуться", kind: "inline", dataBytes: Buffer.from("x".repeat(33)) },
+      { text: "✖️ Скрыть", kind: "inline", dataBytes: Buffer.from("y".repeat(9)) },
+    ];
+    expect(navOnly.every((b) => isNavButton(b))).toBe(true);
+    expect(looksLikeNavOnlyKeyboard(navOnly)).toBe(true);
+    expect(looksLikeVoiceoverButtons(navOnly)).toBe(false);
+    expect(looksLikeChromeMenu(navOnly)).toBe(false);
+    expect(looksLikeMovieCardButtons(navOnly)).toBe(false);
   });
 
   it("does not treat Инструкция / Видео-гайд as qualities", () => {

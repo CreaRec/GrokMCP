@@ -404,6 +404,17 @@ export function looksLikeMovieCardButtons(buttons: ButtonLike[]): boolean {
   );
 }
 
+/**
+ * Keyboard is only navigation (Вернуться / Скрыть / Назад) with no content choices.
+ * Live post-Озвучка failure: chrome collapses to these two instead of studios.
+ */
+export function looksLikeNavOnlyKeyboard(buttons: ButtonLike[]): boolean {
+  if (buttons.length === 0) return false;
+  if (listChoiceButtons(buttons).length > 0) return false;
+  if (looksLikeChromeMenu(buttons) || looksLikeBotHomeKeyboard(buttons)) return false;
+  return buttons.every((b) => isNavButton(b));
+}
+
 export function findVoiceoverMenuButton(buttons: ButtonLike[]): ButtonLike | null {
   return (
     buttons.find((b) => VOICEOVER_MENU_RE.test(labelCore(b.text)) && isChromeButton(b)) ??

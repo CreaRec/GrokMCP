@@ -12,6 +12,7 @@ import {
   looksLikeChromeMenu,
   looksLikeGuideMedia,
   looksLikeMovieCardButtons,
+  looksLikeNavOnlyKeyboard,
   looksLikeQualityButtons,
   looksLikeVoiceoverButtons,
   pickQualityButton,
@@ -231,6 +232,7 @@ export class FindvidService {
         const opened = await this.clickAndWaitForButtons(
           findVoiceoverMenuButton(buttons),
           "Озвучка chrome menu",
+          { requireVoiceoverOrQuality: true },
         );
         buttons = opened.buttons;
         this.state.selectedVoiceover = undefined;
@@ -238,6 +240,7 @@ export class FindvidService {
         const opened = await this.clickAndWaitForButtons(
           findQualityMenuButton(buttons),
           "Качество chrome menu",
+          { requireQuality: true },
         );
         buttons = opened.buttons;
       }
@@ -266,6 +269,7 @@ export class FindvidService {
       const opened = await this.clickAndWaitForButtons(
         findQualityMenuButton(buttons),
         "Качество chrome menu",
+        { requireQuality: true },
       );
       buttons = opened.buttons;
     }
@@ -330,6 +334,7 @@ export class FindvidService {
         const opened = await this.clickAndWaitForButtons(
           findVoiceoverMenuButton(buttons),
           "Озвучка chrome menu",
+          { requireVoiceoverOrQuality: true },
         );
         buttons = opened.buttons;
         this.state.stage = "voiceovers";
@@ -369,6 +374,7 @@ export class FindvidService {
         const opened = await this.clickAndWaitForButtons(
           findQualityMenuButton(buttons),
           "Качество chrome menu",
+          { requireQuality: true },
         );
         buttons = opened.buttons;
       }
@@ -581,6 +587,10 @@ export class FindvidService {
   /**
    * Click a button and wait for either a newer message or an in-place keyboard edit
    * (Findvid VIP often edits the same message id when opening Озвучка/Качество).
+   * When requiring voiceover/quality lists, accept them on **any** recent bot message
+   * whose keyboard is new or changed since the click — not only the chrome host.
+   * Nav-only keyboards (Вернуться/Скрыть) after chrome open fail fast instead of
+   * burning the full waitTimeout.
    */
   private async clickAndWaitForButtons(
     button: ButtonLike | null,
@@ -612,7 +622,13 @@ export class FindvidService {
         ) ??
       recentBefore[recentBefore.length - 1];
     const beforeId = button.messageId ?? host?.id ?? this.state.lastBotMessageId ?? 0;
-    const beforeFingerprint = this.buttonFingerprint(host?.buttons ?? []);
+    const beforeFingerprints = new Map<number, string>();
+    for (const m of recentBefore) {
+      beforeFingerprints.set(m.id, this.buttonFingerprint(m.buttons));
+    }
+    if (host && !beforeFingerprints.has(host.id)) {
+      beforeFingerprints.set(host.id, this.buttonFingerprint(host.buttons));
+    }
 
     // Stamp messageId so clickButton can GetBotCallbackAnswer without sendMessage fallback.
     const clickTarget: ButtonLike = {
@@ -623,11 +639,28 @@ export class FindvidService {
     };
     await this.telegram.clickButton(clickTarget);
 
-    const deadline = Date.now() + this.config.waitTimeoutMs;
-    let deadlineMs = deadline;
+    const needsList = Boolean(options.requireVoiceoverOrQuality || options.requireQuality);
+    /** Grace before treating Вернуться/Скрыть-only as a hard dead-end. */
+    const navOnlyFailAfterMs = Math.min(
+      8_000,
+      Math.max(2_500, this.config.pollIntervalMs * 3),
+    );
+    let navOnlySinceMs: number | undefined;
+    let navOnlyWitness: ChatMessageSnapshot | undefined;
+
+    let deadlineMs = Date.now() + this.config.waitTimeoutMs;
     while (Date.now() < deadlineMs) {
       const recent = await this.telegram.getRecentMessages(15);
       deadlineMs += this.telegram.consumeFloodSleepMs();
+
+      const listHit = needsList
+        ? this.findRequiredListMessage(recent, beforeFingerprints, beforeId, options)
+        : undefined;
+      if (listHit) {
+        this.state.lastBotMessageId = listHit.id;
+        return listHit;
+      }
+
       for (let i = recent.length - 1; i >= 0; i -= 1) {
         const msg = recent[i];
         if (options.acceptVideo && isFinalVideoMessage(msg) && !looksLikeGuideMedia(msg)) {
@@ -636,33 +669,45 @@ export class FindvidService {
             return msg;
           }
         }
+        if (needsList) continue;
         if (msg.buttons.length === 0) continue;
-        // Ignore sticky bot-home keyboard updates.
         if (looksLikeBotHomeKeyboard(msg.buttons)) continue;
 
-        const changed =
-          msg.id > beforeId ||
-          (msg.id === beforeId && this.buttonFingerprint(msg.buttons) !== beforeFingerprint);
-        if (!changed) continue;
-
-        if (options.requireQuality) {
-          if (!looksLikeQualityButtons(msg.buttons)) continue;
-        } else if (options.requireVoiceoverOrQuality) {
-          if (
-            !looksLikeVoiceoverButtons(msg.buttons) &&
-            !looksLikeQualityButtons(msg.buttons)
-          ) {
-            continue;
-          }
+        if (this.messageKeyboardChangedSince(msg, beforeFingerprints, beforeId)) {
+          this.state.lastBotMessageId = msg.id;
+          return msg;
         }
-
-        this.state.lastBotMessageId = msg.id;
-        return msg;
       }
+
+      if (needsList) {
+        const navOnly = this.findNavOnlyAfterClick(recent, beforeFingerprints, beforeId);
+        if (navOnly) {
+          if (navOnlySinceMs === undefined) {
+            navOnlySinceMs = Date.now();
+            navOnlyWitness = navOnly;
+          } else if (Date.now() - navOnlySinceMs >= navOnlyFailAfterMs) {
+            throw new FindvidError(
+              `Findvid keyboard after clicking ${label} is only navigation ` +
+                `(Вернуться/Скрыть) with no озвучки/qualities. ` +
+                formatKeyboardDebug(navOnly.buttons, { messageId: navOnly.id }) +
+                `. ${formatFloodStats(this.telegram.getFloodStats())}. ` +
+                "Empty/collapsed submenu or UI change — retry or pick another match.",
+            );
+          }
+        } else {
+          navOnlySinceMs = undefined;
+          navOnlyWitness = undefined;
+        }
+      }
+
       await sleep(this.telegram.nextHistoryPollDelayMs(this.config.pollIntervalMs));
     }
 
-    const latest = (await this.telegram.getRecentMessages(8)).find((m) => m.id >= beforeId);
+    const latest = this.pickTimeoutDumpMessage(
+      await this.telegram.getRecentMessages(15),
+      beforeId,
+      navOnlyWitness,
+    );
     throw new FindvidError(
       `Timed out waiting for Findvid keyboard update after clicking ${label}. ` +
         (latest
@@ -671,6 +716,75 @@ export class FindvidService {
         `. ${formatFloodStats(this.telegram.getFloodStats())}. ` +
         "VIP/rate-limits or UI changes may block automation.",
     );
+  }
+
+  /** True when this message is new or its keyboard changed vs the pre-click snapshot. */
+  private messageKeyboardChangedSince(
+    msg: ChatMessageSnapshot,
+    beforeFingerprints: Map<number, string>,
+    beforeId: number,
+  ): boolean {
+    if (msg.id > beforeId && !beforeFingerprints.has(msg.id)) return true;
+    const prev = beforeFingerprints.get(msg.id);
+    if (prev === undefined) return msg.id >= beforeId;
+    return this.buttonFingerprint(msg.buttons) !== prev;
+  }
+
+  /**
+   * After Озвучка/Качество, accept studios/qualities on any recent bot message whose
+   * keyboard is new or edited — including a sibling message id, not only chrome.
+   */
+  private findRequiredListMessage(
+    recent: ChatMessageSnapshot[],
+    beforeFingerprints: Map<number, string>,
+    beforeId: number,
+    options: { requireVoiceoverOrQuality?: boolean; requireQuality?: boolean },
+  ): ChatMessageSnapshot | undefined {
+    for (let i = recent.length - 1; i >= 0; i -= 1) {
+      const msg = recent[i];
+      if (msg.buttons.length === 0) continue;
+      if (looksLikeBotHomeKeyboard(msg.buttons)) continue;
+      if (!this.messageKeyboardChangedSince(msg, beforeFingerprints, beforeId)) continue;
+
+      if (options.requireQuality) {
+        if (looksLikeQualityButtons(msg.buttons)) return msg;
+        continue;
+      }
+      if (
+        looksLikeVoiceoverButtons(msg.buttons) ||
+        looksLikeQualityButtons(msg.buttons)
+      ) {
+        return msg;
+      }
+    }
+    return undefined;
+  }
+
+  private findNavOnlyAfterClick(
+    recent: ChatMessageSnapshot[],
+    beforeFingerprints: Map<number, string>,
+    beforeId: number,
+  ): ChatMessageSnapshot | undefined {
+    for (let i = recent.length - 1; i >= 0; i -= 1) {
+      const msg = recent[i];
+      if (msg.buttons.length === 0) continue;
+      if (!this.messageKeyboardChangedSince(msg, beforeFingerprints, beforeId)) continue;
+      if (looksLikeNavOnlyKeyboard(msg.buttons)) return msg;
+    }
+    return undefined;
+  }
+
+  private pickTimeoutDumpMessage(
+    recent: ChatMessageSnapshot[],
+    beforeId: number,
+    navOnlyWitness?: ChatMessageSnapshot,
+  ): ChatMessageSnapshot | undefined {
+    if (navOnlyWitness) return navOnlyWitness;
+    for (let i = recent.length - 1; i >= 0; i -= 1) {
+      const msg = recent[i];
+      if (msg.id >= beforeId && msg.buttons.length > 0) return msg;
+    }
+    return recent.find((m) => m.id >= beforeId);
   }
 
   private async clickAndWaitForButtonsOrVideo(
