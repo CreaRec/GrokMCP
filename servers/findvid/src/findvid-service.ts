@@ -6,6 +6,7 @@ import {
   findVoiceoverMenuButton,
   formatBytes,
   formatKeyboardDebug,
+  hasCallbackData,
   listChoiceButtons,
   looksLikeBotHomeKeyboard,
   looksLikeChromeMenu,
@@ -543,7 +544,12 @@ export class FindvidService {
         ? findVoiceoverMenuButton(reply.buttons)
         : findQualityMenuButton(reply.buttons);
     // Ensure callback metadata is present (never sendMessage Озвучка as chat text).
-    if (menuButton && (menuButton.kind !== "inline" || !menuButton.data || menuButton.messageId === undefined)) {
+    if (
+      menuButton &&
+      (menuButton.kind !== "inline" ||
+        !hasCallbackData(menuButton) ||
+        menuButton.messageId === undefined)
+    ) {
       throw new FindvidError(
         `Cannot click ${which === "voiceover" ? "Озвучка" : "Качество"}: missing inline callback data. ` +
           formatKeyboardDebug(reply.buttons, { messageId: reply.id }),
@@ -560,7 +566,9 @@ export class FindvidService {
   }
 
   private buttonFingerprint(buttons: ButtonLike[]): string {
-    return buttons.map((b) => `${b.kind}:${b.data ? "d" : "-"}:${b.text}`).join("\n");
+    return buttons
+      .map((b) => `${b.kind}:${hasCallbackData(b) ? "d" : "-"}:${b.text}`)
+      .join("\n");
   }
 
   /**
@@ -584,7 +592,17 @@ export class FindvidService {
     const host =
       recentBefore.find((m) => m.id === (button.messageId ?? this.state.lastBotMessageId)) ??
       recentBefore.find((m) => m.id === this.state.lastBotMessageId) ??
-      [...recentBefore].reverse().find((m) => m.buttons.some((b) => b.data === button.data || b.text === button.text)) ??
+      [...recentBefore]
+        .reverse()
+        .find((m) =>
+          m.buttons.some(
+            (b) =>
+              b.text === button.text ||
+              (hasCallbackData(b) &&
+                hasCallbackData(button) &&
+                b.dataBytes!.equals(button.dataBytes!)),
+          ),
+        ) ??
       recentBefore[recentBefore.length - 1];
     const beforeId = button.messageId ?? host?.id ?? this.state.lastBotMessageId ?? 0;
     const beforeFingerprint = this.buttonFingerprint(host?.buttons ?? []);
@@ -593,7 +611,8 @@ export class FindvidService {
     const clickTarget: ButtonLike = {
       ...button,
       messageId: button.messageId ?? beforeId,
-      kind: button.data !== undefined ? "inline" : button.kind,
+      kind: hasCallbackData(button) ? "inline" : button.kind,
+      dataBytes: button.dataBytes ? Buffer.from(button.dataBytes) : undefined,
     };
     await this.telegram.clickButton(clickTarget);
 

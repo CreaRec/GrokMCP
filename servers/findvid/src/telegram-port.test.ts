@@ -1,41 +1,58 @@
 import { describe, expect, it } from "vitest";
+import bigInt from "big-integer";
 import { Api } from "telegram/tl/index.js";
-import { formatKeyboardDebug } from "./parse.js";
+import { copyCallbackBytes, formatKeyboardDebug, hasCallbackData } from "./parse.js";
 import {
-  bufferToUtf8,
   resolveClickAction,
   snapshotFromGramJsMessage,
 } from "./telegram-port.js";
 
-describe("bufferToUtf8", () => {
-  it("decodes Buffer and Uint8Array callback data", () => {
-    expect(bufferToUtf8(Buffer.from("vo_open", "utf8"))).toBe("vo_open");
-    expect(bufferToUtf8(new Uint8Array(Buffer.from("q_open", "utf8")))).toBe("q_open");
-    expect(bufferToUtf8("plain")).toBe("plain");
+describe("copyCallbackBytes", () => {
+  it("preserves opaque non-UTF8 bytes without mangling", () => {
+    // Bytes that are invalid UTF-8 / would change under utf8 round-trip.
+    const opaque = Buffer.from([0xff, 0xfe, 0x00, 0x80, 0x01, 0x7f]);
+    const copied = copyCallbackBytes(opaque);
+    expect(copied).toBeInstanceOf(Buffer);
+    expect(copied!.equals(opaque)).toBe(true);
+    // Classic bug: Buffer → utf8 string → Buffer corrupts these bytes.
+    const mangled = Buffer.from(opaque.toString("utf8"), "utf8");
+    expect(mangled.equals(opaque)).toBe(false);
+    expect(copied!.equals(mangled)).toBe(false);
+  });
+
+  it("copies Uint8Array and rejects empty payloads", () => {
+    expect(copyCallbackBytes(new Uint8Array([1, 2, 3]))?.equals(Buffer.from([1, 2, 3]))).toBe(
+      true,
+    );
+    expect(copyCallbackBytes(Buffer.alloc(0))).toBeUndefined();
+    expect(copyCallbackBytes("")).toBeUndefined();
   });
 });
 
 describe("resolveClickAction", () => {
-  it("uses callback for Озвучка with data+messageId (never reply_text)", () => {
+  it("uses callback bytes for Озвучка (never reply_text)", () => {
+    const dataBytes = Buffer.from([0xff, 0x01, 0x02]);
     const action = resolveClickAction({
       text: "🎶 Озвучка",
       kind: "inline",
-      data: "vo_open",
+      dataBytes,
       messageId: 42,
     });
-    expect(action).toEqual({
-      type: "callback",
-      data: "vo_open",
-      messageId: 42,
-      text: "🎶 Озвучка",
-    });
+    expect(action.type).toBe("callback");
+    if (action.type === "callback") {
+      expect(action.messageId).toBe(42);
+      expect(action.dataBytes.equals(dataBytes)).toBe(true);
+      // Must be a copy, not the same reference mutated later.
+      dataBytes[0] = 0x00;
+      expect(action.dataBytes[0]).toBe(0xff);
+    }
   });
 
-  it("uses callback for studio pick with data", () => {
+  it("uses callback for studio pick with dataBytes", () => {
     const action = resolveClickAction({
       text: "✔️ Дублированный",
       kind: "inline",
-      data: "dub",
+      dataBytes: Buffer.from("dub"),
       messageId: 42,
     });
     expect(action.type).toBe("callback");
@@ -57,7 +74,7 @@ describe("resolveClickAction", () => {
     const action = resolveClickAction({
       text: "🎶 Озвучка",
       kind: "inline",
-      data: "vo",
+      dataBytes: Buffer.from("vo"),
     });
     expect(action.type).toBe("error");
   });
@@ -71,20 +88,9 @@ describe("resolveClickAction", () => {
   });
 
   it("allows sendMessage for Результат поиска even if mis-tagged inline without data", () => {
-    // Live post-#70 deadlock: recovery button had kind=inline + no callback data.
     const action = resolveClickAction({
       text: "🔍 Результат поиска",
       kind: "inline",
-      messageId: 10,
-    });
-    expect(action).toEqual({ type: "reply_text", text: "🔍 Результат поиска" });
-  });
-
-  it("allows sendMessage for Результат поиска with empty callback data string", () => {
-    const action = resolveClickAction({
-      text: "🔍 Результат поиска",
-      kind: "inline",
-      data: "",
       messageId: 10,
     });
     expect(action).toEqual({ type: "reply_text", text: "🔍 Результат поиска" });
@@ -100,11 +106,12 @@ describe("resolveClickAction", () => {
   });
 });
 
-describe("snapshotFromGramJsMessage markup kinds", () => {
-  it("extracts inline callback data + messageId from ReplyInlineMarkup", () => {
+describe("snapshotFromGramJsMessage callback bytes", () => {
+  it("keeps KeyboardButtonCallback.data as raw bytes through snapshot → resolveClickAction", () => {
+    const opaque = Buffer.from([0xff, 0xfe, 0x00, 0x80, 0x42]);
     const message = new Api.Message({
-      id: 77,
-      peerId: new Api.PeerUser({ userId: bigIntish(1) }),
+      id: 961896,
+      peerId: new Api.PeerUser({ userId: bigInt(1) }),
       date: 1,
       message: "Достать ножи (Back Board Cinema [1080p])",
       replyMarkup: new Api.ReplyInlineMarkup({
@@ -113,11 +120,11 @@ describe("snapshotFromGramJsMessage markup kinds", () => {
             buttons: [
               new Api.KeyboardButtonCallback({
                 text: "🎶 Озвучка",
-                data: Buffer.from("vo_open", "utf8"),
+                data: opaque,
               }),
               new Api.KeyboardButtonCallback({
                 text: "🔮 Качество",
-                data: Buffer.from("q_open", "utf8"),
+                data: Buffer.from([0x01, 0x02, 0xff]),
               }),
             ],
           }),
@@ -126,18 +133,27 @@ describe("snapshotFromGramJsMessage markup kinds", () => {
     });
 
     const snap = snapshotFromGramJsMessage(message);
+    expect(snap.id).toBe(961896);
     expect(snap.hasInlineMarkup).toBe(true);
-    expect(snap.buttons.map((b) => b.text)).toEqual(["🎶 Озвучка", "🔮 Качество"]);
-    expect(snap.buttons.every((b) => b.kind === "inline")).toBe(true);
-    expect(snap.buttons[0]?.data).toBe("vo_open");
-    expect(snap.buttons[0]?.messageId).toBe(77);
-    expect(resolveClickAction(snap.buttons[0]!).type).toBe("callback");
+    const ozv = snap.buttons.find((b) => /озвучк/i.test(b.text));
+    expect(ozv?.messageId).toBe(961896);
+    expect(hasCallbackData(ozv!)).toBe(true);
+    expect(ozv!.dataBytes!.equals(opaque)).toBe(true);
+
+    const action = resolveClickAction(ozv!);
+    expect(action.type).toBe("callback");
+    if (action.type === "callback") {
+      expect(action.messageId).toBe(961896);
+      expect(action.dataBytes.equals(opaque)).toBe(true);
+      // Simulate GetBotCallbackAnswer payload: must match original bytes exactly.
+      expect(Buffer.from(action.dataBytes).equals(opaque)).toBe(true);
+    }
   });
 
   it("marks ReplyKeyboardMarkup as reply (bot-home), not inline callbacks", () => {
     const message = new Api.Message({
       id: 10,
-      peerId: new Api.PeerUser({ userId: bigIntish(1) }),
+      peerId: new Api.PeerUser({ userId: bigInt(1) }),
       date: 1,
       message: "home",
       replyMarkup: new Api.ReplyKeyboardMarkup({
@@ -160,24 +176,22 @@ describe("snapshotFromGramJsMessage markup kinds", () => {
 });
 
 describe("formatKeyboardDebug", () => {
-  it("includes message id, kinds, and data flags", () => {
+  it("includes message id, kinds, and data byte lengths", () => {
     const dump = formatKeyboardDebug(
       [
-        { text: "🎶 Озвучка", kind: "inline", data: "vo", messageId: 5 },
+        {
+          text: "🎶 Озвучка",
+          kind: "inline",
+          dataBytes: Buffer.from([1, 2, 3]),
+          messageId: 5,
+        },
         { text: "🗂 Подборки", kind: "reply" },
       ],
       { messageId: 5 },
     );
     expect(dump).toContain("msg#5");
-    expect(dump).toContain('data=yes');
-    expect(dump).toContain('data=no');
+    expect(dump).toContain("data=3b");
+    expect(dump).toContain("data=no");
     expect(dump).toContain("Озвучка");
   });
 });
-
-/** big-integer-ish value accepted by GramJS constructors in tests. */
-function bigIntish(n: number): import("big-integer").BigInteger {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const bigInt = require("big-integer") as typeof import("big-integer");
-  return bigInt(n);
-}

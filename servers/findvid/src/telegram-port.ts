@@ -5,7 +5,9 @@ import bigInt from "big-integer";
 import type { FindvidConfig } from "./config.js";
 import { FindvidError, TelegramError, TimeoutError } from "./errors.js";
 import {
+  copyCallbackBytes,
   extractButtonsFromMarkup,
+  hasCallbackData,
   isBotHomeButton,
   looksLikeGuideMedia,
   type ButtonLike,
@@ -63,22 +65,10 @@ function className(value: unknown): string {
   return String(ctor);
 }
 
-/** Decode GramJS callback `bytes` (Buffer, Uint8Array, or string). */
+/** @deprecated Use copyCallbackBytes — kept for test imports that only need a utf8 decode helper. */
 export function bufferToUtf8(data: unknown): string | undefined {
-  if (typeof data === "string") return data;
-  if (Buffer.isBuffer(data)) return data.toString("utf8");
-  if (data instanceof Uint8Array) return Buffer.from(data).toString("utf8");
-  // Some GramJS builds expose bytes as { buffer: ArrayBuffer } / number[].
-  if (data && typeof data === "object") {
-    const maybe = data as { buffer?: ArrayBuffer };
-    if (maybe.buffer instanceof ArrayBuffer) {
-      return Buffer.from(new Uint8Array(maybe.buffer)).toString("utf8");
-    }
-    if (Array.isArray(data)) {
-      return Buffer.from(data as number[]).toString("utf8");
-    }
-  }
-  return undefined;
+  const bytes = copyCallbackBytes(data);
+  return bytes?.toString("utf8");
 }
 
 function readThumbUrl(result: Api.TypeBotInlineResult): string | undefined {
@@ -143,17 +133,17 @@ function extractButtonsFromRows(
 
       const rawData = "data" in button ? (button as { data?: unknown }).data : undefined;
       if (options.markupKind === "inline") {
-        const data = usableCallbackData(bufferToUtf8(rawData));
+        const dataBytes = copyCallbackBytes(rawData);
         buttons.push({
           text: btnText,
-          data,
+          dataBytes,
           kind: "inline",
           messageId: options.messageId,
         });
       } else {
         buttons.push({
           text: btnText,
-          data: undefined,
+          dataBytes: undefined,
           kind: "reply",
           messageId: options.messageId,
         });
@@ -165,36 +155,29 @@ function extractButtonsFromRows(
 
 /**
  * How to invoke a Findvid button.
- * - Movie-card chrome / studios / qualities (inline + callback data) → GetBotCallbackAnswer only.
+ * - Movie-card chrome / studios / qualities (inline + callback bytes) → GetBotCallbackAnswer only.
  * - Sticky bot-home reply keyboard (Подборки / Результат поиска / …) → sendMessage OK.
  */
 export type ClickAction =
-  | { type: "callback"; data: string; messageId: number; text: string }
+  | { type: "callback"; dataBytes: Buffer; messageId: number; text: string }
   | { type: "reply_text"; text: string }
   | { type: "error"; reason: string; text: string };
 
-function usableCallbackData(data: string | undefined): string | undefined {
-  if (data === undefined) return undefined;
-  const trimmed = data.trim();
-  return trimmed === "" ? undefined : trimmed;
-}
-
 export function resolveClickAction(button: ButtonLike): ClickAction {
-  const callbackData = usableCallbackData(button.data);
+  const hasData = hasCallbackData(button);
 
   // Sticky bot-home reply keyboard: sendMessage is required when there is no callback data.
-  // Live post-#70: «Результат поиска» was kind=inline/data-missing and recovery deadlocked.
-  if (isBotHomeButton(button) && !callbackData) {
+  if (isBotHomeButton(button) && !hasData) {
     return { type: "reply_text", text: button.text };
   }
 
-  if (button.kind === "reply" && !callbackData) {
+  if (button.kind === "reply" && !hasData) {
     return { type: "reply_text", text: button.text };
   }
 
   // Movie-card inline path — NEVER degrade to sendMessage for Озвучка/studios/qualities.
-  if (button.kind === "inline" || callbackData !== undefined) {
-    if (!callbackData) {
+  if (button.kind === "inline" || hasData) {
+    if (!hasData || !button.dataBytes) {
       return {
         type: "error",
         text: button.text,
@@ -214,7 +197,7 @@ export function resolveClickAction(button: ButtonLike): ClickAction {
     }
     return {
       type: "callback",
-      data: callbackData,
+      dataBytes: Buffer.from(button.dataBytes),
       messageId: button.messageId,
       text: button.text,
     };
@@ -242,11 +225,11 @@ export function snapshotFromGramJsMessage(message: Api.Message): ChatMessageSnap
     } else {
       // Unknown markup: extract with data when present, prefer inline if any callback data.
       const extracted = extractButtonsFromMarkup(replyMarkup, { messageId });
-      const anyData = extracted.some((b) => b.data);
+      const anyData = extracted.some((b) => hasCallbackData(b));
       hasInlineMarkup = anyData;
       buttons = extracted.map((b) => ({
         ...b,
-        kind: b.data !== undefined ? "inline" : b.kind,
+        kind: hasCallbackData(b) ? "inline" : b.kind,
         messageId,
       }));
     }
@@ -422,6 +405,9 @@ export class GramJsTelegramPort implements TelegramPort {
    * Click a button. Movie-card inline buttons (Озвучка / studios / quality) use
    * GetBotCallbackAnswer only — never sendMessage of the label.
    * Sticky reply-keyboard bot-home may sendMessage the label.
+   *
+   * Callback payloads are opaque bytes: prefer GramJS Message.click (uses the
+   * live KeyboardButtonCallback.data), else pass preserved dataBytes as-is.
    */
   async clickButton(button: ButtonLike): Promise<void> {
     const client = this.requireClient();
@@ -437,18 +423,37 @@ export class GramJsTelegramPort implements TelegramPort {
       return;
     }
 
+    // Prefer GramJS custom Message.click so callback bytes come from the live markup.
+    try {
+      const fetched = await client.getMessages(peer, { ids: [action.messageId] });
+      const host = Array.isArray(fetched) ? fetched[0] : undefined;
+      if (host && typeof (host as { click?: unknown }).click === "function") {
+        await (host as { click: (opts: { text?: string }) => Promise<unknown> }).click({
+          text: action.text,
+        });
+        return;
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (/success|QUERY_ID_INVALID|BOT_RESPONSE_TIMEOUT/i.test(message)) {
+        return;
+      }
+      // Fall through to raw GetBotCallbackAnswer with preserved bytes.
+    }
+
     try {
       await client.invoke(
         new Api.messages.GetBotCallbackAnswer({
           peer,
           msgId: action.messageId,
-          data: Buffer.from(action.data, "utf8"),
+          // Exact opaque bytes from KeyboardButtonCallback — no UTF-8 round-trip.
+          data: action.dataBytes,
         }),
       );
     } catch (err) {
       // GramJS often surfaces a successful answer as an RPC "error" with success text.
       const message = err instanceof Error ? err.message : String(err);
-      if (/success|QUERY_ID_INVALID/i.test(message)) {
+      if (/success|QUERY_ID_INVALID|BOT_RESPONSE_TIMEOUT/i.test(message)) {
         return;
       }
       // Do NOT fall back to sendMessage for inline callbacks (Озвучка must be a real click).

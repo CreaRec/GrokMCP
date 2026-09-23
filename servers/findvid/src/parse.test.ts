@@ -88,37 +88,37 @@ describe("rankInlineResults", () => {
 
 /** Live Findvid VIP chrome row (screenshot 1). */
 const chromeMenu: ButtonLike[] = [
-  { text: "🎶 Озвучка", kind: "inline", data: "vo" },
-  { text: "🔮 Качество", kind: "inline", data: "q" },
-  { text: "🔔 Уведомлять", kind: "inline", data: "n" },
-  { text: "⭐ В избранное", kind: "inline", data: "f" },
-  { text: "💬 Обсуждения", kind: "inline", data: "d" },
-  { text: "⤴️ Поделиться", kind: "inline", data: "s" },
-  { text: "❤️ Оценить текущую озвучку", kind: "inline", data: "r" },
-  { text: "😭 Ошибка в видео", kind: "inline", data: "e" },
-  { text: "📱 Наши проекты", kind: "inline", data: "p" },
-  { text: "📺 TV Cast", kind: "inline", data: "c" },
-  { text: "ℹ️ Подробнее", kind: "inline", data: "i" },
-  { text: "👌 Рекомендации", kind: "inline", data: "rec" },
-  { text: "🕔 История", kind: "inline", data: "h" },
-  { text: "🔍 Поиск", kind: "inline", data: "search" },
-  { text: "🔼 Свернуть меню", kind: "inline", data: "collapse" },
+  { text: "🎶 Озвучка", kind: "inline", dataBytes: Buffer.from("vo") },
+  { text: "🔮 Качество", kind: "inline", dataBytes: Buffer.from("q") },
+  { text: "🔔 Уведомлять", kind: "inline", dataBytes: Buffer.from("n") },
+  { text: "⭐ В избранное", kind: "inline", dataBytes: Buffer.from("f") },
+  { text: "💬 Обсуждения", kind: "inline", dataBytes: Buffer.from("d") },
+  { text: "⤴️ Поделиться", kind: "inline", dataBytes: Buffer.from("s") },
+  { text: "❤️ Оценить текущую озвучку", kind: "inline", dataBytes: Buffer.from("r") },
+  { text: "😭 Ошибка в видео", kind: "inline", dataBytes: Buffer.from("e") },
+  { text: "📱 Наши проекты", kind: "inline", dataBytes: Buffer.from("p") },
+  { text: "📺 TV Cast", kind: "inline", dataBytes: Buffer.from("c") },
+  { text: "ℹ️ Подробнее", kind: "inline", dataBytes: Buffer.from("i") },
+  { text: "👌 Рекомендации", kind: "inline", dataBytes: Buffer.from("rec") },
+  { text: "🕔 История", kind: "inline", dataBytes: Buffer.from("h") },
+  { text: "🔍 Поиск", kind: "inline", dataBytes: Buffer.from("search") },
+  { text: "🔼 Свернуть меню", kind: "inline", dataBytes: Buffer.from("collapse") },
 ];
 
 /** Live Findvid VIP voiceover list after clicking Озвучка (screenshot 2). */
 const voiceoverList: ButtonLike[] = [
-  { text: "✔️ Back Board Cinema", kind: "inline", data: "v1" },
-  { text: "✔️ Back Board Cinema | Студийная Банда", kind: "inline", data: "v2" },
-  { text: "✔️ Дублированный", kind: "inline", data: "v3" },
-  { text: "✔️ AlexFilm", kind: "inline", data: "v4" },
-  { text: "✔️ Перевод", kind: "inline", data: "v5" },
-  { text: "✔️ Синема УС", kind: "inline", data: "v6" },
-  { text: "✔️ Одноголосый", kind: "inline", data: "v7" },
-  { text: "✔️ Малиновский Сергей | Vaxywod", kind: "inline", data: "v8" },
-  { text: "✔️ iTunes", kind: "inline", data: "v9" },
-  { text: "✔️ Хихикающий доктор | Xixidok", kind: "inline", data: "v10" },
-  { text: "✔️ [EN] Original", kind: "inline", data: "v11" },
-  { text: "🔙 Назад", kind: "inline", data: "back" },
+  { text: "✔️ Back Board Cinema", kind: "inline", dataBytes: Buffer.from("v1") },
+  { text: "✔️ Back Board Cinema | Студийная Банда", kind: "inline", dataBytes: Buffer.from("v2") },
+  { text: "✔️ Дублированный", kind: "inline", dataBytes: Buffer.from("v3") },
+  { text: "✔️ AlexFilm", kind: "inline", dataBytes: Buffer.from("v4") },
+  { text: "✔️ Перевод", kind: "inline", dataBytes: Buffer.from("v5") },
+  { text: "✔️ Синема УС", kind: "inline", dataBytes: Buffer.from("v6") },
+  { text: "✔️ Одноголосый", kind: "inline", dataBytes: Buffer.from("v7") },
+  { text: "✔️ Малиновский Сергей | Vaxywod", kind: "inline", dataBytes: Buffer.from("v8") },
+  { text: "✔️ iTunes", kind: "inline", dataBytes: Buffer.from("v9") },
+  { text: "✔️ Хихикающий доктор | Xixidok", kind: "inline", dataBytes: Buffer.from("v10") },
+  { text: "✔️ [EN] Original", kind: "inline", dataBytes: Buffer.from("v11") },
+  { text: "🔙 Назад", kind: "inline", dataBytes: Buffer.from("back") },
 ];
 
 describe("button selection", () => {
@@ -131,10 +131,10 @@ describe("button selection", () => {
   ];
 
   const qualities: ButtonLike[] = [
-    { text: "720p", kind: "inline", data: "q720" },
-    { text: "480p", kind: "inline", data: "q480" },
-    { text: "1080p", kind: "inline", data: "q1080" },
-    { text: "Вернуться", kind: "inline", data: "back" },
+    { text: "720p", kind: "inline", dataBytes: Buffer.from("q720") },
+    { text: "480p", kind: "inline", dataBytes: Buffer.from("q480") },
+    { text: "1080p", kind: "inline", dataBytes: Buffer.from("q1080") },
+    { text: "Вернуться", kind: "inline", dataBytes: Buffer.from("back") },
   ];
 
   it("picks Дублированный by default", () => {
@@ -170,6 +170,7 @@ describe("button selection", () => {
     });
     expect(buttons.map((b) => b.text)).toEqual(["1080p", "720p", "Вернуться"]);
     expect(buttons[0].kind).toBe("inline");
+    expect(buttons[0].dataBytes?.equals(Buffer.from("x"))).toBe(true);
   });
 });
 
@@ -203,17 +204,17 @@ describe("chrome menu vs voiceover/quality lists", () => {
   });
 
   it("keeps Back Board Cinema as a voiceover (not nav «back»)", () => {
-    expect(isChoiceButton({ text: "✔️ Back Board Cinema", kind: "inline", data: "x" })).toBe(
+    expect(isChoiceButton({ text: "✔️ Back Board Cinema", kind: "inline", dataBytes: Buffer.from("x") })).toBe(
       true,
     );
-    expect(isChoiceButton({ text: "🔙 Назад", kind: "inline", data: "b" })).toBe(false);
+    expect(isChoiceButton({ text: "🔙 Назад", kind: "inline", dataBytes: Buffer.from("b") })).toBe(false);
   });
 
   it("does not treat Инструкция / Видео-гайд as qualities", () => {
     const junk: ButtonLike[] = [
-      { text: "Инструкция", kind: "inline", data: "i" },
-      { text: "Видео-гайд", kind: "inline", data: "g" },
-      { text: "Поддержка", kind: "inline", data: "s" },
+      { text: "Инструкция", kind: "inline", dataBytes: Buffer.from("i") },
+      { text: "Видео-гайд", kind: "inline", dataBytes: Buffer.from("g") },
+      { text: "Поддержка", kind: "inline", dataBytes: Buffer.from("s") },
     ];
     expect(junk.every((b) => !isChoiceButton(b))).toBe(true);
     expect(looksLikeQualityButtons(junk)).toBe(false);
@@ -299,10 +300,10 @@ describe("formatKeyboardDebug", () => {
   it("dumps button texts with kind and data flags", () => {
     expect(
       formatKeyboardDebug(
-        [{ text: "🎶 Озвучка", kind: "inline", data: "x" }],
+        [{ text: "🎶 Озвучка", kind: "inline", dataBytes: Buffer.from("x") }],
         { messageId: 9 },
       ),
-    ).toMatch(/msg#9.*Озвучка.*data=yes/);
+    ).toMatch(/msg#9.*Озвучка.*data=1b/);
   });
 });
 

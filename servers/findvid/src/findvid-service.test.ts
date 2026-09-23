@@ -40,26 +40,26 @@ function msg(partial: Partial<ChatMessageSnapshot> & { id: number }): ChatMessag
 }
 
 const chromeButtons: ButtonLike[] = [
-  { text: "🎶 Озвучка", kind: "inline", data: "vo" },
-  { text: "🔮 Качество", kind: "inline", data: "q" },
-  { text: "🔔 Уведомлять", kind: "inline", data: "n" },
-  { text: "⭐ В избранное", kind: "inline", data: "f" },
-  { text: "🔍 Поиск", kind: "inline", data: "search" },
-  { text: "🔼 Свернуть меню", kind: "inline", data: "collapse" },
+  { text: "🎶 Озвучка", kind: "inline", dataBytes: Buffer.from("vo") },
+  { text: "🔮 Качество", kind: "inline", dataBytes: Buffer.from("q") },
+  { text: "🔔 Уведомлять", kind: "inline", dataBytes: Buffer.from("n") },
+  { text: "⭐ В избранное", kind: "inline", dataBytes: Buffer.from("f") },
+  { text: "🔍 Поиск", kind: "inline", dataBytes: Buffer.from("search") },
+  { text: "🔼 Свернуть меню", kind: "inline", dataBytes: Buffer.from("collapse") },
 ];
 
 const voiceoverButtons: ButtonLike[] = [
-  { text: "✔️ Back Board Cinema", kind: "inline", data: "bbc" },
-  { text: "✔️ Дублированный", kind: "inline", data: "dub" },
-  { text: "✔️ AlexFilm", kind: "inline", data: "af" },
-  { text: "✔️ [EN] Original", kind: "inline", data: "en" },
-  { text: "🔙 Назад", kind: "inline", data: "back" },
+  { text: "✔️ Back Board Cinema", kind: "inline", dataBytes: Buffer.from("bbc") },
+  { text: "✔️ Дублированный", kind: "inline", dataBytes: Buffer.from("dub") },
+  { text: "✔️ AlexFilm", kind: "inline", dataBytes: Buffer.from("af") },
+  { text: "✔️ [EN] Original", kind: "inline", dataBytes: Buffer.from("en") },
+  { text: "🔙 Назад", kind: "inline", dataBytes: Buffer.from("back") },
 ];
 
 const qualityButtons: ButtonLike[] = [
-  { text: "720p", kind: "inline", data: "720" },
-  { text: "1080p", kind: "inline", data: "1080" },
-  { text: "🔙 Назад", kind: "inline", data: "back" },
+  { text: "720p", kind: "inline", dataBytes: Buffer.from("720") },
+  { text: "1080p", kind: "inline", dataBytes: Buffer.from("1080") },
+  { text: "🔙 Назад", kind: "inline", dataBytes: Buffer.from("back") },
 ];
 
 class FakeTelegram implements TelegramPort {
@@ -198,8 +198,8 @@ describe("FindvidService flow", () => {
       id: 11,
       text: "Выберите качество",
       buttons: [
-        { text: "720p", kind: "inline", data: "720" },
-        { text: "1080p", kind: "inline", data: "1080" },
+        { text: "720p", kind: "inline", dataBytes: Buffer.from("720") },
+        { text: "1080p", kind: "inline", dataBytes: Buffer.from("1080") },
       ],
     });
     const videoMsg = msg({
@@ -270,7 +270,7 @@ describe("FindvidService flow", () => {
     const voiceovers = await service.listVoiceovers();
 
     expect(telegram.clicks.map((c) => c.text)).toEqual(["🎶 Озвучка"]);
-    expect(telegram.clicks[0]?.data).toBe("vo");
+    expect(telegram.clicks[0]?.dataBytes?.equals(Buffer.from("vo"))).toBe(true);
     expect(telegram.clicks[0]?.messageId).toBe(5);
     expect(telegram.textSends).toEqual([]);
     expect(voiceovers.voiceovers.map((v) => v.text)).toEqual([
@@ -417,7 +417,7 @@ describe("FindvidService flow", () => {
     expect(telegram.textSends.some((t) => /Результат поиска/i.test(t))).toBe(true);
     expect(telegram.clicks.some((c) => /озвучк/i.test(c.text))).toBe(true);
     const ozv = telegram.clicks.find((c) => /озвучк/i.test(c.text));
-    expect(ozv?.data).toBeTruthy();
+    expect(ozv?.dataBytes).toBeTruthy();
     expect(ozv?.messageId).toBe(41);
     expect(telegram.textSends.every((t) => !/озвучк/i.test(t))).toBe(true);
     expect(voiceovers.voiceovers.map((v) => v.text)).toEqual([
