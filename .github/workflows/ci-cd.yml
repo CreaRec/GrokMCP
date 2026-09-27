@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   APPLE_CALENDAR_IMAGE: ghcr.io/crearec/grok-mcp-apple-calendar
   SYNOLOGY_IMAGE: ghcr.io/crearec/grok-mcp-synology
