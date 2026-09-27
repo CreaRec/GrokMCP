@@ -186,34 +186,6 @@ services:
       - default
       - lgtm
 
-  simplefin:
-    image: ${SIMPLEFIN_IMAGE:-ghcr.io/crearec/grok-mcp-simplefin}:main
-    container_name: grok-mcp-simplefin
-    restart: unless-stopped
-    ports:
-      - "8798:8798"
-    env_file:
-      - .env
-    environment:
-      - PORT=8798
-      - HOST=0.0.0.0
-      - SIMPLEFIN_ACCESS_URL=${SIMPLEFIN_ACCESS_URL}
-      - USER_TIMEZONE=${USER_TIMEZONE:-America/Chicago}
-      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://alloy:4318}
-      - OTEL_SERVICE_NAME=${SIMPLEFIN_OTEL_SERVICE_NAME:-simplefin}
-      - OTEL_SERVICE_NAMESPACE=${OTEL_SERVICE_NAMESPACE:-mcp}
-      - DEPLOY_ENV=${DEPLOY_ENV:-production}
-      - OTEL_SERVICE_VERSION=${SIMPLEFIN_OTEL_SERVICE_VERSION:-}
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8798/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-    networks:
-      - default
-      - lgtm
-
   findvid:
     image: ${FINDVID_IMAGE:-ghcr.io/crearec/grok-mcp-findvid}:main
     container_name: grok-mcp-findvid
