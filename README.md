@@ -8,6 +8,7 @@ A monorepo of custom MCP (Model Context Protocol) servers for Grok Bot.
 GrokMCP/
 ├── servers/
 │   ├── apple-calendar/   # Apple Calendar (iCloud CalDAV) MCP
+│   ├── grafana-mcp/      # Grafana MCP health wrapper (upstream mcp-grafana)
 │   ├── utilities/        # CreaDashboard utility bills MCP
 │   ├── print/            # Home CUPS / HP LaserJet print MCP
 │   ├── findvid/          # Findvid Telegram search → forward to downloader
@@ -39,11 +40,11 @@ iCloud CalDAV integration for listing, creating, updating, and deleting calendar
 - `calendar_update_event` — Update existing events
 - `calendar_delete_event` — Delete events
 
-### Grafana MCP
+### [Grafana MCP](./servers/grafana-mcp/)
 
 Official [Grafana MCP server](https://grafana.com/docs/grafana/latest/developer-resources/mcp/) for querying dashboards, Prometheus metrics, Loki logs, and more.
 
-Uses the upstream Docker image `grafana/mcp-grafana` (no custom code in this repo). See **[docs/deploy.md](./docs/deploy.md)** for setup.
+Image `ghcr.io/crearec/grok-mcp-grafana` wraps upstream `grafana/mcp-grafana:1.1.0` to add sibling `GET /health` on port **8793**. See **[docs/deploy.md](./docs/deploy.md)** for setup.
 
 ### [Utilities](./servers/utilities/)
 
