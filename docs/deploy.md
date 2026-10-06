@@ -5,7 +5,7 @@ Production runs as a Docker Compose stack. Images come from GitHub Container Reg
 | Image | Service |
 |-------|---------|
 | `ghcr.io/crearec/grok-mcp-apple-calendar` | `apple-calendar` |
-| `grafana/mcp-grafana` (Docker Hub) | `grafana-mcp` |
+| `ghcr.io/crearec/grok-mcp-grafana` (wraps `grafana/mcp-grafana:1.1.0`) | `grafana-mcp` |
 | `ghcr.io/crearec/grok-mcp-utilities` | `utilities` |
 | `ghcr.io/crearec/grok-mcp-print` | `print` |
 | `ghcr.io/crearec/grok-mcp-findvid` | `findvid` |
@@ -21,8 +21,9 @@ Deploy directory: `/home/crearec/grok-mcp`
    - `servers/apple-calendar/**` → push `grok-mcp-apple-calendar` (`:main` + `:sha-<short>`)
    - `servers/utilities/**` → push `grok-mcp-utilities` (`:main` + `:sha-<short>`)
    - `servers/print/**` → push `grok-mcp-print` (`:main` + `:sha-<short>`)
-   - `servers/findvid/**` → push `grok-mcp-findvid` (`:main` + `:sha-<short>`)
-   - `docker-compose.yml` alone → redeploy without rebuilding images
+  - `servers/findvid/**` → push `grok-mcp-findvid` (`:main` + `:sha-<short>`)
+  - `servers/grafana-mcp/**` → push `grok-mcp-grafana` (`:main` + `:sha-<short>`)
+  - `docker-compose.yml` alone → redeploy without rebuilding images
 4. Actions copies `docker-compose.yml` to the server, then runs `docker compose pull && docker compose up -d`. Compose pins every grok-mcp service to the floating `:main` tag (no `*_IMAGE_TAG` / SHA pins). Pull refreshes digests for all services; a utilities-only (or calendar-only) publish cannot roll another service back to a stale `sha-*` left in `.env`.
 5. After a successful image publish, `ghcr_cleanup` keeps the **10** newest `sha-*` tags per package, always preserves `:main`, and deletes untagged/orphaned manifests.
 
@@ -64,7 +65,7 @@ Do **not** add `IMAGE_TAG` / `*_IMAGE_TAG` lines. Images are `ghcr.io/crearec/gr
 
 #### Grafana MCP
 
-The `grafana-mcp` service uses the official [Grafana MCP image](https://grafana.com/docs/grafana/latest/developer-resources/mcp/) from Docker Hub. It connects to your existing CreaGrafana instance on the `lgtm` Docker network.
+The `grafana-mcp` service wraps the official [Grafana MCP image](https://grafana.com/docs/grafana/latest/developer-resources/mcp/) (`grafana/mcp-grafana:1.1.0`) so host port **8793** exposes the same `GET /health` JSON as the other grok-mcp services (`{"status":"ok","service":"grafana-mcp",...}`). Upstream still speaks streamable HTTP on `/mcp`. It connects to your existing CreaGrafana instance on the `lgtm` Docker network.
 
 Add these variables to `.env`:
 
@@ -75,6 +76,15 @@ GRAFANA_URL=http://grafana:3000
 # Service account token (create in Grafana: Configuration → Service accounts)
 # Viewer role is sufficient for read-only queries
 GRAFANA_SERVICE_ACCOUNT_TOKEN=glsa_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# Optional registry path override only (tag is always :main in compose)
+# GRAFANA_IMAGE=ghcr.io/crearec/grok-mcp-grafana
+```
+
+Health check:
+
+```sh
+curl -sS http://127.0.0.1:8793/health
 ```
 
 **Optional caller authentication:** `MCP_GRAFANA_SERVER_TOKEN` can require callers to pass a Bearer token. If you want this, add `MCP_GRAFANA_SERVER_TOKEN=your-caller-auth-token` to `.env`. Do **not** add it to `docker-compose.yml`—environment entries with empty values (e.g., `${MCP_GRAFANA_SERVER_TOKEN:-}`) cause mcp-grafana to reject all requests. Omit it from compose entirely and only set it in `.env` when needed.
@@ -279,7 +289,7 @@ The `grafana-mcp` container listens on port 8793 (mapped from internal 8000) wit
 
 - `https://crearec.app/mcp/grafana` → `http://127.0.0.1:8793/mcp`
 
-**Why `--allowed-hosts "*"`:** mcp-grafana 1.1.0 includes DNS-rebinding protection that defaults `--allowed-hosts` to the loopback of `--address` (e.g., `localhost:8000` / `127.0.0.1:8000`). This blocks requests arriving with `Host: crearec.app` (public hostname) or `Host: 127.0.0.1:8793` (mapped port). Since nginx on the same host is a trusted reverse proxy, we allow all hosts with `*`. The apple-calendar service uses the same pattern.
+**Why `--allowed-hosts "*"`:** mcp-grafana 1.1.0 includes DNS-rebinding protection that defaults `--allowed-hosts` to the loopback of `--address`. The wrapper runs upstream on `127.0.0.1:8001` and publishes `:8000` via the health proxy, so requests arrive with `Host: crearec.app` or `Host: 127.0.0.1:8793`. Since nginx on the same host is a trusted reverse proxy, the entrypoint keeps `--allowed-hosts "*"`. The apple-calendar service uses the same pattern.
 
 Create `/etc/nginx/snippets/grok-mcp-grafana.conf` and include it from `/etc/nginx/sites-available/default` (same pattern as the calendar snippet):
 
