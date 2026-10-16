@@ -115,4 +115,63 @@ describe("telemetry", () => {
     );
     await shutdownTelemetry();
   });
+
+  it("serializes nested error.cause chains for logs", async () => {
+    const {
+      serializeErrorCauseChain,
+      formatErrorCauseChainJson,
+      startTelemetry,
+      logErrorWithCause,
+      shutdownTelemetry,
+    } = await import("./telemetry.js");
+
+    const socketErr = Object.assign(new Error("read ECONNRESET"), {
+      name: "Error",
+      code: "ECONNRESET",
+      errno: -104,
+      syscall: "read",
+    });
+    const terminated = new Error("terminated", { cause: socketErr });
+
+    const chain = serializeErrorCauseChain(terminated);
+    expect(chain).toHaveLength(2);
+    expect(chain[0]).toMatchObject({ message: "terminated" });
+    expect(chain[1]).toMatchObject({
+      message: "read ECONNRESET",
+      code: "ECONNRESET",
+      errno: -104,
+      syscall: "read",
+    });
+
+    const parsed = JSON.parse(formatErrorCauseChainJson(terminated)) as Array<{
+      message: string;
+      code?: string;
+    }>;
+    expect(parsed[1]?.code).toBe("ECONNRESET");
+
+    startTelemetry();
+    logErrorWithCause("index run failed", terminated, { reason: "scheduled" });
+    expect(otel.logger.emit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: "index run failed",
+        attributes: expect.objectContaining({
+          error: "terminated",
+          error_code: "ECONNRESET",
+          reason: "scheduled",
+          error_causes: expect.stringContaining("ECONNRESET"),
+        }),
+      }),
+    );
+    await shutdownTelemetry();
+  });
+
+  it("detects cause cycles without looping forever", async () => {
+    const { serializeErrorCauseChain } = await import("./telemetry.js");
+    const a = new Error("a");
+    const b = new Error("b", { cause: a });
+    (a as Error & { cause: Error }).cause = b;
+
+    const chain = serializeErrorCauseChain(a);
+    expect(chain.some((entry) => entry.message === "[cause cycle]")).toBe(true);
+  });
 });
