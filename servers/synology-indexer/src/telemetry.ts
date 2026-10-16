@@ -25,6 +25,92 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** One node in an error's `cause` chain for structured logs. */
+export interface SerializedErrorCause {
+  name?: string;
+  message: string;
+  code?: string;
+  errno?: number;
+  syscall?: string;
+  stack?: string;
+}
+
+function readErrorCode(err: Error): string | undefined {
+  const code = (err as NodeJS.ErrnoException).code;
+  return typeof code === "string" && code.trim() ? code.trim() : undefined;
+}
+
+function readErrorNumber(err: Error, key: "errno"): number | undefined {
+  const value = (err as NodeJS.ErrnoException)[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function readErrorString(err: Error, key: "syscall"): string | undefined {
+  const value = (err as NodeJS.ErrnoException)[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function serializeOneError(err: unknown): SerializedErrorCause {
+  if (err instanceof Error) {
+    const record: SerializedErrorCause = { message: err.message };
+    if (err.name && err.name !== "Error") {
+      record.name = err.name;
+    }
+    const code = readErrorCode(err);
+    if (code) {
+      record.code = code;
+    }
+    const errno = readErrorNumber(err, "errno");
+    if (errno !== undefined) {
+      record.errno = errno;
+    }
+    const syscall = readErrorString(err, "syscall");
+    if (syscall) {
+      record.syscall = syscall;
+    }
+    if (err.stack) {
+      record.stack = err.stack;
+    }
+    return record;
+  }
+  return { message: String(err) };
+}
+
+/**
+ * Walk `error.cause` recursively (depth-capped) for log attributes.
+ * Exported for unit tests.
+ */
+export function serializeErrorCauseChain(
+  err: unknown,
+  maxDepth = 8,
+): SerializedErrorCause[] {
+  const chain: SerializedErrorCause[] = [];
+  const seen = new Set<unknown>();
+  let current: unknown = err;
+
+  for (let depth = 0; depth < maxDepth && current !== undefined && current !== null; depth++) {
+    if (typeof current === "object" && seen.has(current)) {
+      chain.push({ message: "[cause cycle]" });
+      break;
+    }
+    if (typeof current === "object") {
+      seen.add(current);
+    }
+
+    chain.push(serializeOneError(current));
+
+    const next =
+      current instanceof Error && current.cause !== undefined ? current.cause : undefined;
+    current = next;
+  }
+
+  return chain;
+}
+
+export function formatErrorCauseChainJson(err: unknown): string {
+  return JSON.stringify(serializeErrorCauseChain(err));
+}
+
 export function startTelemetry(): TelemetryHandle | null {
   if (telemetry) return telemetry;
 
@@ -114,8 +200,21 @@ export function logErrorWithCause(
   err: unknown,
   attributes?: LogAttributes,
 ): void {
-  logError(body, {
+  const causes = serializeErrorCauseChain(err);
+  const attrs: LogAttributes = {
     ...attributes,
     error: errorMessage(err),
-  });
+  };
+  if (causes.length > 0) {
+    attrs.error_causes = formatErrorCauseChainJson(err);
+    const root = causes[0];
+    const coded = causes.find((entry) => entry.code);
+    if (coded?.code) {
+      attrs.error_code = coded.code;
+    }
+    if (root.name) {
+      attrs.error_name = root.name;
+    }
+  }
+  logError(body, attrs);
 }

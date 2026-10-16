@@ -374,6 +374,38 @@ export async function waitForOllamaHealthy(
  * Distinct from an *immediate* empty-body HTTP 404 on the POST itself (proxy routing);
  * see {@link formatPullHttpError}.
  */
+export interface OllamaPullStreamProgress {
+  bytesReceived: number;
+  lastStatus?: string;
+}
+
+function formatPullStreamFailure(
+  modelName: string,
+  detail: string,
+  progress: OllamaPullStreamProgress,
+): string {
+  const parts = [
+    `Failed to pull model ${modelName}: ${detail}`,
+    `bytes_received=${progress.bytesReceived}`,
+  ];
+  if (progress.lastStatus) {
+    parts.push(`last_status=${JSON.stringify(progress.lastStatus)}`);
+  }
+  return parts.join(" ");
+}
+
+export function wrapPullStreamReadError(
+  modelName: string,
+  readErr: unknown,
+  progress: OllamaPullStreamProgress,
+): Error {
+  const detail =
+    readErr instanceof Error ? readErr.message : String(readErr);
+  return new Error(formatPullStreamFailure(modelName, `stream read failed: ${detail}`, progress), {
+    cause: readErr,
+  });
+}
+
 export async function consumeOllamaPullStream(
   body: ReadableStream<Uint8Array> | null,
   modelName: string,
@@ -386,6 +418,7 @@ export async function consumeOllamaPullStream(
   const decoder = new TextDecoder();
   let buffer = "";
   let sawSuccess = false;
+  const progress: OllamaPullStreamProgress = { bytesReceived: 0 };
 
   const handleLine = (line: string): void => {
     const trimmed = line.trim();
@@ -399,24 +432,44 @@ export async function consumeOllamaPullStream(
       throw new Error(`Failed to pull model ${modelName}: invalid pull stream JSON`);
     }
     if (event.error) {
-      throw new Error(`Failed to pull model ${modelName}: ${event.error}`);
+      throw new Error(
+        formatPullStreamFailure(modelName, String(event.error), progress),
+      );
+    }
+    if (event.status) {
+      progress.lastStatus = event.status;
     }
     if (event.status === "success") {
       sawSuccess = true;
     }
   };
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
+  try {
+    while (true) {
+      let done: boolean;
+      let value: Uint8Array | undefined;
+      try {
+        const chunk = await reader.read();
+        done = chunk.done;
+        value = chunk.value;
+      } catch (readErr) {
+        throw wrapPullStreamReadError(modelName, readErr, progress);
+      }
+      if (done) {
+        break;
+      }
+      if (value) {
+        progress.bytesReceived += value.byteLength;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        handleLine(line);
+      }
     }
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
-    for (const line of lines) {
-      handleLine(line);
-    }
+  } finally {
+    reader.releaseLock();
   }
 
   buffer += decoder.decode();
@@ -425,7 +478,9 @@ export async function consumeOllamaPullStream(
   }
 
   if (!sawSuccess) {
-    throw new Error(`Failed to pull model ${modelName}: pull finished without success`);
+    throw new Error(
+      formatPullStreamFailure(modelName, "pull finished without success", progress),
+    );
   }
 }
 
@@ -528,6 +583,8 @@ export interface PullModelOptions {
   retryDelayMs?: number;
   /** Max POST /api/pull attempts including the first (default 2). */
   maxAttempts?: number;
+  /** RunPod pod id for error logs (never log full Ollama proxy URLs). */
+  podId?: string;
 }
 
 async function postOllamaPull(
@@ -614,7 +671,17 @@ export async function pullModelIfMissing(
       continue;
     }
 
-    await consumeOllamaPullStream(pullResponse.body, modelName);
+    try {
+      await consumeOllamaPullStream(pullResponse.body, modelName);
+    } catch (err) {
+      logErrorWithCause("runpod ollama pull stream failed", err, {
+        model: modelName,
+        phase: "ollama_pull_stream",
+        attempt,
+        ...(options.podId ? { pod_id: options.podId } : {}),
+      });
+      throw err;
+    }
     logInfo("runpod model pulled", { model: modelName, attempt });
     return;
   }
@@ -659,8 +726,8 @@ export async function withGpuPod<T>(
 
     await waitForOllamaHealthy(ollamaUrl, deployConfig.ollamaHealthyTimeoutMs);
 
-    await pullModelIfMissing(ollamaUrl, visionModel);
-    await pullModelIfMissing(ollamaUrl, embedModel);
+    await pullModelIfMissing(ollamaUrl, visionModel, { podId: podRef.podId });
+    await pullModelIfMissing(ollamaUrl, embedModel, { podId: podRef.podId });
 
     return await fn(ollamaUrl);
   } finally {

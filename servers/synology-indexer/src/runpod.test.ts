@@ -15,6 +15,7 @@ import {
   waitForOllamaHealthy,
   pullModelIfMissing,
   consumeOllamaPullStream,
+  wrapPullStreamReadError,
   fetchOllamaVersion,
   formatPullHttpError,
   isRetryablePullHttpStatus,
@@ -25,7 +26,7 @@ import {
 } from "./runpod.js";
 import { DEFAULT_VISION_MODEL } from "./config.js";
 import type { LogAttributes } from "./telemetry.js";
-import { logInfo, logError, logWarn } from "./telemetry.js";
+import { logInfo, logError, logWarn, logErrorWithCause } from "./telemetry.js";
 
 vi.mock("./telemetry.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./telemetry.js")>();
@@ -882,6 +883,52 @@ describe("pullModelIfMissing", () => {
     ).rejects.toThrow(/Failed to pull model qwen2\.5-vl:7b: pull model manifest/);
   });
 
+  it("logs pull stream failures with model, phase, and pod id", async () => {
+    vi.mocked(logErrorWithCause).mockClear();
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async (url) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/api/tags")) {
+        return jsonResponse({ models: [] });
+      }
+      if (urlStr.includes("/api/version")) {
+        return jsonResponse({ version: "0.34.2" });
+      }
+      if (urlStr.includes("/api/pull")) {
+        const stream = new ReadableStream<Uint8Array>({
+          pull() {
+            throw new Error("terminated", {
+              cause: Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }),
+            });
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: { "Content-Type": "application/x-ndjson" },
+        });
+      }
+      return jsonResponse({});
+    });
+
+    await expect(
+      pullModelIfMissing("https://example-pod-11434.proxy.runpod.net", "mxbai-embed-large", {
+        podId: "pod-abc123",
+        maxAttempts: 1,
+      }),
+    ).rejects.toThrow(/stream read failed: terminated/);
+
+    expect(vi.mocked(logErrorWithCause)).toHaveBeenCalledWith(
+      "runpod ollama pull stream failed",
+      expect.any(Error),
+      expect.objectContaining({
+        model: "mxbai-embed-large",
+        phase: "ollama_pull_stream",
+        pod_id: "pod-abc123",
+        attempt: 1,
+      }),
+    );
+  });
+
   it("retries once on immediate empty-body HTTP 404 then succeeds", async () => {
     const fetchMock = vi.mocked(fetch);
     let pullAttempts = 0;
@@ -975,8 +1022,49 @@ describe("consumeOllamaPullStream", () => {
   it("rejects when success never arrives", async () => {
     const body = new Response('{"status":"pulling manifest"}\n').body;
     await expect(consumeOllamaPullStream(body, DEFAULT_VISION_MODEL)).rejects.toThrow(
-      /pull finished without success/,
+      /pull finished without success.*last_status="pulling manifest"/,
     );
+  });
+
+  it("wrapPullStreamReadError preserves socket cause details", () => {
+    const socketErr = Object.assign(new Error("read ECONNRESET"), {
+      code: "ECONNRESET",
+      errno: -104,
+      syscall: "read",
+    });
+    const wrapped = wrapPullStreamReadError("mxbai-embed-large", new Error("terminated", {
+      cause: socketErr,
+    }), {
+      bytesReceived: 4096,
+      lastStatus: "pulling 12ef34",
+    });
+
+    expect(wrapped.message).toContain("mxbai-embed-large");
+    expect(wrapped.message).toContain("bytes_received=4096");
+    expect(wrapped.message).toContain('last_status="pulling 12ef34"');
+    expect(wrapped.cause).toBeInstanceOf(Error);
+    expect((wrapped.cause as Error).message).toBe("terminated");
+    expect(((wrapped.cause as Error).cause as NodeJS.ErrnoException).code).toBe("ECONNRESET");
+  });
+
+  it("rejects when the readable stream errors mid-pull", async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"status":"pulling manifest"}\n'));
+      },
+      pull() {
+        const socketErr = Object.assign(new Error("read ECONNRESET"), {
+          code: "ECONNRESET",
+          syscall: "read",
+        });
+        throw new Error("terminated", { cause: socketErr });
+      },
+    });
+
+    await expect(consumeOllamaPullStream(stream, "mxbai-embed-large")).rejects.toMatchObject({
+      message: expect.stringContaining("stream read failed: terminated"),
+      cause: expect.objectContaining({ message: "terminated" }),
+    });
   });
 });
 
