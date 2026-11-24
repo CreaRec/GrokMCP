@@ -12,6 +12,7 @@ GrokMCP/
 │   ├── utilities/        # CreaDashboard utility bills MCP
 │   ├── print/            # Home CUPS / HP LaserJet print MCP
 │   ├── findvid/          # Findvid Telegram search → forward to downloader
+│   ├── telegram/         # Owner Telegram archive search (tg-search API)
 │   ├── synology/         # Synology semantic search MCP
 │   └── synology-indexer/ # Synology indexer daemon (not MCP)
 ├── docker-compose.yml    # Production deployment
@@ -76,6 +77,16 @@ Telegram Findvid VIP search UX for Nikita’s agents: inline search → optional
 - `confirm_and_forward` — pick defaults/overrides, wait for video, forward to downloader bot
 
 **Env:** reuse downloader `settings.json` (`TELEGRAM_SETTINGS_PATH` + `TELEGRAM_USER_ID`) or `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` / `TELEGRAM_SESSION`; `FINDVID_BOT_USERNAME`, `DOWNLOADER_BOT_USERNAME`; port **8800**. VIP/rate-limits/UI changes on Findvid can break automation.
+
+
+### [Telegram search](./servers/telegram/)
+
+Search-only access to the owner's Telegram archive via the local tg-search API. No `ask` / LLM.
+
+**Tools:**
+- `telegram_search` — hybrid search (query, optional chat filter, date range, limit) returning snippets and Telegram links
+
+**Env:** `TG_SEARCH_API_URL` (default `http://100.118.169.52:8787`), `TG_SEARCH_API_TOKEN`; port **8798**
 
 ## Adding a New Server
 

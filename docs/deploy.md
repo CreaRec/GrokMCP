@@ -9,6 +9,7 @@ Production runs as a Docker Compose stack. Images come from GitHub Container Reg
 | `ghcr.io/crearec/grok-mcp-utilities` | `utilities` |
 | `ghcr.io/crearec/grok-mcp-print` | `print` |
 | `ghcr.io/crearec/grok-mcp-findvid` | `findvid` |
+| `ghcr.io/crearec/grok-mcp-telegram` | `telegram` |
 | `pgvector/pgvector:0.8.6-pg16` (Docker Hub) | `synology-db` |
 
 Deploy directory: `/home/crearec/grok-mcp`
@@ -22,6 +23,7 @@ Deploy directory: `/home/crearec/grok-mcp`
    - `servers/utilities/**` → push `grok-mcp-utilities` (`:main` + `:sha-<short>`)
    - `servers/print/**` → push `grok-mcp-print` (`:main` + `:sha-<short>`)
   - `servers/findvid/**` → push `grok-mcp-findvid` (`:main` + `:sha-<short>`)
+  - `servers/telegram/**` → push `grok-mcp-telegram` (`:main` + `:sha-<short>`)
   - `servers/grafana-mcp/**` → push `grok-mcp-grafana` (`:main` + `:sha-<short>`)
   - `docker-compose.yml` alone → redeploy without rebuilding images
 4. Actions copies `docker-compose.yml` to the server, then runs `docker compose pull && docker compose up -d`. Compose pins every grok-mcp service to the floating `:main` tag (no `*_IMAGE_TAG` / SHA pins). Pull refreshes digests for all services; a utilities-only (or calendar-only) publish cannot roll another service back to a stale `sha-*` left in `.env`.
@@ -254,6 +256,9 @@ Add the MCP servers with URLs:
     },
     "findvid": {
       "url": "http://<DEPLOY_HOST>:8800/mcp"
+    },
+    "telegram": {
+      "url": "http://<DEPLOY_HOST>:8798/mcp"
     }
   }
 }
@@ -278,6 +283,9 @@ Or behind an nginx reverse proxy:
     },
     "findvid": {
       "url": "https://crearec.app/mcp/findvid"
+    },
+    "telegram": {
+      "url": "https://crearec.app/mcp/telegram"
     }
   }
 }
@@ -424,6 +432,55 @@ After merge, on the Debian host:
 1. Point `FINDVID_SETTINGS_HOST_DIR` at the real downloader `config/` directory (or set API/session env vars).
 2. Add the nginx snippet above and reload nginx.
 3. Let CI deploy the new `findvid` service, or run `docker compose pull && docker compose up -d findvid`.
+
+
+#### Telegram search MCP (CRE-32)
+
+The `telegram` service exposes `telegram_search` over the local tg-search API (`http://100.118.169.52:8787`, bearer token). Search-only: no `ask` / LLM. GrokMCP containers on this host can already reach that Tailscale bind.
+
+The bearer token must not be committed. Preferred location on the server is `/home/grok/tg-search/mcp-telegram.env` (readable by the `crearec` deploy user via ACL). Compose loads it as a second `env_file`. You may also set `TG_SEARCH_API_TOKEN` in `/home/crearec/grok-mcp/.env`.
+
+The container exposes port **8798**. Health check:
+
+```sh
+curl -sS http://127.0.0.1:8798/health
+```
+
+**Tool:** `telegram_search` (query, optional `chat_ids`, `from`, `to`, `limit`).
+
+#### Reverse proxy note (Telegram MCP)
+
+The `telegram` container listens on port **8798** with endpoint path `/mcp`. Configure nginx to forward:
+
+- `https://crearec.app/mcp/telegram` → `http://127.0.0.1:8798/mcp`
+
+Create `/etc/nginx/snippets/grok-mcp-telegram.conf` and include it from `/etc/nginx/sites-available/default`:
+
+```nginx
+# /etc/nginx/snippets/grok-mcp-telegram.conf
+# Telegram search MCP (streamable-http transport) — Nikita agents
+
+location = /mcp/telegram/health {
+    proxy_pass http://127.0.0.1:8798/health;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+}
+
+location = /mcp/telegram/ {
+    return 301 /mcp/telegram;
+}
+
+location = /mcp/telegram {
+    proxy_pass http://127.0.0.1:8798/mcp;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+Note: as of 2026-10-20 the other GrokMCP nginx snippets are commented out in `sites-available/default`, so `https://crearec.app/mcp/*` currently 404s. Do not re-enable public MCP routes without an explicit security decision. Until then the tool is reachable on the host/Tailscale port 8798.
 
 ## Day-to-day operations
 
