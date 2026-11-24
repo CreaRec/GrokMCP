@@ -234,6 +234,38 @@ services:
       - default
       - lgtm
 
+  telegram:
+    image: ${TELEGRAM_IMAGE:-ghcr.io/crearec/grok-mcp-telegram}:main
+    container_name: grok-mcp-telegram
+    restart: unless-stopped
+    ports:
+      - "8798:8798"
+    env_file:
+      - .env
+      # Token-only file readable by the deploy user (crearec) via ACL; never commit.
+      - path: /home/grok/tg-search/mcp-telegram.env
+        required: false
+    environment:
+      - PORT=8798
+      - HOST=0.0.0.0
+      - TG_SEARCH_API_URL=${TG_SEARCH_API_URL:-http://100.118.169.52:8787}
+      # TG_SEARCH_API_TOKEN comes from env_file only (do not interpolate here).
+      - TG_SEARCH_API_TIMEOUT_MS=${TG_SEARCH_API_TIMEOUT_MS:-30000}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://alloy:4318}
+      - OTEL_SERVICE_NAME=${TELEGRAM_OTEL_SERVICE_NAME:-telegram}
+      - OTEL_SERVICE_NAMESPACE=${OTEL_SERVICE_NAMESPACE:-mcp}
+      - DEPLOY_ENV=${DEPLOY_ENV:-production}
+      - OTEL_SERVICE_VERSION=${TELEGRAM_OTEL_SERVICE_VERSION:-}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8798/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - default
+      - lgtm
+
   # Home MCP for Nikita’s agents only — do not auto-wire for Sergey/Pizduk.
   # Host networking: debian-server cupsd listens only on 127.0.0.1:631, so bridge
   # networks cannot reach CUPS. host mode lets lp/lpstat use localhost CUPS; MCP
