@@ -824,6 +824,7 @@ jobs:
           FINDVID_CHANGED: ${{ needs.changes.outputs.findvid }}
           TELEGRAM_CHANGED: ${{ needs.changes.outputs.telegram }}
           GRAFANA_CHANGED: ${{ needs.changes.outputs.grafana }}
+          COMPOSE_CHANGED: ${{ needs.changes.outputs.compose }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
         run: |
@@ -848,10 +849,26 @@ jobs:
             exit 1
           fi
 
-          # Always pull floating :main for every service (no SHA pins / .env IMAGE_TAG).
-          # A utilities-only publish updates utilities:main; other services stay on their
-          # current :main digests and cannot roll back to a stale sha-* from .env.
-          docker compose pull
+          # Always pull floating :main for MCP app images from GHCR (no SHA pins).
+          # Skip Docker Hub third-party images (synology-db/pgvector) unless synology*
+          # or compose changed — Hub TLS flakes otherwise block unrelated deploys.
+          PULL_SERVICES=(apple-calendar grafana-mcp synology-mcp synology-indexer utilities findvid telegram print)
+          if [ '${SYNOLOGY_CHANGED}' = 'true' ] || [ '${SYNOLOGY_INDEXER_CHANGED}' = 'true' ] || [ '${COMPOSE_CHANGED}' = 'true' ]; then
+            PULL_SERVICES+=(synology-db)
+          fi
+
+          attempt=1
+          max_attempts=3
+          until docker compose pull "\${PULL_SERVICES[@]}"; do
+            if [ "\$attempt" -ge "\$max_attempts" ]; then
+              echo "ERROR: docker compose pull failed after \$max_attempts attempts." >&2
+              exit 1
+            fi
+            echo "compose pull failed (attempt \$attempt/\$max_attempts); retrying..." >&2
+            sleep \$((attempt * 10))
+            attempt=\$((attempt + 1))
+          done
+
           docker compose up -d
           # Create docling sidecar container without starting it (ephemeral lifecycle).
           docker compose --profile docling up --no-start docling-serve
